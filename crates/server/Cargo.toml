@@ -1,0 +1,21 @@
+[package]
+name = "toki-server"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "toki-server"
+path = "src/bin/main.rs"
+
+[dependencies]
+toki-proto = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = "0.1"
+tonic = { workspace = true }
+prost = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }

@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package toki.v1;
+
+// Signaling service for the Toki walkie-talkie network.
+// Audio frames travel out-of-band over UDP; this service carries
+// authentication, channel membership, and presence/PTT events.
+service Signaling {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc JoinChannel(JoinChannelRequest) returns (stream ChannelEvent);
+  rpc LeaveChannel(LeaveChannelRequest) returns (LeaveChannelResponse);
+
+  // Client streams PTT state transitions (key down / key up).
+  // Server multicasts these as ChannelEvents to other members
+  // via the JoinChannel stream.
+  rpc PushToTalk(stream PttEvent) returns (PttAck);
+}
+
+message RegisterRequest {
+  string display_name = 1;
+}
+
+message RegisterResponse {
+  string client_id = 1;
+  // Token the client must echo in the first UDP audio packet
+  // so the server can associate the UDP flow with this session.
+  bytes audio_token = 2;
+  // UDP endpoint the client should send audio to.
+  string audio_endpoint = 3;
+}
+
+message JoinChannelRequest {
+  string client_id = 1;
+  string channel = 2;
+}
+
+message LeaveChannelRequest {
+  string client_id = 1;
+  string channel = 2;
+}
+
+message LeaveChannelResponse {}
+
+message ChannelEvent {
+  oneof event {
+    MemberJoined joined = 1;
+    MemberLeft left = 2;
+    PttEvent ptt = 3;
+  }
+}
+
+message MemberJoined {
+  string client_id = 1;
+  string display_name = 2;
+}
+
+message MemberLeft {
+  string client_id = 1;
+}
+
+message PttEvent {
+  string client_id = 1;
+  string channel = 2;
+  bool pressed = 3;
+  uint64 sequence = 4;
+}
+
+message PttAck {}

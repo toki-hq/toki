@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/proto", "crates/server", "crates/client"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/coton/toki"
+
+[workspace.dependencies]
+toki-proto = { path = "crates/proto" }
+
+tokio = { version = "1.41", features = ["full"] }
+tonic = "0.12"
+prost = "0.13"
+tonic-build = "0.12"
+
+bytes = "1.8"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }

@@ -42,6 +42,10 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
 
             if let Some(client) = registry.clients.get_mut(&sender_id) {
                 client.audio_addr = Some(peer);
+                // Every UDP packet — audio or keepalive — counts as a
+                // heartbeat. The reaper task uses this to evict clients
+                // who've gone silent.
+                client.last_seen = std::time::Instant::now();
             }
 
             if version != VERSION_AUDIO_PCM {
@@ -58,8 +62,15 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
 
             let mut targets: Vec<SocketAddr> = Vec::new();
             for channel in &active_channels {
-                if let Some(members) = registry.channels.get(channel) {
-                    for id in members {
+                if let Some(ch) = registry.channels.get(channel) {
+                    // Walkie-talkie: only forward audio from the channel's
+                    // PTT holder. Anyone else's packets are dropped, even
+                    // though their token authenticated — they don't have
+                    // the lock.
+                    if ch.holder.as_deref() != Some(sender_id.as_str()) {
+                        continue;
+                    }
+                    for id in &ch.members {
                         if id == &sender_id {
                             continue;
                         }

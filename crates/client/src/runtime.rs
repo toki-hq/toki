@@ -26,7 +26,7 @@ use toki_proto::wire::{
     HEADER_LEN, MAX_AUDIO_PACKET, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
 };
 
-use crate::audio::{self, AudioHandle, PlaybackBuf, push_playback};
+use crate::audio::{self, PlaybackBuf, push_playback};
 use crate::state::{ConnState, SharedState};
 
 pub enum Cmd {
@@ -40,8 +40,14 @@ pub enum Cmd {
     PttUp,
 }
 
-/// Spawn the runtime thread and return the command channel.
-pub fn spawn(state: SharedState) -> UnboundedSender<Cmd> {
+/// Spawn the runtime thread and return the command channel. The caller
+/// has already spawned the audio thread; we just receive the mic frames
+/// and write into the playback ring as voice arrives.
+pub fn spawn(
+    state: SharedState,
+    mic_rx: UnboundedReceiver<Vec<i16>>,
+    playback: PlaybackBuf,
+) -> UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
         .name("toki-runtime".into())
@@ -56,28 +62,18 @@ pub fn spawn(state: SharedState) -> UnboundedSender<Cmd> {
                     return;
                 }
             };
-            rt.block_on(run(cmd_rx, state));
+            rt.block_on(run(cmd_rx, state, mic_rx, playback));
         })
         .expect("spawn runtime thread");
     cmd_tx
 }
 
-async fn run(mut cmd_rx: UnboundedReceiver<Cmd>, state: SharedState) {
-    // Audio I/O is started once and runs for the lifetime of the program;
-    // captured frames are routed to UDP only while a session is active and
-    // PTT is held, and incoming UDP audio is mixed into the playback ring
-    // unconditionally.
-    let AudioHandle {
-        mut mic_rx,
-        playback,
-    } = match audio::spawn() {
-        Ok(h) => h,
-        Err(e) => {
-            state.lock().unwrap().log(format!("audio init failed: {e}"));
-            return;
-        }
-    };
-
+async fn run(
+    mut cmd_rx: UnboundedReceiver<Cmd>,
+    state: SharedState,
+    mut mic_rx: UnboundedReceiver<Vec<i16>>,
+    playback: PlaybackBuf,
+) {
     let mut session: Option<Session> = None;
 
     loop {
@@ -137,22 +133,19 @@ async fn handle_cmd(
                 let mut st = state.lock().unwrap();
                 st.connection = ConnState::Disconnected;
                 st.members.clear();
-                st.speaking.clear();
+                st.holder = None;
                 st.self_id = None;
-                st.transmitting = false;
                 st.log("disconnected");
             }
         }
         Cmd::PttDown => {
             if let Some(s) = session {
-                s.set_ptt(true).await;
-                state.lock().unwrap().transmitting = true;
+                s.request_ptt(true).await;
             }
         }
         Cmd::PttUp => {
             if let Some(s) = session {
-                s.set_ptt(false).await;
-                state.lock().unwrap().transmitting = false;
+                s.request_ptt(false).await;
             }
         }
     }
@@ -226,6 +219,9 @@ impl Session {
         let mut events = events_resp.into_inner();
         let state_for_events = state.clone();
         let self_id_for_events = client_id.clone();
+        let ptt_atomic = Arc::new(AtomicBool::new(false));
+        let ptt_for_events = ptt_atomic.clone();
+        let playback_for_events = playback.clone();
         let events_task = tokio::spawn(async move {
             while let Some(evt) = events.next().await {
                 match evt {
@@ -241,18 +237,52 @@ impl Session {
                                 .members
                                 .remove(&l.client_id)
                                 .unwrap_or_else(|| l.client_id.clone());
-                            st.speaking.remove(&l.client_id);
+                            // If the leaver was holding, the server also
+                            // sends a Ptt release; clear locally as belt &
+                            // braces in case events arrive out of order.
+                            if st.holder.as_deref() == Some(l.client_id.as_str()) {
+                                st.holder = None;
+                            }
                             st.log(format!("← {name} left"));
                         }
                         Some(ChEvent::Ptt(p)) => {
+                            // Update holder state and detect transitions in one
+                            // critical section, then play beeps / flip the audio
+                            // gate outside the lock.
+                            let (acquired, released, talker_name) = {
+                                let mut st = state_for_events.lock().unwrap();
+                                let was_held = st.holder.is_some();
+                                let new_holder =
+                                    if p.pressed { Some(p.client_id.clone()) } else { None };
+                                st.holder = new_holder.clone();
+                                let acquired = !was_held && new_holder.is_some();
+                                let released = was_held && new_holder.is_none();
+                                let name = st
+                                    .members
+                                    .get(&p.client_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| p.client_id.clone());
+                                (acquired, released, name)
+                            };
+
+                            // Flip our own audio gate only when the server
+                            // confirms US as the holder — so a denied press
+                            // never causes audio to leak out.
                             if p.client_id == self_id_for_events {
-                                continue;
+                                ptt_for_events.store(p.pressed, Ordering::Relaxed);
                             }
-                            let mut st = state_for_events.lock().unwrap();
-                            if p.pressed {
-                                st.speaking.insert(p.client_id);
-                            } else {
-                                st.speaking.remove(&p.client_id);
+
+                            if acquired {
+                                let tone = audio::beep(1200.0, 100, 0.25);
+                                push_playback(&playback_for_events, &tone);
+                                state_for_events
+                                    .lock()
+                                    .unwrap()
+                                    .log(format!("🔒 {talker_name} took the channel"));
+                            } else if released {
+                                let tone = audio::beep(800.0, 100, 0.25);
+                                push_playback(&playback_for_events, &tone);
+                                state_for_events.lock().unwrap().log("🔓 channel cleared");
                             }
                         }
                         None => {}
@@ -315,7 +345,9 @@ impl Session {
             client_id,
             channel: channel.to_string(),
             audio_token,
-            ptt: Arc::new(AtomicBool::new(false)),
+            // Shared with events_task — it's the only writer. Flipped to
+            // `true` only when the server's broadcast confirms us as holder.
+            ptt: ptt_atomic,
             seq: AtomicU64::new(0),
             ptt_tx,
             udp,
@@ -324,8 +356,11 @@ impl Session {
         })
     }
 
-    async fn set_ptt(&self, pressed: bool) {
-        self.ptt.store(pressed, Ordering::Relaxed);
+    /// Request a PTT state change. The actual audio gate is not flipped
+    /// here — we wait for the server's broadcast to confirm whether the
+    /// request was granted (walkie-talkie arbitration). If denied, the
+    /// server stays silent and our atomic stays `false`.
+    async fn request_ptt(&self, pressed: bool) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let evt = PttEvent {
             client_id: self.client_id.clone(),

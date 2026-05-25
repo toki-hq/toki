@@ -1,19 +1,20 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// State shared between the GUI thread and the tokio runtime thread.
 ///
-/// The runtime writes (connection status, member list, log lines, peer
-/// transmitting state); the GUI reads each frame and renders a snapshot.
+/// The runtime writes (connection status, member list, log lines, current
+/// PTT holder); the GUI reads each frame and renders a snapshot.
 #[derive(Default)]
 pub struct ClientState {
     pub connection: ConnState,
     pub self_id: Option<String>,
     /// client_id → display_name for everyone in the current channel.
     pub members: HashMap<String, String>,
-    /// client_ids of peers currently transmitting (excludes self).
-    pub speaking: HashSet<String>,
-    pub transmitting: bool,
+    /// Walkie-talkie lock: client_id of whoever is currently transmitting on
+    /// the channel, or `None` if the channel is free. Updated only from
+    /// authoritative server broadcasts — the local press never sets this.
+    pub holder: Option<String>,
     pub log: VecDeque<String>,
 }
 

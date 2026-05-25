@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tonic::transport::Server;
 use tracing_subscriber::EnvFilter;
 
-use toki_server::{audio, signaling::SignalingSvc, state};
+use toki_server::{audio, reaper, signaling::SignalingSvc, state};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -21,6 +21,11 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| audio_bind.to_string());
 
     let registry = state::shared();
+
+    // Reaper runs forever in the background; we don't .await it in the
+    // select! below — if it panics, tracing surfaces it but the server
+    // keeps serving (just without stale-client cleanup).
+    tokio::spawn(reaper::run(registry.clone()));
 
     let audio_task = tokio::spawn(audio::run(audio_bind, registry.clone()));
 

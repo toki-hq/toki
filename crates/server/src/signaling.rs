@@ -95,6 +95,21 @@ impl Signaling for SignalingSvc {
             })),
         };
 
+        // Backfill the new joiner with the existing roster so their member
+        // list isn't empty when they connect second.
+        for id in &other_ids {
+            if let Some(existing) = registry.clients.get(id) {
+                let backfill = ChannelEvent {
+                    event: Some(channel_event::Event::Joined(toki_proto::v1::MemberJoined {
+                        client_id: existing.id.clone(),
+                        display_name: existing.display_name.clone(),
+                    })),
+                };
+                let _ = tx.send(backfill).await;
+            }
+        }
+
+        // Tell every other member about the new joiner.
         for id in other_ids {
             if let Some(other) = registry.clients.get(&id) {
                 if let Some(other_tx) = &other.events_tx {

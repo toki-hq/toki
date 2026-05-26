@@ -6,8 +6,9 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
 use futures::StreamExt;
@@ -182,12 +183,30 @@ async fn handle_cmd(
     }
 }
 
+/// How long we ignore a fresh `PttDown` after the previous `PttUp`.
+/// Stops accidental double-presses, bouncy keys, and deliberate
+/// spam from producing a join/leave storm on the server (and a
+/// "TOKI-0 took the floor / TOKI-0 cleared / TOKI-0 took the floor"
+/// log spam for every other client in the room).
+///
+/// 250 ms is below the human "rapid tap" threshold (~120 ms cycle)
+/// but well above any plausible mechanical bounce, so legitimate
+/// "quick acknowledgment" presses still work back-to-back.
+const PTT_COOLDOWN: Duration = Duration::from_millis(250);
+
 struct Session {
     client_id: String,
     audio_token: Vec<u8>,
     ptt: Arc<AtomicBool>,
     seq: AtomicU64,
     ptt_tx: mpsc::Sender<PttEvent>,
+    /// Client-side PTT-spam guard. `local_pressed` tracks whether
+    /// we've already sent a `PttDown` that hasn't been matched by a
+    /// `PttUp` yet — used to drop duplicate downs and orphan ups.
+    /// `cooldown_until` is the earliest `Instant` at which a fresh
+    /// `PttDown` is allowed; set whenever we send a `PttUp`.
+    local_pressed: AtomicBool,
+    cooldown_until: StdMutex<Option<Instant>>,
     udp: Arc<UdpSocket>,
     signaling: SignalingClient<Channel>,
     tasks: Vec<JoinHandle<()>>,
@@ -397,6 +416,8 @@ impl Session {
             ptt: ptt_atomic,
             seq: AtomicU64::new(0),
             ptt_tx,
+            local_pressed: AtomicBool::new(false),
+            cooldown_until: StdMutex::new(None),
             udp,
             signaling,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
@@ -460,7 +481,47 @@ impl Session {
     /// here — we wait for the server's broadcast to confirm whether the
     /// request was granted (walkie-talkie arbitration). If denied, the
     /// server stays silent and our atomic stays `false`.
+    ///
+    /// Spam debounce: we drop
+    ///   * duplicate `PttDown`s while already locally pressed;
+    ///   * `PttDown`s that arrive within `PTT_COOLDOWN` of the last
+    ///     `PttUp` we sent;
+    ///   * orphan `PttUp`s that don't have a matching `PttDown`.
+    ///
+    /// These cuts happen at the runtime boundary so both the global
+    /// hotkey and the on-screen button get the same protection
+    /// without each call site duplicating the logic.
     async fn request_ptt(&self, pressed: bool) {
+        if pressed {
+            // Already pressed? Quietly drop — the OS / global hotkey
+            // poller occasionally emits a redundant down on bouncy
+            // keys, and the server doesn't want to see it.
+            if self.local_pressed.load(Ordering::Relaxed) {
+                return;
+            }
+            // Inside the post-release cooldown? Drop.
+            let until = *self.cooldown_until.lock().unwrap();
+            if let Some(t) = until {
+                if Instant::now() < t {
+                    return;
+                }
+            }
+            self.local_pressed.store(true, Ordering::Relaxed);
+        } else {
+            // No matching down? Nothing to release — orphan up.
+            // Could come from a denied first press whose release
+            // still hit the wire, or from a connection-drop reset.
+            if !self
+                .local_pressed
+                .swap(false, Ordering::Relaxed)
+            {
+                return;
+            }
+            // Open the cooldown gate now so the *next* fresh press
+            // has to wait at least `PTT_COOLDOWN`.
+            *self.cooldown_until.lock().unwrap() = Some(Instant::now() + PTT_COOLDOWN);
+        }
+
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let evt = PttEvent {
             client_id: self.client_id.clone(),

@@ -34,7 +34,7 @@
 //!     arrive faster or slower than the receiver consumes them.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -106,6 +106,234 @@ impl AudioGains {
 
     fn output_atomic(&self) -> Arc<AtomicU32> {
         self.output.clone()
+    }
+}
+
+// ── Note pitch constants ──────────────────────────────────────────
+// Equal-temperament A4 = 440 Hz. Defined so multi-note preset
+// patterns read like sheet music instead of opaque float literals.
+#[allow(dead_code)] // some pitches only used by future presets
+const C5: f32 = 1046.50;
+#[allow(dead_code)]
+const G5: f32 = 1567.98;
+#[allow(dead_code)]
+const C6: f32 = 2093.00;
+
+/// One step of a [`BeepPattern`]. Three flavours:
+///
+/// * [`BeepStep::Tone`] — a pure sine at a single frequency.
+/// * [`BeepStep::Rest`] — silence for `duration_ms`. Rests let
+///   presets carve rhythm out of a sequence (CB12's release motif
+///   uses them for its "tap-tap…tap-tap" feel).
+/// * [`BeepStep::Noise`] — bandpass-filtered white noise at
+///   `center_hz` with `bandwidth_hz` of spread. Use for static /
+///   hiss textures: a tight bandwidth reads as a pitched whoosh,
+///   a wide one approaches plain broadband noise. Renderer applies
+///   the same fade-in / fade-out it uses for tones so noise bursts
+///   don't click at the seams.
+///
+/// All three carry their own `duration_ms` so a single accessor
+/// works for [`BeepPattern::total_duration_ms`].
+pub enum BeepStep {
+    Tone {
+        freq_hz: f32,
+        duration_ms: u32,
+    },
+    Rest {
+        duration_ms: u32,
+    },
+    // No preset uses Noise yet — silenced rather than gated so a new
+    // preset can pick it up just by referencing `BeepStep::Noise { … }`.
+    #[allow(dead_code)]
+    Noise {
+        center_hz: f32,
+        bandwidth_hz: f32,
+        duration_ms: u32,
+    },
+}
+
+impl BeepStep {
+    pub fn duration_ms(&self) -> u32 {
+        match self {
+            Self::Tone { duration_ms, .. }
+            | Self::Rest { duration_ms }
+            | Self::Noise { duration_ms, .. } => *duration_ms,
+        }
+    }
+}
+
+/// A sequence of tones (and optional rests) that together form a
+/// single roger beep. Single-tone presets just have one step; richer
+/// presets chain several to play a short melody. Total length is the
+/// sum of every step's duration.
+pub struct BeepPattern {
+    pub steps: &'static [BeepStep],
+}
+
+impl BeepPattern {
+    pub fn total_duration_ms(&self) -> u32 {
+        self.steps.iter().map(|s| s.duration_ms()).sum()
+    }
+}
+
+/// A named pair of [`BeepPattern`]s — one for the take-floor cue, one
+/// for the clear-floor cue. Volume stays out of the preset because
+/// it's a personal loudness preference; users should be able to trim
+/// it without disturbing the preset they've picked.
+///
+/// To add a new preset, append a `BeepPreset { id, label, … }` entry
+/// to [`BeepPreset::ALL`] with both patterns declared as `&[BeepStep]`
+/// slices. The `id` is the stable key that lands in `config.toml` —
+/// pick something short, lowercase, and stable across renames (the
+/// user-facing string is `label`).
+pub struct BeepPreset {
+    /// Stable identifier persisted in the config file.
+    pub id: &'static str,
+    /// Human-readable label shown in the Settings dropdown.
+    pub label: &'static str,
+    pub acquire: BeepPattern,
+    pub release: BeepPattern,
+}
+
+impl BeepPreset {
+    /// Master list of available presets. The first entry is treated
+    /// as the fallback for unknown/legacy IDs.
+    pub const ALL: &'static [BeepPreset] = &[
+        BeepPreset {
+            id: "default",
+            label: "Default",
+            acquire: BeepPattern {
+                steps: &[
+                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 50 },
+                    BeepStep::Tone { freq_hz: 523.25, duration_ms: 50 },
+                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 50 },
+                    BeepStep::Rest { duration_ms: 350 },
+                ],
+            },
+            release: BeepPattern {
+                steps: &[
+                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 100 },
+                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 100 },
+                    BeepStep::Rest { duration_ms: 250 },
+                ],
+            },
+        },
+        BeepPreset {
+            id: "default_with_noise",
+            label: "Default with Noise",
+            acquire: BeepPattern {
+                steps: &[
+                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 50 },
+                    BeepStep::Tone { freq_hz: 523.25, duration_ms: 50 },
+                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 50 },
+                    BeepStep::Rest { duration_ms: 350 },
+                ],
+            },
+            release: BeepPattern {
+                steps: &[
+                    BeepStep::Noise { center_hz: 2000.0, bandwidth_hz: 2000.0, duration_ms: 150 },
+                ],
+            },
+        },
+        // CB12 — five-step "Morse-ish" cues at 50 ms per step.
+        //
+        // TAKEN  : G5 · C5 · G5 · C5 · G5  (alternating major-fifth bounce)
+        // CLEARED: C6 · ·  · C6 · C6 · ·   (three-tap with a hole at slot 2 & 5)
+        //
+        // Both add up to 250 ms — about twice as long as the default
+        // tone but still well within "short feedback chirp" territory.
+        BeepPreset {
+            id: "cb12",
+            label: "CB12",
+            acquire: BeepPattern {
+                steps: &[
+                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: C5, duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: C5, duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
+                ],
+            },
+            release: BeepPattern {
+                steps: &[
+                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
+                    BeepStep::Rest { duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
+                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
+                    BeepStep::Rest { duration_ms: 120 },
+                ],
+            },
+        },
+    ];
+
+    /// Resolve a config-file ID to a preset, falling back to the
+    /// first entry (`Default`) on miss so an unknown name doesn't
+    /// brick the app's audio cues.
+    pub fn by_id(id: &str) -> &'static BeepPreset {
+        Self::ALL
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap_or(&Self::ALL[0])
+    }
+
+    /// Index into [`BeepPreset::ALL`] for a given id — needed for
+    /// the atomic-index live-lookup used by [`BeepParams`]. Unknown
+    /// ids land on index 0 (Default).
+    pub fn index_of(id: &str) -> usize {
+        Self::ALL
+            .iter()
+            .position(|p| p.id == id)
+            .unwrap_or(0)
+    }
+}
+
+/// Live "roger beep" parameters. The runtime reads from these
+/// lock-free on every take-floor / clear-floor broadcast; the UI
+/// writes when the user changes the preset or volume.
+///
+/// Tone choice is stored as an *index* into [`BeepPreset::ALL`] (a
+/// single `AtomicUsize` load), not as the Hz/duration values
+/// themselves — multi-step presets like CB12 have several notes per
+/// pattern and we'd otherwise need atomic plumbing for an unbounded
+/// sequence. The static table is `'static` data, so resolving the
+/// index gives us a `&'static BeepPreset` with no allocation.
+///
+/// `Clone` because both fields are `Arc<…>` — cloning bumps refcounts
+/// so the runtime + UI can hold independent handles pointing at the
+/// same atomics.
+#[derive(Clone)]
+pub struct BeepParams {
+    preset_index: Arc<AtomicUsize>,
+    volume: Arc<AtomicU32>,
+}
+
+impl BeepParams {
+    pub fn new(preset_index: usize, volume: f32) -> Self {
+        Self {
+            preset_index: Arc::new(AtomicUsize::new(preset_index)),
+            volume: Arc::new(AtomicU32::new(volume.to_bits())),
+        }
+    }
+
+    /// Resolved preset for the current `preset_index`. Out-of-range
+    /// indices clamp to the first entry (defensive — should never
+    /// happen since the only writer is the dropdown which writes a
+    /// value it just iterated over).
+    pub fn current_preset(&self) -> &'static BeepPreset {
+        let i = self.preset_index.load(Ordering::Relaxed);
+        BeepPreset::ALL.get(i).unwrap_or(&BeepPreset::ALL[0])
+    }
+
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    pub fn set_preset_index(&self, i: usize) {
+        self.preset_index.store(i, Ordering::Relaxed);
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.volume.store(v.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -855,27 +1083,128 @@ pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
     }
 }
 
-/// Generate a single-tone "roger beep" with a short linear fade in/out so it
-/// doesn't click. The result is plain i16 PCM at wire rate (48 kHz) —
-/// push it through `push_playback` to play it locally; the output
-/// callback handles the device-rate conversion.
-pub fn beep(freq_hz: f32, duration_ms: u32, amplitude: f32) -> Vec<i16> {
+/// Render a [`BeepPattern`] into i16 PCM at wire rate (48 kHz). Each
+/// step is synthesised independently with a short linear fade in/out
+/// at the seams so back-to-back notes don't click:
+///
+/// * [`BeepStep::Tone`] — a sine at the requested frequency.
+/// * [`BeepStep::Rest`] — silence (zeros) for the step's duration.
+/// * [`BeepStep::Noise`] — uniform white noise from a tiny inline
+///   xorshift PRNG, passed through an RBJ-style bandpass biquad
+///   centred at `center_hz` with a Q derived from
+///   `center_hz / bandwidth_hz`. Output is rescaled so the post-
+///   filter peak roughly matches the tone path's level.
+///
+/// Push the result through `push_playback` to play it locally — the
+/// output callback handles the device-rate conversion.
+pub fn beep_pattern(steps: &[BeepStep], amplitude: f32) -> Vec<i16> {
     let rate = SAMPLE_RATE_HZ;
-    let total = (rate as f32 * duration_ms as f32 / 1000.0) as usize;
-    let fade = (rate as f32 * 0.005) as usize; // 5 ms ramp
     let amp = i16::MAX as f32 * amplitude.clamp(0.0, 1.0);
-    (0..total)
-        .map(|i| {
-            let t = i as f32 / rate as f32;
-            let env = if i < fade {
+    let total_samples: usize = steps
+        .iter()
+        .map(|s| (rate as f32 * s.duration_ms() as f32 / 1000.0) as usize)
+        .sum();
+    let mut out = Vec::with_capacity(total_samples);
+
+    // Inline xorshift PRNG state — keeps noise reproducible-ish and
+    // avoids pulling in the `rand` crate just for one feature. The
+    // seed is arbitrary but non-zero (xorshift jams on 0).
+    let mut rng_state: u32 = 0x1234_5678;
+
+    for step in steps {
+        let len = (rate as f32 * step.duration_ms() as f32 / 1000.0) as usize;
+        // 5 ms ramp at each end, but clamp to a quarter of the step
+        // so 50 ms notes still get a fade without losing all sustain.
+        let fade = ((rate as f32 * 0.005) as usize).min(len / 4);
+        let envelope = |i: usize| -> f32 {
+            if fade > 0 && i < fade {
                 i as f32 / fade as f32
-            } else if i + fade > total {
-                (total.saturating_sub(i)) as f32 / fade as f32
+            } else if fade > 0 && i + fade > len {
+                (len.saturating_sub(i)) as f32 / fade as f32
             } else {
                 1.0
-            };
-            let sample = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * amp * env;
-            sample as i16
-        })
-        .collect()
+            }
+        };
+
+        match *step {
+            BeepStep::Rest { .. } => {
+                out.extend(std::iter::repeat_n(0_i16, len));
+            }
+            BeepStep::Tone { freq_hz, .. } => {
+                out.extend((0..len).map(|i| {
+                    let t = i as f32 / rate as f32;
+                    let env = envelope(i);
+                    let sample =
+                        (2.0 * std::f32::consts::PI * freq_hz * t).sin() * amp * env;
+                    sample as i16
+                }));
+            }
+            BeepStep::Noise {
+                center_hz,
+                bandwidth_hz,
+                ..
+            } => {
+                // RBJ bandpass biquad with constant 0 dB peak gain.
+                // Q = center / bandwidth; clamp center to Nyquist
+                // safe range and bandwidth to >0 so we don't divide
+                // by zero on a hand-edited preset.
+                let f0 = center_hz.clamp(20.0, rate as f32 * 0.45);
+                let bw = bandwidth_hz.max(1.0);
+                let q = f0 / bw;
+                let omega = 2.0 * std::f32::consts::PI * f0 / rate as f32;
+                let alpha = omega.sin() / (2.0 * q);
+                let b0 = alpha;
+                let b1 = 0.0_f32;
+                let b2 = -alpha;
+                let a0 = 1.0 + alpha;
+                let a1 = -2.0 * omega.cos();
+                let a2 = 1.0 - alpha;
+                let (b0, b1, b2) = (b0 / a0, b1 / a0, b2 / a0);
+                let (a1, a2) = (a1 / a0, a2 / a0);
+
+                // Bandpass cuts a lot of energy — naive output is
+                // very quiet relative to a tone at the same amp. The
+                // ~3.5× scale puts the post-filter peak roughly in
+                // line with a sine of the same frequency at the
+                // requested amplitude. Hard-clamped at i16 below.
+                let post_filter_gain = 3.5_f32;
+
+                let mut x1 = 0.0_f32;
+                let mut x2 = 0.0_f32;
+                let mut y1 = 0.0_f32;
+                let mut y2 = 0.0_f32;
+                out.extend((0..len).map(|i| {
+                    let raw = next_white(&mut rng_state); // [-1, 1]
+                    let y = b0 * raw + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
+                    x2 = x1;
+                    x1 = raw;
+                    y2 = y1;
+                    y1 = y;
+                    let env = envelope(i);
+                    let sample = (y * post_filter_gain * amp * env)
+                        .clamp(i16::MIN as f32, i16::MAX as f32);
+                    sample as i16
+                }));
+            }
+        }
+    }
+    out
+}
+
+/// One step of a 32-bit xorshift PRNG, used by [`beep_pattern`] for
+/// the noise variant. Returns the new state.
+#[inline]
+fn xorshift32(state: &mut u32) -> u32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    x
+}
+
+/// Draw a uniform sample in `[-1.0, 1.0)` from the xorshift PRNG.
+#[inline]
+fn next_white(state: &mut u32) -> f32 {
+    (xorshift32(state) as f32 / u32::MAX as f32) * 2.0 - 1.0
 }

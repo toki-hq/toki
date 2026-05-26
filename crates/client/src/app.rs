@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
-use crate::audio::{self, AudioControl, AudioDevices, AudioGains, AudioLevels, AudioSpectrum};
+use crate::audio::{
+    self, AudioControl, AudioDevices, AudioGains, AudioLevels, AudioSpectrum, BeepParams,
+    BeepPreset,
+};
 use crate::config::{self, HotkeyConfig};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
@@ -88,6 +91,11 @@ pub struct TokiApp {
     audio_devices: AudioDevices,
     audio_control: AudioControl,
     audio_gains: AudioGains,
+    /// Live atomics behind the roger-beep parameters. Cloned at app
+    /// startup and shared with the runtime so a slider tweak in
+    /// Settings takes effect on the next take-floor / clear-floor
+    /// event without a reconnect.
+    beep_params: BeepParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -194,7 +202,15 @@ impl TokiApp {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(T::SPECTRUM_FFT_LEN);
 
-        let cmd_tx = runtime::spawn(state.clone(), mic_rx, playback);
+        // Roger-beep atomics — seeded from the saved preset (an
+        // unknown id falls back to index 0, the Default preset) and
+        // shared live with the runtime task so a Settings change
+        // takes effect immediately, no reconnect required.
+        let beep_params = BeepParams::new(
+            BeepPreset::index_of(&config.beeps.preset),
+            config.beeps.volume,
+        );
+        let cmd_tx = runtime::spawn(state.clone(), mic_rx, playback, beep_params.clone());
 
         let initial = config.hotkey.to_input().or_else(|| {
             tracing::warn!(
@@ -236,6 +252,7 @@ impl TokiApp {
             audio_devices: devices,
             audio_control: control,
             audio_gains: gains,
+            beep_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
@@ -2746,6 +2763,79 @@ impl TokiApp {
         // adjust the same `config.audio.{input,output}_gain` fields —
         // duplicating them in Settings just left two ways to change
         // the same value out of sync.
+
+        ui.add_space(14.0);
+        section_header(ui, "ROGER BEEPS");
+
+        // Preset-based design: tone choice (acquire Hz, release Hz,
+        // duration) is selected from a fixed table in
+        // `BeepPreset::ALL`, so adding a new tone palette later is one
+        // entry in that array rather than four fresh sliders here.
+        // Volume stays per-user. TEST buttons preview via the
+        // runtime's `Cmd::TestBeep`, keeping the audio pipeline on
+        // a single thread.
+        settings_row(ui, "PRESET", |ui| {
+            let current = BeepPreset::by_id(&self.config.beeps.preset);
+            let prev_id = current.id;
+            egui::ComboBox::from_id_salt("toki-beep-preset")
+                .selected_text(current.label)
+                .show_ui(ui, |ui| {
+                    for (i, preset) in BeepPreset::ALL.iter().enumerate() {
+                        let selected = preset.id == current.id;
+                        if ui.selectable_label(selected, preset.label).clicked() {
+                            self.config.beeps.preset = preset.id.into();
+                            self.beep_params.set_preset_index(i);
+                        }
+                    }
+                });
+            if self.config.beeps.preset != prev_id {
+                self.config.save();
+            }
+            // Compact summary of the selected preset's two patterns
+            // for the user's reference — total length per cue, plus a
+            // note count when there's more than one step so users can
+            // tell single-tone presets from multi-step ones at a
+            // glance.
+            let resolved = BeepPreset::by_id(&self.config.beeps.preset);
+            let acq_steps = resolved.acquire.steps.len();
+            let rel_steps = resolved.release.steps.len();
+            let summary = if acq_steps == 1 && rel_steps == 1 {
+                format!(
+                    "{} ms / {} ms",
+                    resolved.acquire.total_duration_ms(),
+                    resolved.release.total_duration_ms()
+                )
+            } else {
+                format!(
+                    "{}-note {} ms / {}-note {} ms",
+                    acq_steps,
+                    resolved.acquire.total_duration_ms(),
+                    rel_steps,
+                    resolved.release.total_duration_ms(),
+                )
+            };
+            ui.monospace(summary);
+        });
+        settings_row(ui, "VOLUME", |ui| {
+            let mut v = self.config.beeps.volume;
+            let resp = ui.add(egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+            ui.monospace(format!("{:>3.0}%", v * 100.0));
+            if resp.changed() {
+                self.config.beeps.volume = v;
+                self.beep_params.set_volume(v);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                self.config.save();
+            }
+        });
+        settings_row(ui, "TEST", |ui| {
+            if ui.button("TAKEN").clicked() {
+                let _ = self.cmd_tx.send(Cmd::TestBeep(runtime::BeepKind::Acquire));
+            }
+            if ui.button("CLEARED").clicked() {
+                let _ = self.cmd_tx.send(Cmd::TestBeep(runtime::BeepKind::Release));
+            }
+        });
     }
 
 

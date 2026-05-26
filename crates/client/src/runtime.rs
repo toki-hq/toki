@@ -27,7 +27,7 @@ use toki_proto::wire::{
     HEADER_LEN, MAX_AUDIO_PACKET, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
 };
 
-use crate::audio::{self, PlaybackBuf, push_playback};
+use crate::audio::{self, BeepParams, PlaybackBuf, push_playback};
 use crate::state::{ConnState, SharedState};
 
 pub enum Cmd {
@@ -54,6 +54,24 @@ pub enum Cmd {
     ChangeFrequency(String),
     PttDown,
     PttUp,
+    /// Preview a beep with the current [`BeepParams`] values. No gRPC
+    /// traffic and no session required — used by the Settings TEST
+    /// buttons so the user can audition tone tweaks without having
+    /// to actually press PTT.
+    TestBeep(BeepKind),
+}
+
+/// Discriminator for which beep variant a request applies to. The
+/// runtime maps this to the matching pair of (frequency, duration,
+/// volume) values from [`BeepParams`] before synthesising the tone.
+#[derive(Clone, Copy, Debug)]
+pub enum BeepKind {
+    /// Tone played when *someone* takes the floor (including us).
+    /// Defaults to the "up" cue at 1200 Hz.
+    Acquire,
+    /// Tone played when the holder releases the floor. Defaults to
+    /// the "down" cue at 800 Hz.
+    Release,
 }
 
 /// Spawn the runtime thread and return the command channel. The caller
@@ -63,6 +81,7 @@ pub fn spawn(
     state: SharedState,
     mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
+    beeps: BeepParams,
 ) -> UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
@@ -78,7 +97,7 @@ pub fn spawn(
                     return;
                 }
             };
-            rt.block_on(run(cmd_rx, state, mic_rx, playback));
+            rt.block_on(run(cmd_rx, state, mic_rx, playback, beeps));
         })
         .expect("spawn runtime thread");
     cmd_tx
@@ -89,6 +108,7 @@ async fn run(
     state: SharedState,
     mut mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
+    beeps: BeepParams,
 ) {
     let mut session: Option<Session> = None;
 
@@ -96,7 +116,7 @@ async fn run(
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
-                handle_cmd(cmd, &mut session, &state, &playback).await;
+                handle_cmd(cmd, &mut session, &state, &playback, &beeps).await;
             }
             frame = mic_rx.recv() => {
                 let Some(frame) = frame else { break; };
@@ -115,6 +135,7 @@ async fn handle_cmd(
     session: &mut Option<Session>,
     state: &SharedState,
     playback: &PlaybackBuf,
+    beeps: &BeepParams,
 ) {
     match cmd {
         Cmd::Connect {
@@ -135,6 +156,7 @@ async fn handle_cmd(
                 &password,
                 state.clone(),
                 playback.clone(),
+                beeps.clone(),
             )
             .await
             {
@@ -186,6 +208,19 @@ async fn handle_cmd(
                 s.request_ptt(false).await;
             }
         }
+        Cmd::TestBeep(kind) => {
+            // Preview tones don't require an active session — they
+            // just synthesise audio with the current BeepParams and
+            // push it onto the playback ring. The audio thread takes
+            // it from there.
+            let preset = beeps.current_preset();
+            let steps = match kind {
+                BeepKind::Acquire => preset.acquire.steps,
+                BeepKind::Release => preset.release.steps,
+            };
+            let tone = audio::beep_pattern(steps, beeps.volume());
+            push_playback(playback, &tone);
+        }
     }
 }
 
@@ -226,6 +261,7 @@ impl Session {
         password: &str,
         state: SharedState,
         playback: PlaybackBuf,
+        beeps: BeepParams,
     ) -> Result<Self> {
         // Accept either "host:port" or a full URL.
         let server_url = if server.starts_with("http://") || server.starts_with("https://") {
@@ -281,6 +317,7 @@ impl Session {
         let ptt_atomic = Arc::new(AtomicBool::new(false));
         let ptt_for_events = ptt_atomic.clone();
         let playback_for_events = playback.clone();
+        let beeps_for_events = beeps.clone();
         let events_task = tokio::spawn(async move {
             while let Some(evt) = events.next().await {
                 match evt {
@@ -332,14 +369,26 @@ impl Session {
                             }
 
                             if acquired {
-                                let tone = audio::beep(1200.0, 100, 0.05);
+                                // Look up the active preset live so a
+                                // change in Settings takes effect on
+                                // the very next take-floor event,
+                                // without a reconnect.
+                                let preset = beeps_for_events.current_preset();
+                                let tone = audio::beep_pattern(
+                                    preset.acquire.steps,
+                                    beeps_for_events.volume(),
+                                );
                                 push_playback(&playback_for_events, &tone);
                                 state_for_events
                                     .lock()
                                     .unwrap()
                                     .log(format!("🔒 {talker_name} took the floor"));
                             } else if released {
-                                let tone = audio::beep(800.0, 100, 0.05);
+                                let preset = beeps_for_events.current_preset();
+                                let tone = audio::beep_pattern(
+                                    preset.release.steps,
+                                    beeps_for_events.volume(),
+                                );
                                 push_playback(&playback_for_events, &tone);
                                 state_for_events.lock().unwrap().log("🔓 floor cleared");
                             }

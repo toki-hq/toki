@@ -21,6 +21,51 @@ pub struct Config {
     pub audio: AudioConfig,
     #[serde(default)]
     pub connection: ConnectionConfig,
+    #[serde(default)]
+    pub beeps: BeepConfig,
+}
+
+/// Customizable "roger beeps" — the short tones the radio plays
+/// locally whenever someone takes or clears the floor in our current
+/// frequency room.
+///
+/// Tone choice (the two pitches + their duration) is selected from
+/// the static preset table in [`crate::audio::BeepPreset::ALL`]; the
+/// config persists the *preset id* rather than the raw values so a
+/// preset's tuning can be refined later without forcing every user
+/// to retune. An unknown id resolves to the first preset
+/// (`"default"`) at load time.
+///
+/// Volume sits outside the preset because it's a loudness preference
+/// rather than a tonal one — users should be able to trim it without
+/// disturbing the preset they've picked.
+///
+/// Legacy configs that stored `acquire_hz` / `release_hz` /
+/// `duration_ms` fields here are silently ignored by serde; they'll
+/// pick up whatever the current default preset's values are on next
+/// load.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct BeepConfig {
+    #[serde(default = "default_beep_preset")]
+    pub preset: String,
+    #[serde(default = "default_beep_volume")]
+    pub volume: f32,
+}
+
+fn default_beep_preset() -> String {
+    "default".into()
+}
+fn default_beep_volume() -> f32 {
+    0.05
+}
+
+impl Default for BeepConfig {
+    fn default() -> Self {
+        Self {
+            preset: default_beep_preset(),
+            volume: default_beep_volume(),
+        }
+    }
 }
 
 /// Persisted server address, identity, and last-selected frequency.

@@ -14,6 +14,7 @@ use toki_proto::v1::{
 };
 
 use crate::state::{Client, Registry, SharedRegistry};
+use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
 pub struct SignalingSvc {
@@ -23,6 +24,10 @@ pub struct SignalingSvc {
     /// Compared in constant time against the caller's
     /// `RegisterRequest.password`. `None` means open mode — no auth.
     password: Option<String>,
+    /// Per-source-IP rate cap and auth-failure backoff. Gates the
+    /// `register` RPC; other RPCs are protected indirectly because
+    /// they require a `client_id` minted by a successful register.
+    throttle: IpThrottle,
 }
 
 impl SignalingSvc {
@@ -35,6 +40,7 @@ impl SignalingSvc {
             registry,
             audio_endpoint,
             password,
+            throttle: IpThrottle::new(),
         })
     }
 }
@@ -65,7 +71,28 @@ impl Signaling for SignalingSvc {
         &self,
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
+        // Source IP from the gRPC peer address. May be `None` on
+        // exotic transports (Unix sockets) — treat that as
+        // "no throttle applicable" rather than rejecting outright,
+        // since the operator-facing config that picks the transport
+        // is implicitly trusted.
+        let peer_ip = request.remote_addr().map(|a| a.ip());
         let req = request.into_inner();
+
+        // Throttle gate: per-IP register rate cap + auth-failure
+        // backoff. Checked *before* validation so a hostile flooder
+        // can't even waste validator CPU. Sockets that didn't expose
+        // a peer addr skip the gate.
+        if let Some(ip) = peer_ip {
+            if let Err(reject) = self.throttle.try_register(ip).await {
+                let msg = match reject {
+                    ThrottleReject::RateLimited => "too many register attempts",
+                    ThrottleReject::Backoff => "auth backoff in effect",
+                };
+                tracing::warn!(?ip, ?reject, "register throttled");
+                return Err(Status::resource_exhausted(msg));
+            }
+        }
 
         // Validate display name *before* the password check so we
         // can't be tricked into logging control characters via the
@@ -73,19 +100,37 @@ impl Signaling for SignalingSvc {
         // cheap; ordering them this way also means an attacker
         // probing for a password length leak has to send valid
         // names, which makes the warn-log a useful audit trail.
-        let display_name = validation::display_name(&req.display_name)?;
+        let display_name = match validation::display_name(&req.display_name) {
+            Ok(v) => v,
+            Err(e) => {
+                // Bad payload counts as a failure for backoff
+                // purposes — probing the validator and probing the
+                // password gate are equivalently hostile.
+                if let Some(ip) = peer_ip {
+                    self.throttle.record_auth_failure(ip).await;
+                }
+                return Err(e);
+            }
+        };
 
         // Password gate — checked before we mint a session or allocate
         // any registry state. Open-mode servers (no configured
         // password) skip the check entirely.
         if let Some(required) = &self.password {
             if !ct_eq(required.as_bytes(), req.password.as_bytes()) {
+                if let Some(ip) = peer_ip {
+                    self.throttle.record_auth_failure(ip).await;
+                }
                 tracing::warn!(
                     name = %display_name,
                     "register rejected: bad password"
                 );
                 return Err(Status::unauthenticated("invalid password"));
             }
+        }
+        // Clear any in-flight backoff now that we've authenticated.
+        if let Some(ip) = peer_ip {
+            self.throttle.record_auth_success(ip).await;
         }
 
         let id = Uuid::new_v4().to_string();

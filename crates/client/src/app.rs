@@ -49,6 +49,15 @@ impl RadioState {
     }
 }
 
+/// Buffered values for the Connect dialog. Edits stay local until the
+/// user clicks `CONNECT`, at which point they're committed to
+/// `config.connection` and persisted. Cancelling drops the edits.
+#[derive(Default)]
+struct ConnectForm {
+    url: String,
+    username: String,
+}
+
 pub struct TokiApp {
     state: SharedState,
     cmd_tx: tokio::sync::mpsc::UnboundedSender<Cmd>,
@@ -78,8 +87,28 @@ pub struct TokiApp {
     ptt_held: bool,
     /// `Some(t)` while in TX — tracks the 30-second cap.
     tx_start: Option<Instant>,
-    /// Settings overlay open?
+    /// Settings sub-window open? Drives `show_viewport_immediate` in
+    /// `update`; toggled by the gear icon and cleared when the user
+    /// closes the OS window or hits ✕.
     show_settings: bool,
+    /// Have we pushed our embedded fonts into the *settings viewport's*
+    /// context yet? Each egui viewport carries its own `Context` (and
+    /// therefore its own font atlas), so `register_fonts` has to be
+    /// called once per viewport. Cleared when the window closes so a
+    /// fresh open re-registers.
+    settings_fonts_ready: bool,
+
+    /// Connect dialog open? Triggered by the strip's "NEW CONNECTION"
+    /// button when offline. Hosts URL + Username inputs in their own
+    /// sub-window so the strip stays clean.
+    show_connect: bool,
+    /// Same font-priming trick as `settings_fonts_ready` but for the
+    /// Connect viewport's context.
+    connect_fonts_ready: bool,
+    /// Buffered form values for the Connect dialog. We don't mutate
+    /// `config` until the user confirms — that way "Cancel" leaves the
+    /// saved Quick Connect target untouched.
+    connect_form: ConnectForm,
     /// Mute toggle (output gate; separate from volume so unmuting
     /// restores the previous gain).
     muted: bool,
@@ -192,6 +221,10 @@ impl TokiApp {
             ptt_held: false,
             tx_start: None,
             show_settings: false,
+            settings_fonts_ready: false,
+            show_connect: false,
+            connect_fonts_ready: false,
+            connect_form: ConnectForm::default(),
             muted: false,
             gain_before_mute: 1.0,
             channel_idx,
@@ -573,7 +606,29 @@ fn paint_refresh_icon(
     painter.line_segment([tip, back2], stroke);
 }
 
-/// One row in the settings overlay: fixed-width label + arbitrary
+/// Section header inside the settings window: a small upper-case label
+/// in the phosphor primary colour, followed by a thin divider. Used to
+/// group rows into "CUSTOMIZATION" and "AUDIO" buckets.
+fn section_header(ui: &mut egui::Ui, label: &str) {
+    ui.label(
+        egui::RichText::new(label)
+            .color(T::PRIMARY)
+            .monospace()
+            .size(10.0),
+    );
+    ui.add_space(2.0);
+    let y = ui.cursor().top();
+    ui.painter().line_segment(
+        [
+            Pos2::new(ui.min_rect().left(), y),
+            Pos2::new(ui.min_rect().right(), y),
+        ],
+        Stroke::new(1.0, T::PRIMARY_INK),
+    );
+    ui.add_space(8.0);
+}
+
+/// One row in the settings window: fixed-width label + arbitrary
 /// control on the right. Free function (not a method) so the closure
 /// can also borrow `self` mutably without colliding on `&mut self`.
 fn settings_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::Ui)) {
@@ -601,11 +656,77 @@ fn settings_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::
     ui.add_space(2.0);
 }
 
-fn font_ui(size: f32, _weight_600: bool) -> FontId {
-    // egui doesn't expose weight per-font without explicit registration;
-    // the default Ubuntu-Light is treated as our "Geist" until/unless
-    // we embed real font files. We accept the visual fidelity gap.
-    FontId::new(size, FontFamily::Proportional)
+fn font_ui(size: f32, weight_600: bool) -> FontId {
+    // `weight_600=true` routes through the bold face we register in
+    // `register_fonts` under its own named family. If the bold file
+    // ever goes missing the family lookup falls back to Proportional
+    // (egui doesn't synthesize weight; the worst case is "looks like
+    // the regular weight" rather than a panic).
+    if weight_600 {
+        FontId::new(size, FontFamily::Name(UI_BOLD_FAMILY.into()))
+    } else {
+        FontId::new(size, FontFamily::Proportional)
+    }
+}
+
+/// Name of the bold UI family registered in [`register_fonts`].
+const UI_BOLD_FAMILY: &str = "toki-ui-bold";
+
+/// Register the three embedded TTFs as egui font families. Called
+/// exactly once during app startup (before `TokiApp::new`) so that
+/// `font_ui` / `font_mono` see the custom faces from the very first
+/// frame.
+///
+/// Three faces ship in `assets/ui/`:
+/// * `ui.ttf` — regular weight, becomes `FontFamily::Proportional` slot 0
+/// * `ui-bold.ttf` — bold weight, registered as a named family
+///   (`UI_BOLD_FAMILY`) so `font_ui(_, true)` can ask for it explicitly;
+///   egui doesn't synthesize weight
+/// * `mono.ttf` — monospace, becomes `FontFamily::Monospace` slot 0
+///
+/// Egui keeps its built-in fonts as fallbacks under each family, so
+/// any glyph the custom faces don't cover (emoji, niche symbols) still
+/// renders — we just push our faces to the front of the list.
+pub fn register_fonts(ctx: &egui::Context) {
+    use eframe::egui::{FontData, FontDefinitions};
+
+    let mut fonts = FontDefinitions::default();
+
+    fonts.font_data.insert(
+        "toki-ui".into(),
+        FontData::from_static(include_bytes!("../assets/ui/ui.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "toki-ui-bold".into(),
+        FontData::from_static(include_bytes!("../assets/ui/ui-bold.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "toki-mono".into(),
+        FontData::from_static(include_bytes!("../assets/ui/mono.ttf")).into(),
+    );
+
+    // Push custom faces to the front of each family's fallback chain.
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, "toki-ui".into());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, "toki-mono".into());
+
+    // Bold lives in its own named family so callers can opt into it
+    // explicitly. We seed the fallback chain with the regular UI face
+    // and the default proportional fonts so missing glyphs still
+    // render even when bold is requested.
+    let bold_chain = vec!["toki-ui-bold".into(), "toki-ui".into()];
+    fonts
+        .families
+        .insert(FontFamily::Name(UI_BOLD_FAMILY.into()), bold_chain);
+
+    ctx.set_fonts(fonts);
 }
 
 /// Paint a vertical gradient inside `rect` using `egui_colorgradient`
@@ -819,6 +940,72 @@ impl eframe::App for TokiApp {
         central.show(ctx, |ui| {
             self.paint_strip(ui, &snap, st);
         });
+
+        // Settings live in a real OS-level child viewport (own titlebar,
+        // resizable, can be moved off the strip). Using
+        // `show_viewport_immediate` rather than `_deferred` keeps the
+        // closure free to borrow `&mut self`; the cost is that we re-run
+        // the settings tree synchronously on every parent repaint, which
+        // is fine — it's a tiny form.
+        if self.show_settings {
+            let viewport_id = egui::ViewportId::from_hash_of("toki-settings");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Toki — Settings")
+                .with_inner_size([460.0, 520.0])
+                .with_min_inner_size([380.0, 380.0]);
+            ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
+                // Each viewport carries its own font atlas — push the
+                // brand fonts on the first frame after open so the
+                // settings window doesn't show in Ubuntu-Light.
+                if !self.settings_fonts_ready {
+                    register_fonts(child_ctx);
+                    child_ctx.set_visuals(egui::Visuals::dark());
+                    self.settings_fonts_ready = true;
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(T::SHELL).inner_margin(16.0))
+                    .show(child_ctx, |ui| {
+                        self.paint_settings_window(ui);
+                    });
+                // Honor the OS close button (red dot / X / window menu).
+                if child_ctx.input(|i| i.viewport().close_requested()) {
+                    self.show_settings = false;
+                }
+            });
+        } else if self.settings_fonts_ready {
+            // Window just closed — arm `register_fonts` to run again on
+            // the next open, since the child context will be re-created.
+            self.settings_fonts_ready = false;
+        }
+
+        // Connect dialog (sibling viewport to Settings). Same
+        // immediate-viewport pattern so the closure can borrow `self`
+        // mutably; same one-shot font-priming flag.
+        if self.show_connect {
+            let viewport_id = egui::ViewportId::from_hash_of("toki-connect");
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Toki — Connect")
+                .with_inner_size([420.0, 240.0])
+                .with_min_inner_size([360.0, 200.0])
+                .with_resizable(false);
+            ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
+                if !self.connect_fonts_ready {
+                    register_fonts(child_ctx);
+                    child_ctx.set_visuals(egui::Visuals::dark());
+                    self.connect_fonts_ready = true;
+                }
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::NONE.fill(T::SHELL).inner_margin(16.0))
+                    .show(child_ctx, |ui| {
+                        self.paint_connect_window(ui);
+                    });
+                if child_ctx.input(|i| i.viewport().close_requested()) {
+                    self.show_connect = false;
+                }
+            });
+        } else if self.connect_fonts_ready {
+            self.connect_fonts_ready = false;
+        }
     }
 }
 
@@ -882,10 +1069,6 @@ impl TokiApp {
         self.paint_topbar(ui, &painter, topbar_rect, snap, st);
         self.paint_main(ui, &painter, main_rect, snap, st);
         self.paint_bottom(ui, &painter, bottom_rect, st);
-
-        if self.show_settings {
-            self.paint_settings_overlay(ui, rect);
-        }
     }
 
     // ── Top bar ─────────────────────────────────────────────────────
@@ -959,6 +1142,21 @@ impl TokiApp {
             self.toggle_mute();
         }
         x -= 14.0;
+
+        // Disconnect icon — only shown when we have a live session.
+        // Replaces the Settings panel's old CONNECT/DISCONNECT row now
+        // that connection management lives outside Settings.
+        if matches!(snap.connection, ConnState::Connected) {
+            x -= T::ICON_BTN_D;
+            let disc_rect = Rect::from_min_size(
+                Pos2::new(x, y_mid - T::ICON_BTN_D / 2.0),
+                Vec2::splat(T::ICON_BTN_D),
+            );
+            if self.icon_button(ui, painter, disc_rect, "⏻", false) {
+                let _ = self.cmd_tx.send(Cmd::Disconnect);
+            }
+            x -= 14.0;
+        }
 
         // Status chip: dot + label. Transport-down states win over
         // everything (you literally can't be on the air); then tuning
@@ -1678,7 +1876,14 @@ impl TokiApp {
             Vec2::new(rect.right() - ptt_x, T::PTT_H),
         );
         if st.is_transport_down() {
-            self.paint_reconnect(ui, painter, ptt_rect, st);
+            // Reconnecting keeps the single sweep button — a connect
+            // attempt is already in flight, so offering "quick" vs
+            // "new" would be misleading. Offline gets the choice.
+            if matches!(st, RadioState::Reconnecting) {
+                self.paint_reconnect(ui, painter, ptt_rect, st);
+            } else {
+                self.paint_offline_choice(ui, painter, ptt_rect);
+            }
         } else {
             self.paint_ptt(ui, painter, ptt_rect, st);
         }
@@ -1788,6 +1993,173 @@ impl TokiApp {
             hint,
             font_mono(9.0),
             Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 100),
+        );
+    }
+
+    /// Offline-state replacement for the PTT button: split horizontally
+    /// into a left "Quick Connect" (uses the saved config) and a right
+    /// "New Connection" (opens the Connect dialog viewport). Same
+    /// outer dimensions and corner radius as `paint_ptt` so the row
+    /// height doesn't jitter when the state transitions.
+    fn paint_offline_choice(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect) {
+        let gap = 6.0;
+        // ~60% for Quick Connect (the default action), ~40% for New
+        // Connection. The subtext under Quick Connect ("server@call")
+        // needs the extra width to render at a readable size.
+        let split = (rect.width() - gap) * 0.6;
+        let quick_rect = Rect::from_min_max(
+            rect.min,
+            Pos2::new(rect.left() + split, rect.bottom()),
+        );
+        let new_rect = Rect::from_min_max(
+            Pos2::new(quick_rect.right() + gap, rect.top()),
+            rect.max,
+        );
+
+        self.paint_quick_connect_button(ui, painter, quick_rect);
+        self.paint_new_connection_button(ui, painter, new_rect);
+    }
+
+    /// Left half of `paint_offline_choice`. Dispatches `Cmd::Connect`
+    /// with the currently-saved config when clicked. Disabled (greyed)
+    /// when no server or callsign is on file — Quick Connect with an
+    /// empty target would just bounce off the runtime.
+    fn paint_quick_connect_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+    ) {
+        let server = self.config.connection.server.trim().to_string();
+        let display_name = self.config.connection.display_name.trim().to_string();
+        let enabled = !server.is_empty() && !display_name.is_empty();
+
+        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let resp = ui.allocate_rect(rect, sense);
+        if enabled && resp.clicked() {
+            let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
+            let _ = self.cmd_tx.send(Cmd::Connect {
+                server: server.clone(),
+                display_name: display_name.clone(),
+                frequency,
+            });
+        }
+
+        // Phosphor-tinted card to mark this as the primary action when
+        // a saved config exists. When disabled we paint the same idle
+        // dark surface the PTT button uses so it visually recedes.
+        let (top, bottom, border, label_color, accent_color, accent_glow) = if enabled {
+            (
+                Color32::from_rgb(0x16, 0x33, 0x1c),
+                Color32::from_rgb(0x09, 0x1c, 0x0e),
+                T::PRIMARY_INK,
+                T::INK,
+                T::PRIMARY,
+                T::PRIMARY_GLOW,
+            )
+        } else {
+            (
+                T::PTT_IDLE_TOP,
+                T::PTT_IDLE_BOTTOM,
+                T::SHELL_EDGE,
+                T::INK_MUTE,
+                T::INK_MUTE,
+                T::PRIMARY_GLOW,
+            )
+        };
+        let corners = CornerRadius::same(T::RADIUS_PTT as u8);
+        paint_vertical_gradient(painter, rect, corners, &[(0.0, top), (1.0, bottom)]);
+        painter.rect_stroke(rect, corners, Stroke::new(1.0, border), StrokeKind::Inside);
+
+        // Left: icon + label stacked over subtext.
+        let icon_x = rect.left() + 18.0 + 6.0;
+        let label_y = rect.center().y - 6.0;
+        paint_wifi_off_icon(painter, Pos2::new(icon_x, label_y), 7.5, accent_color);
+        let text_x = icon_x + 18.0;
+        glow_text(
+            painter,
+            Pos2::new(text_x, label_y),
+            Align2::LEFT_CENTER,
+            "QUICK CONNECT",
+            font_ui(12.0, true),
+            label_color,
+            accent_glow,
+            if enabled { 0.55 } else { 0.0 },
+        );
+        // Subtext: "<server>@<callsign>" or a no-config hint.
+        let subtext = if enabled {
+            // Truncate to fit; we know the full string only fills here
+            // when the user picked a long URL.
+            let max_w = rect.right() - text_x - 12.0;
+            truncate_to_width(
+                painter,
+                &format!("{server}  ·  {display_name}"),
+                font_mono(9.0),
+                max_w,
+            )
+        } else {
+            "NO SAVED CONFIG · USE NEW CONNECTION".into()
+        };
+        painter.text(
+            Pos2::new(text_x, rect.center().y + 9.0),
+            Align2::LEFT_CENTER,
+            subtext,
+            font_mono(9.0),
+            T::INK_DIM,
+        );
+    }
+
+    /// Right half of `paint_offline_choice`. Opens the Connect dialog
+    /// (separate viewport) with the URL + Username fields pre-filled
+    /// from the last-saved config — saves typing for the common case
+    /// where the user is fixing one field.
+    fn paint_new_connection_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+    ) {
+        let resp = ui.allocate_rect(rect, Sense::click());
+        if resp.clicked() {
+            self.connect_form.url = self.config.connection.server.clone();
+            self.connect_form.username = self.config.connection.display_name.clone();
+            self.show_connect = true;
+        }
+
+        let corners = CornerRadius::same(T::RADIUS_PTT as u8);
+        paint_vertical_gradient(
+            painter,
+            rect,
+            corners,
+            &[(0.0, T::PTT_IDLE_TOP), (1.0, T::PTT_IDLE_BOTTOM)],
+        );
+        painter.rect_stroke(rect, corners, Stroke::new(1.0, T::SHELL_EDGE), StrokeKind::Inside);
+
+        // Plus glyph + label centered vertically.
+        let label_y = rect.center().y;
+        let icon_x = rect.left() + 18.0;
+        let stroke = Stroke::new(1.5, T::INK);
+        let half = 4.0;
+        painter.line_segment(
+            [
+                Pos2::new(icon_x - half, label_y),
+                Pos2::new(icon_x + half, label_y),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(icon_x, label_y - half),
+                Pos2::new(icon_x, label_y + half),
+            ],
+            stroke,
+        );
+        painter.text(
+            Pos2::new(icon_x + 14.0, label_y),
+            Align2::LEFT_CENTER,
+            "NEW CONNECTION",
+            font_ui(11.0, true),
+            T::INK,
         );
     }
 
@@ -2013,96 +2385,90 @@ impl TokiApp {
         );
     }
 
-    // ── Settings overlay ───────────────────────────────────────────
-    fn paint_settings_overlay(&mut self, ui: &mut egui::Ui, outer_rect: Rect) {
-        let pad = T::PAD_OUTER;
-        let rect = Rect::from_min_max(
-            Pos2::new(outer_rect.left() + pad, outer_rect.top() + 40.0),
-            Pos2::new(outer_rect.right() - pad, outer_rect.bottom() - pad),
-        );
-        let painter = ui.painter().clone();
-        painter.rect(
-            rect,
-            CornerRadius::same((T::RADIUS_WIDGET - 6.0) as u8),
-            Color32::from_rgba_unmultiplied(0x0a, 0x0c, 0x0a, 0xf7),
-            Stroke::new(1.0, T::PRIMARY_INK),
-            StrokeKind::Inside,
-        );
+    // ── Connect dialog body ────────────────────────────────────────
+    //
+    // Painted into a child viewport (see `update`). Two text fields
+    // (URL, USERNAME) plus a Cancel / Connect button pair. The form is
+    // buffered in `self.connect_form` — we only commit to
+    // `self.config.connection` if the user clicks Connect.
+    fn paint_connect_window(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().visuals.override_text_color = Some(T::INK);
 
-        let inner = rect.shrink(12.0);
-        let mut content_ui = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(inner)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        content_ui.set_clip_rect(inner);
-        content_ui.style_mut().visuals.override_text_color = Some(T::INK);
+        section_header(ui, "NEW CONNECTION");
 
-        // Header.
-        content_ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("· SETTINGS ·")
-                .color(T::PRIMARY)
-                .monospace()
-                .size(10.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("✕").clicked() {
-                    self.show_settings = false;
-                }
-            });
-        });
-        content_ui.add_space(6.0);
-
-        // ── Connection ──────────────────────────────────────────
-        settings_row(&mut content_ui, "SERVER", |ui| {
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut self.config.connection.server)
-                    .desired_width(200.0)
+        settings_row(ui, "URL", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut self.connect_form.url)
+                    .desired_width(240.0)
+                    .hint_text("host:port")
                     .font(egui::TextStyle::Monospace),
             );
-            if resp.lost_focus() {
-                self.config.save();
-            }
         });
-        settings_row(&mut content_ui, "CALLSIGN", |ui| {
-            let mut s = self.config.connection.display_name.clone();
+        settings_row(ui, "USERNAME", |ui| {
+            // Same uppercase / 10-char cap the old Settings row used —
+            // server-side display name semantics haven't changed.
             let resp = ui.add(
-                egui::TextEdit::singleline(&mut s)
+                egui::TextEdit::singleline(&mut self.connect_form.username)
                     .desired_width(160.0)
+                    .hint_text("CALLSIGN")
                     .font(egui::TextStyle::Monospace),
             );
-            // Uppercase + cap at 10 chars per the spec.
-            s = s.to_uppercase();
-            if s.len() > 10 {
-                s.truncate(10);
+            self.connect_form.username = self.connect_form.username.to_uppercase();
+            if self.connect_form.username.len() > 10 {
+                self.connect_form.username.truncate(10);
             }
-            self.config.connection.display_name = s;
-            if resp.lost_focus() {
-                self.config.save();
-            }
+            let _ = resp; // (text edit response unused beyond display)
         });
 
-        if !matches!(self.state.lock().unwrap().connection, ConnState::Connected) {
-            settings_row(&mut content_ui, "", |ui| {
-                if ui.button("CONNECT").clicked() {
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            // Right-align the action pair: Cancel | Connect.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let server = self.connect_form.url.trim().to_string();
+                let username = self.connect_form.username.trim().to_string();
+                let can_connect = !server.is_empty() && !username.is_empty();
+
+                let connect_btn = ui.add_enabled(can_connect, egui::Button::new("CONNECT"));
+                if connect_btn.clicked() {
+                    // Commit form → config, persist, dispatch the
+                    // Connect command, then close the dialog.
+                    self.config.connection.server = server.clone();
+                    self.config.connection.display_name = username.clone();
+                    self.config.save();
                     let frequency =
                         T::frequency_label(T::frequency_of(self.channel_idx));
                     let _ = self.cmd_tx.send(Cmd::Connect {
-                        server: self.config.connection.server.trim().to_string(),
-                        display_name: self.config.connection.display_name.trim().to_string(),
+                        server,
+                        display_name: username,
                         frequency,
                     });
+                    self.show_connect = false;
+                }
+                if ui.button("CANCEL").clicked() {
+                    self.show_connect = false;
                 }
             });
-        } else {
-            settings_row(&mut content_ui, "", |ui| {
-                if ui.button("DISCONNECT").clicked() {
-                    let _ = self.cmd_tx.send(Cmd::Disconnect);
-                }
-            });
-        }
+        });
+    }
 
-        // ── PTT ─────────────────────────────────────────────────
-        settings_row(&mut content_ui, "PTT", |ui| {
+    // ── Settings window body ───────────────────────────────────────
+    //
+    // Painted into a child viewport (see `update`). No outer chrome
+    // here — the OS window provides the titlebar and the
+    // `CentralPanel`'s `Frame` provides the shell-coloured background
+    // and 16 px inner margin. Two clearly-labelled sections:
+    //
+    //   * CUSTOMIZATION — PTT bind
+    //   * AUDIO         — input/output device, mic gain
+    //
+    // Server URL / callsign / connect / disconnect live on the strip
+    // and in the dedicated Connect dialog, not here.
+    fn paint_settings_window(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().visuals.override_text_color = Some(T::INK);
+
+        section_header(ui, "CUSTOMIZATION");
+
+        settings_row(ui, "PTT", |ui| {
             if self.recording {
                 let progress = self.hotkey.hold_progress();
                 ui.colored_label(T::TX, "hold a key for 1s…");
@@ -2132,8 +2498,10 @@ impl TokiApp {
             }
         });
 
-        // ── Audio devices ───────────────────────────────────────
-        settings_row(&mut content_ui, "INPUT", |ui| {
+        ui.add_space(14.0);
+        section_header(ui, "AUDIO");
+
+        settings_row(ui, "INPUT", |ui| {
             let prev = self.config.audio.input_device.clone();
             let selected = self
                 .config
@@ -2163,7 +2531,7 @@ impl TokiApp {
                 self.config.save();
             }
         });
-        settings_row(&mut content_ui, "OUTPUT", |ui| {
+        settings_row(ui, "OUTPUT", |ui| {
             let prev = self.config.audio.output_device.clone();
             let selected = self
                 .config
@@ -2194,8 +2562,7 @@ impl TokiApp {
             }
         });
 
-        // ── Volume / gains ──────────────────────────────────────
-        settings_row(&mut content_ui, "MIC GAIN", |ui| {
+        settings_row(ui, "MIC GAIN", |ui| {
             let mut g = self.config.audio.input_gain;
             let resp = ui.add(egui::Slider::new(&mut g, 0.0..=2.0).show_value(false));
             ui.monospace(format!("{:>3.0}%", g * 100.0));

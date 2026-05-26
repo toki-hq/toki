@@ -58,6 +58,11 @@ fn main() -> eframe::Result<()> {
             // widgets paint their own backgrounds, so this mostly just
             // ensures the window-level frame doesn't show.
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // Embed the project's TTFs as the default UI / mono fonts
+            // *before* the app paints its first frame, so we never show
+            // a single frame in Ubuntu-Light then snap to the brand
+            // face on frame 2.
+            app::register_fonts(&cc.egui_ctx);
             Ok(Box::new(TokiApp::new()))
         }),
     )

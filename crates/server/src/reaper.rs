@@ -64,7 +64,7 @@ async fn reap_once(registry: &SharedRegistry) {
             let Some(client) = r.clients.remove(&id) else {
                 continue;
             };
-            r.tokens.remove(&client.audio_token);
+            r.tokens.remove(&client.audio_token_hash);
 
             // Pull them out of their frequency room (if any). Mirror
             // of `Signaling::leave`'s cleanup, minus the explicit RPC.

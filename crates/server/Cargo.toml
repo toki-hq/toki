@@ -21,3 +21,8 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 toml = "0.8"
+# BLAKE3 of the session token is stored in the registry rather than
+# the token itself, so a process memory snapshot or core dump doesn't
+# leak live session credentials. ~1 GB/s on a single core — no
+# measurable cost on the audio hot path.
+blake3 = "1"

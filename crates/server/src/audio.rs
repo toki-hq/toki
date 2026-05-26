@@ -7,7 +7,7 @@ use tracing::{debug, warn};
 
 use toki_proto::wire::{FRAME_BYTES, HEADER_LEN, MAX_AUDIO_PACKET, TOKEN_LEN, VERSION_AUDIO_PCM};
 
-use crate::state::SharedRegistry;
+use crate::state::{SharedRegistry, hash_token};
 
 /// Maximum audio frames per second the server will forward from any
 /// single token. The legitimate client sends one 10 ms frame at a
@@ -41,7 +41,7 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
     // an explicit prune of dead-token entries would be nice but
     // tokens get evicted by the reaper anyway, so this never grows
     // beyond active-session count.
-    let mut rate_state: HashMap<Vec<u8>, RateState> = HashMap::new();
+    let mut rate_state: HashMap<[u8; toki_proto::wire::TOKEN_LEN], RateState> = HashMap::new();
 
     loop {
         let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -78,10 +78,14 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
         // Per-token rate limit for audio frames. Keepalives are
         // cheap and don't count toward the budget. Enforced *before*
         // we take the registry lock so a flooder doesn't even cause
-        // mutex contention with legitimate clients.
+        // mutex contention with legitimate clients. Key is the raw
+        // token bytes as a fixed-size array — avoids the per-packet
+        // Vec allocation we'd pay with `token.to_vec()`.
         if version == VERSION_AUDIO_PCM {
+            let mut rate_key = [0u8; TOKEN_LEN];
+            rate_key.copy_from_slice(token);
             let now = Instant::now();
-            let entry = rate_state.entry(token.to_vec()).or_insert(RateState {
+            let entry = rate_state.entry(rate_key).or_insert(RateState {
                 window_start: now,
                 packets: 0,
             });
@@ -102,11 +106,18 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             }
         }
 
+        // Hash the raw token once, outside the registry lock — BLAKE3
+        // on 16 bytes is in the tens-of-nanoseconds range and would
+        // be silly to do while holding the global mutex. The hash
+        // is what the registry actually stores; we never persist
+        // the preimage server-side.
+        let token_hash = hash_token(token);
+
         // Hold the lock once: authenticate, learn peer address, and compute
         // the forwarding fan-out. We release before doing any send_to calls.
         let targets: Vec<SocketAddr> = {
             let mut registry = registry.lock().await;
-            let Some(sender_id) = registry.tokens.get(token).cloned() else {
+            let Some(sender_id) = registry.tokens.get(&token_hash).cloned() else {
                 debug!(?peer, "unknown audio token");
                 continue;
             };

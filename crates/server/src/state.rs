@@ -7,11 +7,22 @@ use tokio::sync::{Mutex, mpsc};
 
 use toki_proto::v1::Event;
 
+/// Length of the BLAKE3 digest we use to key the token table. The
+/// full 32-byte BLAKE3 output is overkill for a 16-byte preimage —
+/// truncating to 16 bytes preserves preimage resistance well past
+/// the ~2^128 cost we'd need to attack anyway.
+pub const TOKEN_HASH_LEN: usize = 16;
+
 #[derive(Clone)]
 pub struct Client {
     pub id: String,
     pub display_name: String,
-    pub audio_token: Vec<u8>,
+    /// BLAKE3 of the raw session token that the *client* receives
+    /// from `RegisterResponse.audio_token`. We don't keep the
+    /// preimage anywhere — a process memory snapshot leaks only the
+    /// hash, which is useless against the UDP relay's hash-then-
+    /// compare check.
+    pub audio_token_hash: [u8; TOKEN_HASH_LEN],
     pub audio_addr: Option<SocketAddr>,
     pub events_tx: Option<mpsc::Sender<Event>>,
     /// The frequency room the client is currently in. `None` between
@@ -50,7 +61,19 @@ pub struct Registry {
     /// inserted on first join; we don't pre-populate the full
     /// 41-channel grid because most are usually empty.
     pub rooms: HashMap<String, Room>,
-    pub tokens: HashMap<Vec<u8>, String>,
+    /// Token-hash → client-id map. Audio packets carry the raw
+    /// 16-byte token; the relay hashes it and looks up here. The
+    /// raw token is never persisted server-side after registration.
+    pub tokens: HashMap<[u8; TOKEN_HASH_LEN], String>,
+}
+
+/// BLAKE3 the raw token and truncate to `TOKEN_HASH_LEN` bytes for
+/// use as the `tokens` HashMap key.
+pub fn hash_token(token: &[u8]) -> [u8; TOKEN_HASH_LEN] {
+    let full = blake3::hash(token);
+    let mut out = [0u8; TOKEN_HASH_LEN];
+    out.copy_from_slice(&full.as_bytes()[..TOKEN_HASH_LEN]);
+    out
 }
 
 pub type SharedRegistry = Arc<Mutex<Registry>>;

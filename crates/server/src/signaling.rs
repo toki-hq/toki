@@ -13,7 +13,7 @@ use toki_proto::v1::{
     signaling_server::{Signaling, SignalingServer},
 };
 
-use crate::state::{Client, Registry, SharedRegistry};
+use crate::state::{Client, Registry, SharedRegistry, hash_token};
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
@@ -134,12 +134,19 @@ impl Signaling for SignalingSvc {
         }
 
         let id = Uuid::new_v4().to_string();
+        // 16-byte token: handed to the client over gRPC (response
+        // travels through the same channel that just authenticated),
+        // and used by the client to authenticate UDP audio packets.
+        // We hash it before storing in the registry — see H3 in the
+        // audit. The raw token exists only on this stack for the
+        // duration of this handler.
         let token = Uuid::new_v4().as_bytes().to_vec();
+        let token_hash = hash_token(&token);
 
         let client = Client {
             id: id.clone(),
             display_name: display_name.clone(),
-            audio_token: token.clone(),
+            audio_token_hash: token_hash,
             audio_addr: None,
             events_tx: None,
             current_frequency: None,
@@ -156,7 +163,7 @@ impl Signaling for SignalingSvc {
         };
 
         let mut registry = self.registry.lock().await;
-        registry.tokens.insert(token.clone(), id.clone());
+        registry.tokens.insert(token_hash, id.clone());
         registry.clients.insert(id.clone(), client);
         let total = registry.clients.len();
         drop(registry);

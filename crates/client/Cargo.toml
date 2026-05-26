@@ -68,3 +68,6 @@ dirs = "5"
 # startup. `default-features = false` strips ImageMagick-style format
 # plugins we don't need; `png` is the only encoder/decoder we use.
 image = { version = "0.25", default-features = false, features = ["png"] }
+# BLAKE3 keyed_hash for per-packet UDP MAC. Server uses the same
+# crate; sharing the choice keeps the wire format symmetric.
+blake3 = "1"

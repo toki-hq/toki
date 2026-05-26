@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
-use toki_proto::wire::{FRAME_BYTES, HEADER_LEN, MAX_AUDIO_PACKET, TOKEN_LEN, VERSION_AUDIO_PCM};
+use toki_proto::wire::{
+    FRAME_BYTES, HEADER_LEN, MAC_LEN, MAX_AUDIO_PACKET, SEQ_LEN, TOKEN_LEN, VERSION_AUDIO_PCM,
+};
 
 use crate::state::{SharedRegistry, hash_token};
 
@@ -28,6 +30,21 @@ const RATE_WINDOW: Duration = Duration::from_secs(1);
 struct RateState {
     window_start: Instant,
     packets: u32,
+}
+
+/// Constant-time byte comparison for the per-packet MAC check. Lengths
+/// are always equal at the call site (both 8 bytes), so the early-out
+/// here is unreachable in normal traffic — kept for defensive parity
+/// with `signaling::ct_eq`.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<()> {
@@ -57,21 +74,35 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             continue;
         }
 
+        // Header layout (see toki_proto::wire docs):
+        //   [0..16]   token
+        //   [16]      version
+        //   [17..25]  seq (le u64)
+        //   [25..33]  mac (truncated BLAKE3 keyed_hash)
+        //   [33..]    payload
         let token = &buf[..TOKEN_LEN];
         let version = buf[TOKEN_LEN];
+        let seq_bytes: [u8; SEQ_LEN] = buf[TOKEN_LEN + 1..TOKEN_LEN + 1 + SEQ_LEN]
+            .try_into()
+            .expect("slice has SEQ_LEN bytes");
+        let seq = u64::from_le_bytes(seq_bytes);
+        let mac = &buf[TOKEN_LEN + 1 + SEQ_LEN..HEADER_LEN];
         let payload = &buf[HEADER_LEN..len];
 
         // Strict shape check for audio frames: legitimate audio packets
-        // are *exactly* HEADER_LEN + FRAME_BYTES long. Anything else
-        // claiming to be VERSION_AUDIO_PCM is malformed or hostile.
-        // Keepalives (any version != AUDIO_PCM) bypass this — they're
-        // header-only and we only use them to refresh `last_seen`.
+        // are *exactly* HEADER_LEN + FRAME_BYTES long. Keepalive
+        // packets have zero payload. Any other shape is malformed
+        // or hostile.
         if version == VERSION_AUDIO_PCM && payload.len() != FRAME_BYTES {
             debug!(
                 len,
                 expected = HEADER_LEN + FRAME_BYTES,
                 "audio frame wrong size, dropping"
             );
+            continue;
+        }
+        if version != VERSION_AUDIO_PCM && !payload.is_empty() {
+            debug!(len, version, "non-audio packet with payload, dropping");
             continue;
         }
 
@@ -130,7 +161,11 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             // different one for the UDP flow than for the TCP
             // signaling flow. `expected_ip = None` is honoured (Unix
             // socket transports skip the check).
-            if let Some(client) = registry.clients.get(&sender_id) {
+            //
+            // MAC + replay check is also done here, snapshotting the
+            // key + last_seq while holding the lock so the next
+            // packet on the same session sees the updated seq.
+            let (mac_key, last_seq) = if let Some(client) = registry.clients.get(&sender_id) {
                 if let Some(expected) = client.expected_ip {
                     if expected != peer.ip() {
                         warn!(
@@ -142,9 +177,51 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
                         continue;
                     }
                 }
+                (client.audio_mac_key, client.audio_last_seq)
+            } else {
+                debug!(?peer, "token resolved to id but client gone");
+                continue;
+            };
+
+            // MAC over (version || seq || payload). The token isn't
+            // included because it's already in plain view and
+            // identifies the key; including the version prevents an
+            // attacker from repurposing a MAC computed for one
+            // version onto a packet of another. Constant-time
+            // comparison protects against any plausible timing leak
+            // (unlikely here, but free).
+            let mac_input = {
+                let mut v = Vec::with_capacity(1 + SEQ_LEN + payload.len());
+                v.push(version);
+                v.extend_from_slice(&seq_bytes);
+                v.extend_from_slice(payload);
+                v
+            };
+            let expected_mac = blake3::keyed_hash(&mac_key, &mac_input);
+            let expected_mac = &expected_mac.as_bytes()[..MAC_LEN];
+            if !constant_time_eq(expected_mac, mac) {
+                warn!(?peer, client = %sender_id, "audio packet MAC mismatch, dropping");
+                continue;
+            }
+            // Strict-monotonic replay protection. The first valid
+            // packet on a session always has seq > 0 (client starts
+            // at 1), which beats the initial audio_last_seq = 0.
+            // UDP reordering can drop the occasional out-of-order
+            // packet on lossy links — playback already tolerates
+            // this as ordinary loss.
+            if seq <= last_seq {
+                debug!(
+                    ?peer,
+                    client = %sender_id,
+                    seq,
+                    last_seq,
+                    "audio packet seq not strictly increasing, dropping"
+                );
+                continue;
             }
 
             if let Some(client) = registry.clients.get_mut(&sender_id) {
+                client.audio_last_seq = seq;
                 client.audio_addr = Some(peer);
                 // Every UDP packet — audio or keepalive — counts as a
                 // heartbeat. The reaper task uses this to evict clients

@@ -238,6 +238,18 @@ const PTT_COOLDOWN: Duration = Duration::from_millis(250);
 struct Session {
     client_id: String,
     audio_token: Vec<u8>,
+    /// Symmetric BLAKE3-keyed-hash key handed back by the server in
+    /// `RegisterResponse.audio_mac_key`. Used to MAC every outbound
+    /// UDP packet (audio + keepalives) so the server can reject
+    /// forged / off-path injections. See `toki_proto::wire` for the
+    /// header layout.
+    audio_mac_key: [u8; toki_proto::wire::MAC_KEY_LEN],
+    /// Monotonic per-session UDP sequence counter. Used by the
+    /// server for strict-monotonic replay protection. We start at
+    /// 1 so the initial keepalive beats the server's initial
+    /// audio_last_seq = 0. Wrapped in Arc so the keepalive task can
+    /// share ownership without inheriting the whole Session.
+    udp_seq: Arc<AtomicU64>,
     ptt: Arc<AtomicBool>,
     seq: AtomicU64,
     ptt_tx: mpsc::Sender<PttEvent>,
@@ -284,7 +296,23 @@ impl Session {
 
         let client_id = reg.client_id;
         let audio_token = reg.audio_token;
+        // Server must return exactly MAC_KEY_LEN bytes; treat any
+        // other length as a protocol violation rather than silently
+        // truncating / padding and producing useless MACs.
+        let audio_mac_key: [u8; toki_proto::wire::MAC_KEY_LEN] =
+            reg.audio_mac_key.as_slice().try_into().map_err(|_| {
+                anyhow!(
+                    "server sent audio_mac_key with wrong length ({} bytes, expected {})",
+                    reg.audio_mac_key.len(),
+                    toki_proto::wire::MAC_KEY_LEN,
+                )
+            })?;
         let audio_addr = resolve_audio_endpoint(&reg.audio_endpoint, &server_url)?;
+        // Session-local sequence counter. Starts at 1 because the
+        // server's `audio_last_seq` initialises to 0 and we require
+        // strict monotonicity (seq > last_seq) to accept the first
+        // packet.
+        let udp_seq = Arc::new(AtomicU64::new(1));
 
         {
             let mut st = state.lock().unwrap();
@@ -301,7 +329,7 @@ impl Session {
         udp.connect(audio_addr).await?;
         // Immediately punch a hole: server records our source addr so
         // peers' audio can find us before we've ever transmitted.
-        send_keepalive(&udp, &audio_token).await?;
+        send_keepalive(&udp, &audio_token, &audio_mac_key, &udp_seq).await?;
         info!(?audio_addr, "udp audio connected");
 
         // ── Event stream (server → us) ────────────────────────────────
@@ -453,12 +481,21 @@ impl Session {
         // ── Keepalives ────────────────────────────────────────────────
         let udp_for_keepalive = udp.clone();
         let token_for_keepalive = audio_token.clone();
+        let key_for_keepalive = audio_mac_key;
+        let seq_for_keepalive = udp_seq.clone();
         let keepalive_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3));
             tick.tick().await; // consume the immediate first tick
             loop {
                 tick.tick().await;
-                if let Err(e) = send_keepalive(&udp_for_keepalive, &token_for_keepalive).await {
+                if let Err(e) = send_keepalive(
+                    &udp_for_keepalive,
+                    &token_for_keepalive,
+                    &key_for_keepalive,
+                    &seq_for_keepalive,
+                )
+                .await
+                {
                     warn!(error = %e, "keepalive failed");
                     break;
                 }
@@ -468,6 +505,8 @@ impl Session {
         Ok(Self {
             client_id,
             audio_token,
+            audio_mac_key,
+            udp_seq,
             // Shared with events_task — it's the only writer. Flipped to
             // `true` only when the server's broadcast confirms us as holder.
             ptt: ptt_atomic,
@@ -591,12 +630,17 @@ impl Session {
     }
 
     async fn send_audio(&self, samples: &[i16]) {
-        let mut pkt = Vec::with_capacity(HEADER_LEN + samples.len() * 2);
-        pkt.extend_from_slice(&self.audio_token);
-        pkt.push(VERSION_AUDIO_PCM);
+        let mut payload = Vec::with_capacity(samples.len() * 2);
         for &s in samples {
-            pkt.extend_from_slice(&s.to_le_bytes());
+            payload.extend_from_slice(&s.to_le_bytes());
         }
+        let pkt = build_authenticated_packet(
+            &self.audio_token,
+            VERSION_AUDIO_PCM,
+            &self.audio_mac_key,
+            &self.udp_seq,
+            &payload,
+        );
         if let Err(e) = self.udp.send(&pkt).await {
             warn!(error = %e, "udp send failed");
         }
@@ -615,12 +659,47 @@ impl Session {
     }
 }
 
-async fn send_keepalive(udp: &UdpSocket, token: &[u8]) -> Result<()> {
-    let mut pkt = Vec::with_capacity(HEADER_LEN);
-    pkt.extend_from_slice(token);
-    pkt.push(VERSION_KEEPALIVE);
+async fn send_keepalive(
+    udp: &UdpSocket,
+    token: &[u8],
+    mac_key: &[u8; toki_proto::wire::MAC_KEY_LEN],
+    udp_seq: &Arc<AtomicU64>,
+) -> Result<()> {
+    let pkt = build_authenticated_packet(token, VERSION_KEEPALIVE, mac_key, udp_seq, &[]);
     udp.send(&pkt).await?;
     Ok(())
+}
+
+/// Assemble an outbound UDP packet with the authenticated header
+/// layout the server expects (see `toki_proto::wire` docs). Bumps
+/// the session's monotonic sequence atomically; the MAC covers
+/// `version || seq || payload` and uses the per-session BLAKE3
+/// keyed-hash key handed back at register time.
+fn build_authenticated_packet(
+    token: &[u8],
+    version: u8,
+    mac_key: &[u8; toki_proto::wire::MAC_KEY_LEN],
+    udp_seq: &Arc<AtomicU64>,
+    payload: &[u8],
+) -> Vec<u8> {
+    use toki_proto::wire::{MAC_LEN, SEQ_LEN};
+    let seq = udp_seq.fetch_add(1, Ordering::Relaxed);
+    let seq_bytes = seq.to_le_bytes();
+
+    let mut mac_input = Vec::with_capacity(1 + SEQ_LEN + payload.len());
+    mac_input.push(version);
+    mac_input.extend_from_slice(&seq_bytes);
+    mac_input.extend_from_slice(payload);
+    let mac = blake3::keyed_hash(mac_key, &mac_input);
+    let mac = &mac.as_bytes()[..MAC_LEN];
+
+    let mut pkt = Vec::with_capacity(HEADER_LEN + payload.len());
+    pkt.extend_from_slice(token);
+    pkt.push(version);
+    pkt.extend_from_slice(&seq_bytes);
+    pkt.extend_from_slice(mac);
+    pkt.extend_from_slice(payload);
+    pkt
 }
 
 fn pcm_from_bytes(bytes: &[u8]) -> Vec<i16> {

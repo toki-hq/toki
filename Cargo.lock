@@ -3834,6 +3834,7 @@ name = "toki-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "blake3",
  "bytes",
  "cpal",
  "device_query",

@@ -34,11 +34,20 @@ message RegisterRequest {
 
 message RegisterResponse {
   string client_id = 1;
-  // Token the client must echo in the first UDP audio packet
-  // so the server can associate the UDP flow with this session.
+  // 16-byte token the client must echo in every UDP audio packet
+  // so the server can identify the session.
   bytes audio_token = 2;
   // UDP endpoint the client should send audio to.
   string audio_endpoint = 3;
+  // 32-byte symmetric key for authenticating UDP audio packets.
+  // The client keyed-hashes each outbound packet (version || seq ||
+  // payload) with BLAKE3 and appends the first 8 bytes of the
+  // result as a MAC; the server rejects packets whose MAC doesn't
+  // verify (forgery / off-path injection) or whose `seq` is not
+  // strictly greater than the last accepted seq for the same
+  // session (replay). The key never leaves either endpoint after
+  // this handshake.
+  bytes audio_mac_key = 4;
 }
 
 message JoinRequest {

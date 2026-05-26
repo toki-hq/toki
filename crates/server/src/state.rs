@@ -23,6 +23,18 @@ pub struct Client {
     /// hash, which is useless against the UDP relay's hash-then-
     /// compare check.
     pub audio_token_hash: [u8; TOKEN_HASH_LEN],
+    /// Symmetric BLAKE3-keyed-hash key used to authenticate this
+    /// session's UDP packets. The client receives the same key in
+    /// `RegisterResponse.audio_mac_key` and uses it to MAC every
+    /// outbound packet. Lives only in server memory + the client's
+    /// runtime; never persisted.
+    pub audio_mac_key: [u8; toki_proto::wire::MAC_KEY_LEN],
+    /// Highest sequence number we've accepted from this session.
+    /// Strict-monotonic replay protection: incoming packets must
+    /// carry `seq > audio_last_seq` to be forwarded. UDP reordering
+    /// will drop the occasional out-of-order frame, which the
+    /// playback path already tolerates as ordinary packet loss.
+    pub audio_last_seq: u64,
     pub audio_addr: Option<SocketAddr>,
     pub events_tx: Option<mpsc::Sender<Event>>,
     /// The frequency room the client is currently in. `None` between

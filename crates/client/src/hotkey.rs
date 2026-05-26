@@ -35,11 +35,11 @@
 //!   without XWayland will see no events. The clickable PTT button
 //!   still works.
 
-use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use device_query::{DeviceQuery, DeviceState, Keycode};
 use tokio::sync::mpsc::UnboundedSender;
@@ -58,8 +58,21 @@ pub const DEFAULT_KEY: Code = Code::Backquote;
 /// thresholds for "instant" — at the cost of ~100 syscalls/sec.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How long a key or button must be held continuously before it gets
+/// committed as the new PTT binding. The polling thread tracks the
+/// press-start time of every currently-held input and commits the
+/// first one to reach this duration.
+///
+/// Why hold-to-bind: a plain "first new press" capture loses against
+/// the on-screen Cancel button — the OS polling thread sees the
+/// Cancel mouse-down before egui sees the matching mouse-up click,
+/// so any click on Cancel gets captured as a Left-mouse binding.
+/// Requiring 1 s of sustained hold means a Cancel *click* (~100 ms)
+/// can't qualify, while an intentional bind (deliberately held) does.
+const HOLD_DURATION: Duration = Duration::from_secs(1);
+
 /// One PTT binding from any peripheral. The user picks exactly one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Input {
     Key(Code),
     Mouse(MouseButton),
@@ -69,7 +82,7 @@ pub enum Input {
 /// platform-specific extra buttons that show up as indices ≥3 in
 /// device_query's `MouseState::button_pressed` vec (typically X1/X2
 /// on Windows mice).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MouseButton {
     Left,
     Right,
@@ -130,6 +143,12 @@ pub struct InstalledHotkey {
     recorded: Arc<Mutex<Option<Input>>>,
     recording: Arc<AtomicBool>,
 
+    /// Progress of the currently-longest held input toward
+    /// [`HOLD_DURATION`], stored as `f32` bits. UI polls this each
+    /// frame to render the progress bar; cleared back to 0 whenever
+    /// recording ends.
+    hold_progress: Arc<AtomicU32>,
+
     /// `true` once the polling thread has spawned. If it never starts,
     /// global PTT is unavailable on this system.
     available: bool,
@@ -161,6 +180,14 @@ impl InstalledHotkey {
     pub fn cancel_recording(&self) {
         self.recording.store(false, Ordering::Relaxed);
         *self.recorded.lock().unwrap() = None;
+        self.hold_progress.store(0u32, Ordering::Relaxed);
+    }
+
+    /// `0.0..=1.0` — how far the longest-currently-held input is
+    /// toward triggering a bind. UI uses this to render a progress
+    /// bar that fills as the user holds.
+    pub fn hold_progress(&self) -> f32 {
+        f32::from_bits(self.hold_progress.load(Ordering::Relaxed))
     }
 
     /// Consume a captured input, if any. Returns `Some` exactly once
@@ -175,6 +202,7 @@ impl InstalledHotkey {
 
     /// `false` if the polling thread couldn't be spawned. UI uses this
     /// to grey out the bind affordance.
+    #[allow(dead_code)]
     pub fn available(&self) -> bool {
         self.available
     }
@@ -187,18 +215,21 @@ pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> Installe
     let current = Arc::new(Mutex::new(initial));
     let recorded = Arc::new(Mutex::new(None));
     let recording = Arc::new(AtomicBool::new(false));
+    let hold_progress = Arc::new(AtomicU32::new(0));
 
     let available = spawn_poller(
         cmd_tx,
         current.clone(),
         recorded.clone(),
         recording.clone(),
+        hold_progress.clone(),
     );
 
     InstalledHotkey {
         current,
         recorded,
         recording,
+        hold_progress,
         available,
     }
 }
@@ -213,6 +244,7 @@ fn spawn_poller(
     current: Arc<Mutex<Option<Input>>>,
     recorded: Arc<Mutex<Option<Input>>>,
     recording: Arc<AtomicBool>,
+    hold_progress: Arc<AtomicU32>,
 ) -> bool {
     let build = thread::Builder::new().name("toki-input".into());
     let result = build.spawn(move || {
@@ -226,7 +258,7 @@ fn spawn_poller(
                 return;
             }
         };
-        run_poll_loop(ds, cmd_tx, current, recorded, recording);
+        run_poll_loop(ds, cmd_tx, current, recorded, recording, hold_progress);
     });
     match result {
         Ok(_) => {
@@ -246,43 +278,105 @@ fn run_poll_loop(
     current: Arc<Mutex<Option<Input>>>,
     recorded: Arc<Mutex<Option<Input>>>,
     recording: Arc<AtomicBool>,
+    hold_progress: Arc<AtomicU32>,
 ) {
     let mut prev_keys: HashSet<Keycode> = HashSet::new();
-    let mut prev_buttons: Vec<bool> = Vec::new();
     let mut ptt_down = false;
+    let mut was_recording = false;
+    // While recording, tracks the earliest-press timestamp for every
+    // currently-held input. Cleared on entry into recording mode so
+    // anything pressed *before* "Bind" doesn't get pre-credited.
+    let mut held: HashMap<Input, Instant> = HashMap::new();
 
     loop {
         thread::sleep(POLL_INTERVAL);
-
+        let now = Instant::now();
         let keys: HashSet<Keycode> = ds.get_keys().into_iter().collect();
         let mouse = ds.get_mouse();
+        let is_recording = recording.load(Ordering::Relaxed);
 
-        // ── Recording mode: capture the first new press this tick ─
-        if recording.load(Ordering::Relaxed) {
-            // Prefer keyboard newly-pressed; fall back to mouse.
-            let mut captured: Option<Input> = None;
-            for kc in keys.difference(&prev_keys) {
+        if is_recording {
+            // On the false→true edge, reset everything: ignore whatever
+            // was already pressed at the moment recording started (the
+            // Bind click's mouse-down, a stale key, etc.). Only presses
+            // that *begin* during recording count.
+            if !was_recording {
+                held.clear();
+                hold_progress.store(0u32, Ordering::Relaxed);
+            }
+
+            // Escape is the always-on cancel. It's never bindable —
+            // intentional, since Escape collides with the "close
+            // dialog" intent across virtually every app.
+            if keys.difference(&prev_keys).any(|k| *k == Keycode::Escape) {
+                recording.store(false, Ordering::Relaxed);
+                *recorded.lock().unwrap() = None;
+                hold_progress.store(0u32, Ordering::Relaxed);
+                held.clear();
+                prev_keys = keys;
+                was_recording = is_recording;
+                continue;
+            }
+
+            // Build the set of currently-held inputs (keyboard + mouse).
+            // Escape is excluded so we never accidentally commit it.
+            let mut current_inputs: Vec<Input> = Vec::new();
+            for kc in &keys {
+                if *kc == Keycode::Escape {
+                    continue;
+                }
                 if let Some(code) = device_to_code(*kc) {
-                    captured = Some(Input::Key(code));
-                    break;
+                    current_inputs.push(Input::Key(code));
                 }
             }
-            if captured.is_none() {
-                for (i, &pressed) in mouse.button_pressed.iter().enumerate() {
-                    let was = prev_buttons.get(i).copied().unwrap_or(false);
-                    if pressed && !was {
-                        captured = Some(Input::Mouse(MouseButton::from_index(i)));
-                        break;
-                    }
+            for (i, &pressed) in mouse.button_pressed.iter().enumerate() {
+                if pressed {
+                    current_inputs.push(Input::Mouse(MouseButton::from_index(i)));
                 }
             }
-            if let Some(input) = captured {
+
+            // Drop anything that's been released (timer resets).
+            held.retain(|input, _| current_inputs.contains(input));
+            // Start timers for newly-held inputs.
+            for input in &current_inputs {
+                held.entry(*input).or_insert(now);
+            }
+
+            // Has any single input been held long enough to commit?
+            // Pick the longest-held one (most likely the intended key:
+            // if the user holds a modifier plus a letter, the modifier
+            // they grabbed first wins their muscle memory).
+            let committed = held
+                .iter()
+                .filter(|(_, &start)| now.duration_since(start) >= HOLD_DURATION)
+                .max_by_key(|(_, &start)| now.duration_since(start))
+                .map(|(input, _)| *input);
+
+            // Update progress for the UI: max progress across all
+            // currently-held inputs.
+            let max_progress = held
+                .values()
+                .map(|&start| {
+                    now.duration_since(start).as_secs_f32() / HOLD_DURATION.as_secs_f32()
+                })
+                .fold(0.0_f32, f32::max)
+                .clamp(0.0, 1.0);
+            hold_progress.store(max_progress.to_bits(), Ordering::Relaxed);
+
+            if let Some(input) = committed {
                 *recorded.lock().unwrap() = Some(input);
                 recording.store(false, Ordering::Relaxed);
+                held.clear();
+                hold_progress.store(0u32, Ordering::Relaxed);
             }
-            // While recording, do NOT also fire PTT — the press would
+            // While recording, do NOT fire PTT — the held press would
             // otherwise leak into the previous binding's transmit gate.
         } else {
+            // Clean up on recording-exit so a future Bind starts fresh.
+            if was_recording {
+                held.clear();
+                hold_progress.store(0u32, Ordering::Relaxed);
+            }
             // ── Normal: track held-state of the bound input ───────
             let bound = *current.lock().unwrap();
             if let Some(bound) = bound {
@@ -306,7 +400,7 @@ fn run_poll_loop(
         }
 
         prev_keys = keys;
-        prev_buttons = mouse.button_pressed;
+        was_recording = is_recording;
     }
 }
 

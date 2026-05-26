@@ -36,9 +36,16 @@ pub enum Cmd {
         frequency: String,
     },
     Disconnect,
+    /// Leave the current frequency room *without* dropping the session.
+    /// Used as the first half of a debounced frequency change — the
+    /// UI fires this on the user's first chevron click so they "go off
+    /// the air" immediately, then sends [`Cmd::ChangeFrequency`] once
+    /// the chevron clicks settle.
+    LeaveRoom,
     /// Move to a different frequency room. Server emits MemberLeft on
     /// the old room and MemberJoined backfill on the new room, all on
-    /// the existing event stream.
+    /// the existing event stream. Safe to call when the client is
+    /// currently roomless (the post-`LeaveRoom` state).
     ChangeFrequency(String),
     PttDown,
     PttUp,
@@ -150,6 +157,11 @@ async fn handle_cmd(
                 st.self_id = None;
                 st.frequency = None;
                 st.log("disconnected");
+            }
+        }
+        Cmd::LeaveRoom => {
+            if let Some(s) = session {
+                s.leave_room(state).await;
             }
         }
         Cmd::ChangeFrequency(freq) => {
@@ -389,6 +401,36 @@ impl Session {
             signaling,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
+    }
+
+    /// Leave the current frequency room without dropping the gRPC
+    /// session. Used by the UI's debounced channel selector: the
+    /// chevron's first click "takes us off the air" immediately, then
+    /// the actual join lands once the user settles on a frequency.
+    ///
+    /// We also flip the local PTT atomic off and clear the roster so
+    /// the UI doesn't show stale members from the room we just left.
+    async fn leave_room(&self, state: &SharedState) {
+        self.ptt.store(false, Ordering::Relaxed);
+        let mut signaling = self.signaling.clone();
+        let req = LeaveRequest {
+            client_id: self.client_id.clone(),
+        };
+        if let Err(e) = signaling.leave(req).await {
+            warn!(error = %e, "leave_room failed");
+        }
+        // Optimistically clear local room state. The server has either
+        // honored the Leave (in which case its state already matches
+        // ours) or errored — either way, painting an empty roster is
+        // the right thing to show the user.
+        let mut st = state.lock().unwrap();
+        st.members.clear();
+        if let Some(self_id) = st.self_id.clone() {
+            let our_name = st.display_name.clone();
+            st.members.insert(self_id, our_name);
+        }
+        st.holder = None;
+        st.frequency = None;
     }
 
     /// Ask the server to move us to a new frequency. The server emits

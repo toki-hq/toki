@@ -58,10 +58,15 @@ pub struct TokiApp {
     muted: bool,
     /// Pre-mute output gain, so toggling mute round-trips cleanly.
     gain_before_mute: f32,
-    /// Display-only channel selection. Toki's wire protocol is single-
-    /// room — the chevron buttons cycle which of the 8 design channels
-    /// is shown, but every client still joins the same backend room.
+    /// Currently-selected channel index in the 446–448 MHz band. UI
+    /// updates this instantly on chevron click; the actual server-
+    /// side room join is debounced — see `freq_change_deadline`.
     channel_idx: usize,
+    /// While `Some(t)`, the user is mid-tuning: they've clicked a
+    /// chevron and we're holding the actual `ChangeFrequency` RPC
+    /// until `t`. Each fresh chevron click pushes `t` forward by
+    /// `FREQ_DEBOUNCE`. Cleared once the RPC fires (or on disconnect).
+    freq_change_deadline: Option<Instant>,
     /// 64-sample scrolling buffer for the waveform.
     waveform: VecDeque<f32>,
     /// Last frame time, for animation pacing independent of repaint rate.
@@ -137,6 +142,7 @@ impl TokiApp {
             muted: false,
             gain_before_mute: 1.0,
             channel_idx,
+            freq_change_deadline: None,
             waveform: VecDeque::from(vec![0.0; T::WAVEFORM_SAMPLES]),
             last_tick: Instant::now(),
             wave_phase: 0.0,
@@ -213,13 +219,70 @@ impl TokiApp {
         self.state.lock().unwrap().members.len()
     }
 
-    /// Persist the new channel selection to config and tell the
-    /// runtime to ChangeFrequency on the server.
-    fn send_frequency_change(&mut self) {
+    /// Called on every chevron click. Two-phase behavior:
+    ///   1. On the *first* click of a tuning burst, immediately tell
+    ///      the runtime to leave the current room — we go "off the
+    ///      air" so further clicks scan through frequencies without
+    ///      racing join/leave RPCs against each other.
+    ///   2. Always push the debounce deadline forward to
+    ///      `now + FREQ_DEBOUNCE`. The actual `ChangeFrequency` RPC
+    ///      fires from the update loop once the deadline passes
+    ///      without any further clicks.
+    ///
+    /// The local `channel_idx` and `config` are updated immediately so
+    /// the OLED reflects the user's intent as they scroll, even
+    /// though the network move is deferred.
+    fn schedule_frequency_change(&mut self) {
         let freq = T::frequency_label(T::frequency_of(self.channel_idx));
-        self.config.connection.frequency = freq.clone();
+        self.config.connection.frequency = freq;
         self.config.save();
-        let _ = self.cmd_tx.send(Cmd::ChangeFrequency(freq));
+
+        // Only act on debounce when we're actually connected — if
+        // we're disconnected, the next Connect will use the right
+        // frequency from config and no leave/join is needed now.
+        let connected = matches!(
+            self.state.lock().unwrap().connection,
+            ConnState::Connected
+        );
+        if !connected {
+            return;
+        }
+
+        // First click of this burst: send LeaveRoom right away so the
+        // user disappears from the old room's roster immediately.
+        if self.freq_change_deadline.is_none() {
+            let _ = self.cmd_tx.send(Cmd::LeaveRoom);
+        }
+        self.freq_change_deadline = Some(Instant::now() + T::FREQ_DEBOUNCE);
+    }
+
+    /// Run from the update loop each frame: if a debounce is in
+    /// flight and the deadline has passed, fire the ChangeFrequency
+    /// RPC for the user's final channel selection and clear the
+    /// pending state.
+    fn tick_freq_debounce(&mut self) {
+        let Some(deadline) = self.freq_change_deadline else {
+            return;
+        };
+        // Bail out cleanly if we lost the session mid-tune.
+        if !matches!(
+            self.state.lock().unwrap().connection,
+            ConnState::Connected
+        ) {
+            self.freq_change_deadline = None;
+            return;
+        }
+        if Instant::now() >= deadline {
+            let freq = T::frequency_label(T::frequency_of(self.channel_idx));
+            let _ = self.cmd_tx.send(Cmd::ChangeFrequency(freq));
+            self.freq_change_deadline = None;
+        }
+    }
+
+    /// True while a frequency change is debouncing (user is tuning,
+    /// not yet settled). Drives the topbar's orange "TUNING" chip.
+    fn is_tuning(&self) -> bool {
+        self.freq_change_deadline.is_some()
     }
 }
 
@@ -446,6 +509,9 @@ impl eframe::App for TokiApp {
         let snap = self.snapshot();
         let st = self.radio_state(&snap);
         self.tick_waveform(st);
+        // Fire any pending frequency-change RPC once the user has
+        // stopped clicking chevrons for `FREQ_DEBOUNCE`.
+        self.tick_freq_debounce();
 
         // ── Recording: poll the rdev/device_query listener ──────────
         if self.recording {
@@ -625,12 +691,18 @@ impl TokiApp {
         }
         x -= 14.0;
 
-        // Status chip: dot + label.
-        let (chip_color, chip_label, chip_glow) = match st {
-            RadioState::Tx => (T::TX, "TX", 1.2),
-            RadioState::Rx => (T::PRIMARY, "RX", 1.2),
-            RadioState::Busy => (T::WARN, "BUSY", 1.0),
-            RadioState::Idle => (T::PRIMARY_DIM, "IDLE", 0.3),
+        // Status chip: dot + label. Tuning takes priority over Idle
+        // so the user gets a clear "I'm between frequencies" cue —
+        // orange dot + "TUNING" label until the debounce settles.
+        let (chip_color, chip_label, chip_glow) = if self.is_tuning() {
+            (T::TX, "TUNING", 1.0)
+        } else {
+            match st {
+                RadioState::Tx => (T::TX, "TX", 1.2),
+                RadioState::Rx => (T::PRIMARY, "RX", 1.2),
+                RadioState::Busy => (T::WARN, "BUSY", 1.0),
+                RadioState::Idle => (T::PRIMARY_DIM, "IDLE", 0.3),
+            }
         };
         // Label first (we draw right-to-left): place label, then dot.
         let label_w = chip_label.len() as f32 * 6.5 + 8.0;
@@ -847,7 +919,7 @@ impl TokiApp {
         }
 
         if prev_idx != self.channel_idx {
-            self.send_frequency_change();
+            self.schedule_frequency_change();
         }
     }
 

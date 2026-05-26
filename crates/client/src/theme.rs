@@ -94,6 +94,13 @@ pub const WAVEFORM_SAMPLES: usize = 64;
 // (50 kHz) channel spacing — 41 distinct channels. Each frequency maps
 // to its own logical room on the server; the chevrons in the UI cycle
 // between them and send `ChangeFrequency` to the server.
+/// How long the user must stay on a frequency (no further chevron
+/// clicks) before we actually join the room on the server. Mirrors
+/// how a real walkie-talkie's user interface "settles" before
+/// committing — fast scans through nearby frequencies don't generate
+/// a join-leave storm on the server.
+pub const FREQ_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(450);
+
 pub const FREQ_MIN_MHZ: f32 = 446.00;
 /// Upper band edge — documented for clarity; the runtime never compares
 /// against this directly (we use `FREQ_CHANNEL_COUNT` to bound the

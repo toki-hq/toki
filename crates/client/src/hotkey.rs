@@ -71,6 +71,26 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// can't qualify, while an intentional bind (deliberately held) does.
 const HOLD_DURATION: Duration = Duration::from_secs(1);
 
+/// Keys that are never bindable as PTT. Space and Enter collide with
+/// the universal "activate focused control" semantics in dialogs and
+/// forms; Escape is reserved as the always-on cancel for the bind
+/// flow itself. Pressing any of these during recording is silently
+/// ignored (no hold timer starts), and a loaded config that points at
+/// one of them is treated as "no PTT bound" at match time as a
+/// belt-and-braces guard against hand-edited config files.
+const RESTRICTED_KEYS: &[Keycode] = &[Keycode::Space, Keycode::Enter, Keycode::Escape];
+
+/// `true` if `code` resolves to a keyboard key on our restricted
+/// list. Mouse bindings have no restrictions today.
+pub fn is_restricted(input: Input) -> bool {
+    match input {
+        Input::Key(code) => RESTRICTED_KEYS
+            .iter()
+            .any(|kc| device_to_code(*kc) == Some(code)),
+        Input::Mouse(_) => false,
+    }
+}
+
 /// One PTT binding from any peripheral. The user picks exactly one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Input {
@@ -212,6 +232,17 @@ impl InstalledHotkey {
 /// Unlike rdev, device_query polling is benign — it just queries OS
 /// state every 10 ms — so we don't need the lazy-spawn dance.
 pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> InstalledHotkey {
+    // Belt-and-braces: a hand-edited config could point at Space /
+    // Enter / Escape even though the bind UI refuses to record them.
+    // Drop the value silently — the user can rebind from the
+    // Settings panel and the rest of the app behaves as "no PTT".
+    let initial = initial.filter(|i| {
+        let ok = !is_restricted(*i);
+        if !ok {
+            warn!(?i, "ignoring restricted PTT binding from config");
+        }
+        ok
+    });
     let current = Arc::new(Mutex::new(initial));
     let recorded = Arc::new(Mutex::new(None));
     let recording = Arc::new(AtomicBool::new(false));
@@ -305,9 +336,10 @@ fn run_poll_loop(
                 hold_progress.store(0u32, Ordering::Relaxed);
             }
 
-            // Escape is the always-on cancel. It's never bindable —
-            // intentional, since Escape collides with the "close
-            // dialog" intent across virtually every app.
+            // Escape doubles as the always-on cancel for the bind
+            // flow. Other restricted keys (Space, Enter) are just
+            // silently excluded from the candidate set further down;
+            // only Escape *aborts* the recording session entirely.
             if keys.difference(&prev_keys).any(|k| *k == Keycode::Escape) {
                 recording.store(false, Ordering::Relaxed);
                 *recorded.lock().unwrap() = None;
@@ -319,10 +351,13 @@ fn run_poll_loop(
             }
 
             // Build the set of currently-held inputs (keyboard + mouse).
-            // Escape is excluded so we never accidentally commit it.
+            // Restricted keys are excluded so we never commit one —
+            // pressing Space, Enter, or Escape while recording acts as
+            // if the user pressed nothing at all (Escape additionally
+            // cancels via the branch above).
             let mut current_inputs: Vec<Input> = Vec::new();
             for kc in &keys {
-                if *kc == Keycode::Escape {
+                if RESTRICTED_KEYS.contains(kc) {
                     continue;
                 }
                 if let Some(code) = device_to_code(*kc) {

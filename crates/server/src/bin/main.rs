@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use tonic::transport::Server;
+use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
 use toki_server::{audio, config::Config, reaper, signaling::SignalingSvc, state};
@@ -29,6 +29,32 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("password gate DISARMED — server is in open mode");
     }
+
+    // TLS for the gRPC channel. Optional: when the config doesn't
+    // supply paths we stay on plaintext HTTP/2 (current behavior).
+    // When it does, both files are loaded into a ServerTlsConfig
+    // identity at startup so a bad path fails fast instead of
+    // mid-flight on the first handshake.
+    let tls_config: Option<ServerTlsConfig> = match &config.tls {
+        Some(tls) => {
+            let cert = std::fs::read(&tls.cert).map_err(|e| {
+                anyhow::anyhow!("read TLS cert {}: {}", tls.cert.display(), e)
+            })?;
+            let key = std::fs::read(&tls.key).map_err(|e| {
+                anyhow::anyhow!("read TLS key {}: {}", tls.key.display(), e)
+            })?;
+            tracing::info!(
+                cert = %tls.cert.display(),
+                key = %tls.key.display(),
+                "TLS ARMED — gRPC channel will use HTTPS/2"
+            );
+            Some(ServerTlsConfig::new().identity(Identity::from_pem(cert, key)))
+        }
+        None => {
+            tracing::info!("TLS DISARMED — gRPC channel is plaintext HTTP/2");
+            None
+        }
+    };
 
     let grpc_addr: SocketAddr = std::env::var("TOKI_GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".into())
@@ -61,7 +87,11 @@ async fn main() -> anyhow::Result<()> {
     // amplification probe (the proto decoder allocates before the
     // handler runs, so a 4 MB request burns 4 MB of server heap even
     // when the password check is going to reject it).
-    let grpc = Server::builder()
+    let mut builder = Server::builder();
+    if let Some(tls) = tls_config {
+        builder = builder.tls_config(tls)?;
+    }
+    let grpc = builder
         .add_service(
             SignalingSvc::new(registry, advertised_audio, password)
                 .max_decoding_message_size(8 * 1024),

@@ -34,6 +34,25 @@ pub struct Config {
     /// password is a lightweight network gate, not a credential store.
     #[serde(default)]
     pub password: Option<String>,
+
+    /// Optional TLS configuration for the gRPC signaling channel.
+    /// When present *and* both files exist on disk, the server
+    /// serves over HTTPS/2 and the password / per-session audio MAC
+    /// key travel encrypted on the wire. When absent, the server
+    /// stays on plaintext HTTP/2 (current behavior; LAN-only
+    /// deployments where on-path attackers aren't in the threat
+    /// model can keep operating as-is).
+    #[serde(default)]
+    pub tls: Option<TlsFiles>,
+}
+
+/// PEM-encoded certificate + private-key paths for the gRPC TLS
+/// terminator. Either Let's Encrypt outputs (`fullchain.pem` +
+/// `privkey.pem`) or self-signed pairs generated via mkcert / step.
+#[derive(Debug, Deserialize)]
+pub struct TlsFiles {
+    pub cert: std::path::PathBuf,
+    pub key: std::path::PathBuf,
 }
 
 impl Config {

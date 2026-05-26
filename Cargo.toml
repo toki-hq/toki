@@ -12,7 +12,12 @@ repository = "https://github.com/coton/toki"
 toki-proto = { path = "crates/proto" }
 
 tokio = { version = "1.41", features = ["full"] }
-tonic = "0.12"
+# TLS feature enables `ServerTlsConfig` / `ClientTlsConfig`; transport
+# feature (default) is required for `Server::builder().tls_config(...)`.
+# We accept the extra ~1 MB of binary size for confidentiality on the
+# gRPC signaling channel (which carries the shared-secret password
+# and per-session audio MAC key).
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
 prost = "0.13"
 tonic-build = "0.12"
 

@@ -275,16 +275,37 @@ impl Session {
         playback: PlaybackBuf,
         beeps: BeepParams,
     ) -> Result<Self> {
-        // Accept either "host:port" or a full URL.
+        // Accept either "host:port" or a full URL. The URL scheme
+        // decides whether to use TLS: `https://` activates TLS with
+        // the system trust store (tonic's `tls-roots` feature pulls
+        // in webpki-roots-equivalent), `http://` stays plaintext.
+        // Bare "host:port" defaults to plaintext for backward compat
+        // with existing configs — users who want TLS write
+        // `https://host:port` explicitly.
         let server_url = if server.starts_with("http://") || server.starts_with("https://") {
             server.to_string()
         } else {
             format!("http://{server}")
         };
 
-        let mut signaling = SignalingClient::connect(server_url.clone())
-            .await
-            .with_context(|| format!("connect {server_url}"))?;
+        let mut endpoint = tonic::transport::Endpoint::from_shared(server_url.clone())
+            .with_context(|| format!("parse endpoint {server_url}"))?;
+        if server_url.starts_with("https://") {
+            // `ClientTlsConfig::with_native_roots` picks up the OS
+            // trust store. Operators using self-signed certs on a
+            // LAN should add their CA to the system trust store; we
+            // intentionally don't expose a per-config CA bundle yet
+            // to keep this fix UX-transparent.
+            endpoint = endpoint
+                .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
+                .with_context(|| "configure TLS")?;
+        }
+        let mut signaling = SignalingClient::new(
+            endpoint
+                .connect()
+                .await
+                .with_context(|| format!("connect {server_url}"))?,
+        );
 
         let reg = signaling
             .register(RegisterRequest {

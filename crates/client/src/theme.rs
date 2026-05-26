@@ -92,7 +92,16 @@ pub const ICON_BTN_D: f32 = 28.0;
 
 // ── Constants from the spec ─────────────────────────────────────────────
 pub const TX_LIMIT_MS: u32 = 30_000;
-pub const WAVEFORM_SAMPLES: usize = 64;
+/// Number of bars in the center-OLED spectrum histogram. 32 reads as
+/// "chunky and radio-y" at the panel's typical 260–360 px width; 64
+/// looked busy. The FFT window is 4× wider (128 bins of useful
+/// spectrum), so each bar averages 4 consecutive bins.
+pub const SPECTRUM_BARS: usize = 32;
+/// Number of input samples per FFT. A power of two so rustfft picks
+/// the cheap radix-2 plan. At 48 kHz this covers ~5.3 ms of audio
+/// per analysis frame — plenty of detail for a visualizer that
+/// updates at ~30 Hz.
+pub const SPECTRUM_FFT_LEN: usize = 256;
 
 // ── Frequency band ──────────────────────────────────────────────────────
 // Toki uses the PMR446-adjacent 446.00–448.00 MHz band, with 0.05 MHz

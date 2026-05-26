@@ -7,7 +7,6 @@
 //! design has too much custom chrome (glows, scanlines, gradients) to
 //! be expressible through the default widget set.
 
-use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use eframe::egui::{
@@ -15,7 +14,11 @@ use eframe::egui::{
     StrokeKind, Vec2,
 };
 
-use crate::audio::{self, AudioControl, AudioDevices, AudioGains};
+use std::sync::Arc;
+
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
+
+use crate::audio::{self, AudioControl, AudioDevices, AudioGains, AudioLevels, AudioSpectrum};
 use crate::config::{self, HotkeyConfig};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
@@ -57,6 +60,16 @@ pub struct TokiApp {
     audio_devices: AudioDevices,
     audio_control: AudioControl,
     audio_gains: AudioGains,
+    /// Live peak levels published by the cpal callbacks. Kept on
+    /// `self` so a future Settings meter (e.g. a per-direction VU
+    /// bar) can read them without re-plumbing the audio handle.
+    /// The histogram itself uses the spectrum ring.
+    #[allow(dead_code)]
+    audio_levels: AudioLevels,
+    /// Recent-sample rings (input + output) the cpal callbacks fill.
+    /// `tick_waveform` snapshots the tail of one side each frame and
+    /// runs an FFT for the histogram.
+    audio_spectrum: AudioSpectrum,
 
     // ── UI-only state ───────────────────────────────────────────────
     /// True when the user is holding either the PTT key/button or
@@ -81,8 +94,19 @@ pub struct TokiApp {
     /// until `t`. Each fresh chevron click pushes `t` forward by
     /// `FREQ_DEBOUNCE`. Cleared once the RPC fires (or on disconnect).
     freq_change_deadline: Option<Instant>,
-    /// 64-sample scrolling buffer for the waveform.
-    waveform: VecDeque<f32>,
+    /// Smoothed bar magnitudes for the spectrum histogram, indexed
+    /// low → high frequency. Updated each tick from an FFT of the
+    /// active source (mic during TX, playback during RX).
+    spectrum_bars: Vec<f32>,
+    /// Pre-planned FFT over `SPECTRUM_FFT_LEN` samples. Reused every
+    /// frame so we don't re-plan (rustfft caches twiddles internally
+    /// in the planner, but re-asking each frame is still wasteful).
+    fft: Arc<dyn Fft<f32>>,
+    /// Scratch for the FFT — sampled audio in, complex magnitudes
+    /// out. Held on `self` so we don't reallocate every frame.
+    fft_workspace: Vec<Complex<f32>>,
+    /// Scratch buffer the spectrum-ring snapshot drains into.
+    spectrum_samples: Vec<f32>,
     /// Last frame time, for animation pacing independent of repaint rate.
     last_tick: Instant,
     /// Counter for the synthesized waveform's phase modulation.
@@ -113,7 +137,14 @@ impl TokiApp {
             devices,
             control,
             gains,
+            levels,
+            spectrum,
         } = audio_handle;
+
+        // FFT planner is cheap to throw away once we have the
+        // concrete plan — keep the `Arc<dyn Fft>` for repeated use.
+        let mut planner = FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(T::SPECTRUM_FFT_LEN);
 
         let cmd_tx = runtime::spawn(state.clone(), mic_rx, playback);
 
@@ -156,6 +187,8 @@ impl TokiApp {
             audio_devices: devices,
             audio_control: control,
             audio_gains: gains,
+            audio_levels: levels,
+            audio_spectrum: spectrum,
             ptt_held: false,
             tx_start: None,
             show_settings: false,
@@ -163,7 +196,10 @@ impl TokiApp {
             gain_before_mute: 1.0,
             channel_idx,
             freq_change_deadline: None,
-            waveform: VecDeque::from(vec![0.0; T::WAVEFORM_SAMPLES]),
+            spectrum_bars: vec![0.0; T::SPECTRUM_BARS],
+            fft,
+            fft_workspace: vec![Complex::new(0.0, 0.0); T::SPECTRUM_FFT_LEN],
+            spectrum_samples: Vec::with_capacity(T::SPECTRUM_FFT_LEN),
             last_tick: Instant::now(),
             wave_phase: 0.0,
             start_time: Instant::now(),
@@ -215,28 +251,94 @@ impl TokiApp {
         }
     }
 
-    /// Advance the synthesized waveform one frame's worth of samples
-    /// based on the current radio state. Both TX and RX animate; idle
-    /// stays flat.
+    /// Compute the spectrum histogram for the current frame.
+    ///
+    /// Pulls the most recent `SPECTRUM_FFT_LEN` samples from the
+    /// audio thread (mic during TX, playback during RX, nothing
+    /// otherwise), windows them with a Hann window, runs a forward
+    /// FFT, and reduces the useful bins (1 .. N/2 — DC + Nyquist
+    /// dropped) into `SPECTRUM_BARS` log-magnitude bars.
+    ///
+    /// The bar values are smoothed across frames so a noisy FFT
+    /// doesn't make the histogram twitch; same fast-attack /
+    /// slow-decay shape as the audio peak meter.
     fn tick_waveform(&mut self, st: RadioState) {
         let now = Instant::now();
         let dt = now.duration_since(self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
         self.wave_phase += dt * 6.0;
-        let active = matches!(st, RadioState::Tx | RadioState::Rx);
-        // Synthesize an RMS-ish envelope. When we plumb real mic/playback
-        // levels through the runtime we can replace this with measured
-        // values. For now it's enough to give the panel life when active.
-        let target = if active {
-            let env = 0.55 + 0.35 * (self.wave_phase * 0.21).sin() * (self.wave_phase * 0.13).cos();
-            let grain =
-                0.5 + 0.5 * (self.wave_phase * 4.1).sin() * (self.wave_phase * 2.9).cos();
-            (env.abs() * (0.55 + 0.45 * grain.abs())).clamp(0.0, 1.0)
-        } else {
-            0.0
+
+        match st {
+            RadioState::Tx => self
+                .audio_spectrum
+                .snapshot_input(&mut self.spectrum_samples, T::SPECTRUM_FFT_LEN),
+            RadioState::Rx => self
+                .audio_spectrum
+                .snapshot_output(&mut self.spectrum_samples, T::SPECTRUM_FFT_LEN),
+            _ => self.spectrum_samples.clear(),
         };
-        self.waveform.pop_front();
-        self.waveform.push_back(target);
+
+        // Need a full window's worth of samples to produce a useful
+        // FFT — otherwise just decay the existing bars toward zero.
+        if self.spectrum_samples.len() == T::SPECTRUM_FFT_LEN {
+            // Hann window + load into the complex workspace.
+            let n = T::SPECTRUM_FFT_LEN;
+            for (i, &s) in self.spectrum_samples.iter().enumerate() {
+                let w = 0.5
+                    - 0.5
+                        * (i as f32 * std::f32::consts::TAU / (n as f32 - 1.0)).cos();
+                self.fft_workspace[i] = Complex::new(s * w, 0.0);
+            }
+            self.fft.process(&mut self.fft_workspace);
+
+            // We care about bins `[1, n/2)` — skip DC (bin 0) and
+            // mirror frequencies above Nyquist. Group sequential bins
+            // into `SPECTRUM_BARS` buckets (so the histogram is
+            // independent of the FFT size).
+            let usable_bins = n / 2 - 1; // skip DC
+            let per_bar = (usable_bins / T::SPECTRUM_BARS).max(1);
+            // Theoretical normalization is `1 / (n * 0.5)` (Hann
+            // coherent gain), which makes a full-scale sine sit at
+            // 1.0. In practice voice never hits anywhere near that:
+            // typical PCM peaks at 0.05–0.15 and the energy spreads
+            // across many bins, so each bar's raw magnitude is in
+            // the 0.001–0.02 range. Multiply the visualizer norm by
+            // ~8× so a moderately-loud voice now spans the panel
+            // top to bottom rather than wiggling at the baseline.
+            // This is purely a *display* gain — the underlying audio
+            // is untouched, so we can't actually clip anything by
+            // pushing this up.
+            let norm = 8.0 / (n as f32 * 0.5);
+            for bar_i in 0..T::SPECTRUM_BARS {
+                let bin_lo = 1 + bar_i * per_bar;
+                let bin_hi = (bin_lo + per_bar).min(n / 2);
+                let mut sum: f32 = 0.0;
+                for c in &self.fft_workspace[bin_lo..bin_hi] {
+                    sum += (c.re * c.re + c.im * c.im).sqrt();
+                }
+                let mag = (sum / (bin_hi - bin_lo) as f32) * norm;
+                // Slightly more aggressive gamma (0.5 → 0.42) lifts
+                // the tail of the distribution further — small
+                // consonants get visible.
+                let target = mag.clamp(0.0, 1.0).powf(0.42);
+                let prev = self.spectrum_bars[bar_i];
+                // Faster decay (0.75 → 0.62) so bars fall more
+                // dynamically between syllables — feels lively
+                // instead of mushy.
+                self.spectrum_bars[bar_i] = if target >= prev {
+                    target
+                } else {
+                    prev * 0.62 + target * 0.38
+                };
+            }
+        } else {
+            // No live audio — bleed the bars toward zero so the
+            // panel doesn't freeze on the last RX frame after a
+            // channel change.
+            for bar in &mut self.spectrum_bars {
+                *bar *= 0.85;
+            }
+        }
     }
 
     fn ensure_min_one_frame(&self, ctx: &egui::Context) {
@@ -1476,6 +1578,11 @@ impl TokiApp {
         );
     }
 
+    /// Frequency-domain histogram. Each bar is one spectrum bucket;
+    /// height is the bucket's magnitude (after windowing + gamma).
+    /// We mirror the bars top + bottom so the panel reads like an
+    /// audio analyzer rather than a one-sided meter — keeps visual
+    /// weight in the center the same as the old waveform.
     fn paint_waveform(&self, painter: &egui::Painter, rect: Rect, st: RadioState) {
         let active = matches!(st, RadioState::Tx | RadioState::Rx);
         let color = match st {
@@ -1483,10 +1590,11 @@ impl TokiApp {
             _ if active => T::PRIMARY,
             _ => T::PRIMARY_INK,
         };
-        let alpha = if active { 240 } else { 110 };
-        let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+        let fill_alpha = if active { 235 } else { 100 };
+        let fill = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), fill_alpha);
 
-        // Dashed center axis.
+        // Dashed center axis — kept from the old waveform, ties the
+        // mirrored bars to a clean baseline.
         let mid_y = rect.center().y;
         let mut x = rect.left();
         while x < rect.right() {
@@ -1498,44 +1606,43 @@ impl TokiApp {
             x += 5.0;
         }
 
-        // Build top edge (left→right) and bottom edge (right→left) for
-        // a single closed mirrored shape — one ConvexPolygon draw + a
-        // soft halo behind it for the "glow".
-        let n = self.waveform.len();
-        if n < 2 {
+        let bars = self.spectrum_bars.len();
+        if bars == 0 {
             return;
         }
-        let step = rect.width() / (n - 1) as f32;
+        // Bar geometry: leave a small gap between bars so each one
+        // reads independently. A bar covers ~70% of its slot width.
+        let slot_w = rect.width() / bars as f32;
+        let bar_w = (slot_w * 0.72).max(2.0);
         let half_h = rect.height() / 2.0;
-        let mut top_pts: Vec<Pos2> = Vec::with_capacity(n);
-        let mut bot_pts: Vec<Pos2> = Vec::with_capacity(n);
-        for (i, &v) in self.waveform.iter().enumerate() {
-            let amp = (v * (half_h - 2.0)).max(2.0);
-            let x = rect.left() + i as f32 * step;
-            top_pts.push(Pos2::new(x, mid_y - amp));
-            bot_pts.push(Pos2::new(x, mid_y + amp));
-        }
-        bot_pts.reverse();
-        let mut polygon: Vec<Pos2> = Vec::with_capacity(n * 2);
-        polygon.extend(top_pts);
-        polygon.extend(bot_pts);
 
+        // Soft halo behind active bars — paints a slightly taller
+        // version with low alpha so each bar gets a phosphor bloom.
         if active {
-            // Halo layer (a slightly bloated version, low alpha).
             let halo = Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 50);
-            let halo_pts: Vec<Pos2> = polygon
-                .iter()
-                .map(|p| {
-                    if p.y < mid_y {
-                        Pos2::new(p.x, p.y - 2.0)
-                    } else {
-                        Pos2::new(p.x, p.y + 2.0)
-                    }
-                })
-                .collect();
-            painter.add(Shape::convex_polygon(halo_pts, halo, Stroke::NONE));
+            for (i, &v) in self.spectrum_bars.iter().enumerate() {
+                let amp = (v * (half_h - 2.0)).max(1.5) + 1.5;
+                let cx = rect.left() + (i as f32 + 0.5) * slot_w;
+                let bar = Rect::from_min_max(
+                    Pos2::new(cx - bar_w * 0.5 - 1.0, mid_y - amp),
+                    Pos2::new(cx + bar_w * 0.5 + 1.0, mid_y + amp),
+                );
+                painter.rect_filled(bar, CornerRadius::same(1), halo);
+            }
         }
-        painter.add(Shape::convex_polygon(polygon, fill, Stroke::NONE));
+
+        for (i, &v) in self.spectrum_bars.iter().enumerate() {
+            // Cap the minimum so the baseline reads as a continuous
+            // "floor" of dim bars instead of empty space when there's
+            // no signal.
+            let amp = (v * (half_h - 2.0)).max(1.5);
+            let cx = rect.left() + (i as f32 + 0.5) * slot_w;
+            let bar = Rect::from_min_max(
+                Pos2::new(cx - bar_w * 0.5, mid_y - amp),
+                Pos2::new(cx + bar_w * 0.5, mid_y + amp),
+            );
+            painter.rect_filled(bar, CornerRadius::same(1), fill);
+        }
     }
 
     // ── Bottom row: knob + PTT ─────────────────────────────────────

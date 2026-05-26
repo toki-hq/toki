@@ -1,3 +1,16 @@
+// Suppress the console window on Windows release builds — the spec
+// asks for a GUI-only launch (no flash of cmd.exe behind the widget,
+// no terminal staying attached). Debug builds keep the default
+// console subsystem so `cargo run` still streams tracing output.
+//
+// macOS and Linux: this attribute is a no-op there. Launching from a
+// terminal still streams output; launching from a file manager / dock
+// already detaches stdio.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod app;
 mod audio;
 mod config;
@@ -12,6 +25,11 @@ use tracing_subscriber::EnvFilter;
 use crate::app::TokiApp;
 
 fn main() -> eframe::Result<()> {
+    // In a Windows release build the process has no console attached,
+    // so writes to stderr go nowhere. `tracing_subscriber::fmt` still
+    // initializes fine; the writes are silently dropped. If we ever
+    // need release-build diagnostics, route this to a rolling file
+    // appender in `dirs::data_dir()` instead of stderr.
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();

@@ -26,6 +26,7 @@ egui-colorgradient = "0.2"
 cpal = "0.15"
 global-hotkey = "0.6"
 device_query = "4"
+rustfft = "6"
 serde = { workspace = true }
 toml = "0.8"
 dirs = "5"

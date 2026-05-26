@@ -61,6 +61,16 @@ pub struct AudioHandle {
     /// — changes apply on the next callback (sub-10 ms typical), no
     /// stream restart needed.
     pub gains: AudioGains,
+    /// Live peak levels published by the cpal callbacks (input on the
+    /// capture side, output on the drain side). UI polls these to
+    /// drive the waveform. Cheap to clone — same `Arc`-of-atomics
+    /// pattern as `AudioGains`, opposite direction.
+    pub levels: AudioLevels,
+    /// Recent-sample rings for FFT-based spectrum rendering. UI
+    /// snapshots the last N samples each frame, runs a windowed FFT
+    /// off-thread (well, on the UI thread — see `tick_waveform`), and
+    /// displays bin magnitudes.
+    pub spectrum: AudioSpectrum,
 }
 
 /// Lock-free linear gain controls shared between the UI thread (writer)
@@ -97,6 +107,140 @@ impl AudioGains {
     fn output_atomic(&self) -> Arc<AtomicU32> {
         self.output.clone()
     }
+}
+
+/// Lock-free peak meters fed by the cpal callbacks. `[0.0, 1.0]`
+/// each — `1.0` means "this callback hit full-scale on at least one
+/// sample". Smoothed with fast-attack / slow-decay inside the
+/// callback so successive UI reads see a coherent envelope rather
+/// than per-callback jitter.
+#[derive(Clone)]
+pub struct AudioLevels {
+    input: Arc<AtomicU32>,
+    output: Arc<AtomicU32>,
+}
+
+impl AudioLevels {
+    fn new() -> Self {
+        Self {
+            input: Arc::new(AtomicU32::new(0)),
+            output: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    /// Mic-side peak in `[0.0, 1.0]`. Currently unused at the UI
+    /// surface (the histogram reads the spectrum ring directly), but
+    /// kept around for future affordances like a Settings VU meter.
+    #[allow(dead_code)]
+    pub fn input(&self) -> f32 {
+        f32::from_bits(self.input.load(Ordering::Relaxed))
+    }
+
+    /// Playback-side peak in `[0.0, 1.0]`. Same future-use story as
+    /// `input` above.
+    #[allow(dead_code)]
+    pub fn output(&self) -> f32 {
+        f32::from_bits(self.output.load(Ordering::Relaxed))
+    }
+
+    fn input_atomic(&self) -> Arc<AtomicU32> {
+        self.input.clone()
+    }
+
+    fn output_atomic(&self) -> Arc<AtomicU32> {
+        self.output.clone()
+    }
+}
+
+/// Ring buffer of the most recent `f32` samples for both directions.
+/// The capacity is sized to comfortably exceed our FFT window
+/// (256 samples) plus a frame or two of jitter — anything older is
+/// dropped on the next push.
+pub const SPECTRUM_BUF_LEN: usize = 1024;
+
+/// Shared sample rings: the cpal callbacks push the latest mono
+/// samples after gain is applied; the UI thread snapshots the tail
+/// each frame to feed an FFT. A `Mutex<VecDeque>` is fine here — the
+/// snapshot copy is a few thousand `f32`s, well under a millisecond
+/// even on the audio thread, and contention is rare (one writer, one
+/// reader, opposite cadences).
+#[derive(Clone)]
+pub struct AudioSpectrum {
+    input: Arc<Mutex<VecDeque<f32>>>,
+    output: Arc<Mutex<VecDeque<f32>>>,
+}
+
+impl AudioSpectrum {
+    fn new() -> Self {
+        Self {
+            input: Arc::new(Mutex::new(VecDeque::with_capacity(SPECTRUM_BUF_LEN))),
+            output: Arc::new(Mutex::new(VecDeque::with_capacity(SPECTRUM_BUF_LEN))),
+        }
+    }
+
+    /// Copy the last `n` samples of the input ring into `out`. Clears
+    /// `out` first. If the ring holds fewer than `n` samples the
+    /// short prefix is returned — callers can check `out.len()`.
+    pub fn snapshot_input(&self, out: &mut Vec<f32>, n: usize) {
+        let buf = self.input.lock().unwrap();
+        snapshot_tail(&buf, n, out);
+    }
+
+    pub fn snapshot_output(&self, out: &mut Vec<f32>, n: usize) {
+        let buf = self.output.lock().unwrap();
+        snapshot_tail(&buf, n, out);
+    }
+
+    fn input_buf(&self) -> Arc<Mutex<VecDeque<f32>>> {
+        self.input.clone()
+    }
+
+    fn output_buf(&self) -> Arc<Mutex<VecDeque<f32>>> {
+        self.output.clone()
+    }
+}
+
+fn snapshot_tail(buf: &VecDeque<f32>, n: usize, out: &mut Vec<f32>) {
+    out.clear();
+    let start = buf.len().saturating_sub(n);
+    out.extend(buf.iter().skip(start).copied());
+}
+
+/// Push samples into a spectrum ring, dropping the oldest beyond
+/// `SPECTRUM_BUF_LEN`. Called from inside the cpal callback so this
+/// must stay cheap — bulk-extend then drain at most a frame's worth
+/// from the front, no per-sample lock thrashing.
+fn push_spectrum(buf: &Mutex<VecDeque<f32>>, samples: &[f32]) {
+    if samples.is_empty() {
+        return;
+    }
+    let mut b = buf.lock().unwrap();
+    // Drop overflow up front so the extend doesn't reallocate past
+    // the buffer's preallocated capacity.
+    let total = b.len() + samples.len();
+    if total > SPECTRUM_BUF_LEN {
+        let drop_n = total - SPECTRUM_BUF_LEN;
+        for _ in 0..drop_n {
+            b.pop_front();
+        }
+    }
+    b.extend(samples.iter().copied());
+}
+
+/// Blend `peak` into the atomic with fast-attack, slow-decay smoothing.
+/// Called from inside the cpal callbacks so it lives on the audio
+/// thread. The 0.85 decay coefficient gives roughly a 60 ms half-life
+/// at ~100 callbacks/sec — visually smooth without lagging behind
+/// the actual signal.
+fn blend_level(atomic: &AtomicU32, peak: f32) {
+    let prev = f32::from_bits(atomic.load(Ordering::Relaxed));
+    // Snap up on a louder reading, ease down otherwise.
+    let next = if peak >= prev {
+        peak
+    } else {
+        prev * 0.85 + peak * 0.15
+    };
+    atomic.store(next.to_bits(), Ordering::Relaxed);
 }
 
 #[derive(Clone, Debug, Default)]
@@ -148,11 +292,17 @@ pub fn spawn(
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
 
     let gains = AudioGains::new(initial_input_gain, initial_output_gain);
+    let levels = AudioLevels::new();
+    let spectrum = AudioSpectrum::new();
 
     let mic_tx_for_thread = mic_tx;
     let playback_for_thread = playback.clone();
     let in_gain_for_thread = gains.input_atomic();
     let out_gain_for_thread = gains.output_atomic();
+    let in_level_for_thread = levels.input_atomic();
+    let out_level_for_thread = levels.output_atomic();
+    let in_spec_for_thread = spectrum.input_buf();
+    let out_spec_for_thread = spectrum.output_buf();
 
     std::thread::Builder::new()
         .name("toki-audio".into())
@@ -165,12 +315,16 @@ pub fn spawn(
                 initial_input.as_deref(),
                 &mic_tx_for_thread,
                 &in_gain_for_thread,
+                &in_level_for_thread,
+                &in_spec_for_thread,
             );
             let mut output_stream = open_output_for(
                 &host,
                 initial_output.as_deref(),
                 &playback_for_thread,
                 &out_gain_for_thread,
+                &out_level_for_thread,
+                &out_spec_for_thread,
             );
 
             // cpal streams run on their own threads; this loop is idle
@@ -189,6 +343,8 @@ pub fn spawn(
                             name.as_deref(),
                             &mic_tx_for_thread,
                             &in_gain_for_thread,
+                            &in_level_for_thread,
+                            &in_spec_for_thread,
                         );
                     }
                     Ok(AudioCmd::SetOutput(name)) => {
@@ -198,6 +354,8 @@ pub fn spawn(
                             name.as_deref(),
                             &playback_for_thread,
                             &out_gain_for_thread,
+                            &out_level_for_thread,
+                            &out_spec_for_thread,
                         );
                     }
                     Err(_) => break,
@@ -217,6 +375,8 @@ pub fn spawn(
         devices,
         control: AudioControl { tx: cmd_tx },
         gains,
+        levels,
+        spectrum,
     })
 }
 
@@ -258,15 +418,24 @@ fn pick_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     host.default_output_device()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_input_for(
     host: &cpal::Host,
     name: Option<&str>,
     mic_tx: &UnboundedSender<Vec<i16>>,
     gain: &Arc<AtomicU32>,
+    level: &Arc<AtomicU32>,
+    spectrum: &Arc<Mutex<VecDeque<f32>>>,
 ) -> Option<cpal::Stream> {
     let device = pick_input(host, name)?;
     let device_name = device.name().unwrap_or_else(|_| "?".into());
-    let stream = match open_input(&device, mic_tx.clone(), gain.clone()) {
+    let stream = match open_input(
+        &device,
+        mic_tx.clone(),
+        gain.clone(),
+        level.clone(),
+        spectrum.clone(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             warn!(device = %device_name, error = %e, "failed to open input stream");
@@ -281,15 +450,24 @@ fn open_input_for(
     Some(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_output_for(
     host: &cpal::Host,
     name: Option<&str>,
     playback: &PlaybackBuf,
     gain: &Arc<AtomicU32>,
+    level: &Arc<AtomicU32>,
+    spectrum: &Arc<Mutex<VecDeque<f32>>>,
 ) -> Option<cpal::Stream> {
     let device = pick_output(host, name)?;
     let device_name = device.name().unwrap_or_else(|_| "?".into());
-    let stream = match open_output(&device, playback.clone(), gain.clone()) {
+    let stream = match open_output(
+        &device,
+        playback.clone(),
+        gain.clone(),
+        level.clone(),
+        spectrum.clone(),
+    ) {
         Ok(s) => s,
         Err(e) => {
             warn!(device = %device_name, error = %e, "failed to open output stream");
@@ -334,9 +512,19 @@ fn open_input(
     dev: &cpal::Device,
     mic_tx: UnboundedSender<Vec<i16>>,
     gain: Arc<AtomicU32>,
+    level: Arc<AtomicU32>,
+    spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
     // First try our platform-preferred mono f32 config.
-    match build_input_stream::<f32>(dev, &PREFERRED, 1, mic_tx.clone(), gain.clone()) {
+    match build_input_stream::<f32>(
+        dev,
+        &PREFERRED,
+        1,
+        mic_tx.clone(),
+        gain.clone(),
+        level.clone(),
+        spectrum.clone(),
+    ) {
         Ok(s) => {
             info!("input: 1 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
             return Ok(s);
@@ -358,9 +546,15 @@ fn open_input(
     // (48 kHz) before sending, so cross-OS clients see consistent timing.
 
     match format {
-        cpal::SampleFormat::F32 => build_input_stream::<f32>(dev, &cfg, channels, mic_tx, gain),
-        cpal::SampleFormat::I16 => build_input_stream::<i16>(dev, &cfg, channels, mic_tx, gain),
-        cpal::SampleFormat::U16 => build_input_stream::<u16>(dev, &cfg, channels, mic_tx, gain),
+        cpal::SampleFormat::F32 => {
+            build_input_stream::<f32>(dev, &cfg, channels, mic_tx, gain, level, spectrum)
+        }
+        cpal::SampleFormat::I16 => {
+            build_input_stream::<i16>(dev, &cfg, channels, mic_tx, gain, level, spectrum)
+        }
+        cpal::SampleFormat::U16 => {
+            build_input_stream::<u16>(dev, &cfg, channels, mic_tx, gain, level, spectrum)
+        }
         other => Err(anyhow!("unsupported input sample format: {other:?}")),
     }
 }
@@ -369,8 +563,18 @@ fn open_output(
     dev: &cpal::Device,
     playback: PlaybackBuf,
     gain: Arc<AtomicU32>,
+    level: Arc<AtomicU32>,
+    spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
-    match build_output_stream::<f32>(dev, &PREFERRED, 1, playback.clone(), gain.clone()) {
+    match build_output_stream::<f32>(
+        dev,
+        &PREFERRED,
+        1,
+        playback.clone(),
+        gain.clone(),
+        level.clone(),
+        spectrum.clone(),
+    ) {
         Ok(s) => {
             info!("output: 1 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
             return Ok(s);
@@ -392,9 +596,15 @@ fn open_output(
     // rate (48 kHz) to the device rate on the fly.
 
     match format {
-        cpal::SampleFormat::F32 => build_output_stream::<f32>(dev, &cfg, channels, playback, gain),
-        cpal::SampleFormat::I16 => build_output_stream::<i16>(dev, &cfg, channels, playback, gain),
-        cpal::SampleFormat::U16 => build_output_stream::<u16>(dev, &cfg, channels, playback, gain),
+        cpal::SampleFormat::F32 => {
+            build_output_stream::<f32>(dev, &cfg, channels, playback, gain, level, spectrum)
+        }
+        cpal::SampleFormat::I16 => {
+            build_output_stream::<i16>(dev, &cfg, channels, playback, gain, level, spectrum)
+        }
+        cpal::SampleFormat::U16 => {
+            build_output_stream::<u16>(dev, &cfg, channels, playback, gain, level, spectrum)
+        }
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
     }
 }
@@ -471,12 +681,15 @@ impl LinearResampler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_input_stream<T>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,
     channels: u16,
     mic_tx: UnboundedSender<Vec<i16>>,
     gain: Arc<AtomicU32>,
+    level: Arc<AtomicU32>,
+    spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + Send + 'static,
@@ -492,6 +705,10 @@ where
     let mut accum: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES);
     let mut downmixed: Vec<i16> = Vec::with_capacity(2048);
     let mut wire: Vec<i16> = Vec::with_capacity(2048);
+    // Parallel `f32` buffer holding the post-gain mono samples — fed
+    // to the spectrum ring so the UI doesn't have to re-convert i16
+    // → f32 just to FFT.
+    let mut spec_samples: Vec<f32> = Vec::with_capacity(2048);
     let stream = dev.build_input_stream(
         cfg,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
@@ -500,13 +717,27 @@ where
             // sample is unnecessary overhead.
             let g = f32::from_bits(gain.load(Ordering::Relaxed));
             // Interleaved samples; downmix N channels to mono by averaging.
+            // While we're at it, track the |max| sample so the UI can
+            // render a real mic-level waveform during TX, AND copy
+            // the f32 amplitude into the spectrum ring for the
+            // histogram view.
             downmixed.clear();
+            spec_samples.clear();
+            let mut peak: f32 = 0.0;
             for frame in data.chunks_exact(ch) {
                 let sum: f32 = frame.iter().map(|&s| s.to_sample::<f32>()).sum();
                 let avg = (sum / ch as f32) * g;
-                let v = (avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                let clamped = avg.clamp(-1.0, 1.0);
+                let abs = clamped.abs();
+                if abs > peak {
+                    peak = abs;
+                }
+                let v = (clamped * i16::MAX as f32) as i16;
                 downmixed.push(v);
+                spec_samples.push(clamped);
             }
+            blend_level(&level, peak);
+            push_spectrum(&spectrum, &spec_samples);
             // Resample to wire rate, then chunk into 480-sample frames.
             wire.clear();
             resampler.process(&downmixed, &mut wire);
@@ -524,12 +755,15 @@ where
     Ok(stream)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_output_stream<T>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,
     channels: u16,
     playback: PlaybackBuf,
     gain: Arc<AtomicU32>,
+    level: Arc<AtomicU32>,
+    spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Send + 'static,
@@ -544,6 +778,9 @@ where
     let mut wire_chunk: Vec<i16> = Vec::with_capacity(512);
     let mut resampled: Vec<i16> = Vec::with_capacity(1024);
     let mut ready: std::collections::VecDeque<i16> = std::collections::VecDeque::with_capacity(4096);
+    // Hoisted so we don't reallocate inside the audio-thread callback
+    // every ~10 ms. Same trick the input builder uses.
+    let mut spec_samples: Vec<f32> = Vec::with_capacity(2048);
     let stream = dev.build_output_stream(
         cfg,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
@@ -574,14 +811,28 @@ where
             }
 
             // Pop one mono sample, replicate it across N output channels.
+            // Track the |max| f32 amplitude we wrote so the UI can
+            // render a real waveform during RX. Empty pops contribute
+            // 0 to the peak, so silence decays naturally via
+            // `blend_level`. Same loop also fills the spectrum ring
+            // with the post-gain mono `f32`s.
+            let mut peak: f32 = 0.0;
+            spec_samples.clear();
             for frame in data.chunks_mut(ch) {
                 let mono = ready.pop_front().unwrap_or(0);
                 let f = ((mono as f32 / i16::MAX as f32) * g).clamp(-1.0, 1.0);
+                let abs = f.abs();
+                if abs > peak {
+                    peak = abs;
+                }
+                spec_samples.push(f);
                 let s: T = T::from_sample(f);
                 for slot in frame.iter_mut() {
                     *slot = s;
                 }
             }
+            blend_level(&level, peak);
+            push_spectrum(&spectrum, &spec_samples);
         },
         |e| warn!(error = %e, "output stream error"),
         None,

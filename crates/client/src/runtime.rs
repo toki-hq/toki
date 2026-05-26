@@ -19,8 +19,8 @@ use tonic::transport::Channel;
 use tracing::{info, warn};
 
 use toki_proto::v1::{
-    JoinChannelRequest, LeaveChannelRequest, PttEvent, RegisterRequest,
-    channel_event::Event as ChEvent, signaling_client::SignalingClient,
+    JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
+    event::Event as Ev, signaling_client::SignalingClient,
 };
 use toki_proto::wire::{
     HEADER_LEN, MAX_AUDIO_PACKET, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
@@ -33,7 +33,6 @@ pub enum Cmd {
     Connect {
         server: String,
         display_name: String,
-        channel: String,
     },
     Disconnect,
     PttDown,
@@ -104,19 +103,18 @@ async fn handle_cmd(
         Cmd::Connect {
             server,
             display_name,
-            channel,
         } => {
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
                 return;
             }
             state.lock().unwrap().connection = ConnState::Connecting;
-            match Session::open(&server, &display_name, &channel, state.clone(), playback.clone()).await {
+            match Session::open(&server, &display_name, state.clone(), playback.clone()).await {
                 Ok(s) => {
                     {
                         let mut st = state.lock().unwrap();
                         st.connection = ConnState::Connected;
-                        st.log(format!("connected as {display_name} in #{channel}"));
+                        st.log(format!("connected as {display_name}"));
                     }
                     *session = Some(s);
                 }
@@ -153,7 +151,6 @@ async fn handle_cmd(
 
 struct Session {
     client_id: String,
-    channel: String,
     audio_token: Vec<u8>,
     ptt: Arc<AtomicBool>,
     seq: AtomicU64,
@@ -167,7 +164,6 @@ impl Session {
     async fn open(
         server: &str,
         display_name: &str,
-        channel: &str,
         state: SharedState,
         playback: PlaybackBuf,
     ) -> Result<Self> {
@@ -209,11 +205,10 @@ impl Session {
         send_keepalive(&udp, &audio_token).await?;
         info!(?audio_addr, "udp audio connected");
 
-        // ── Channel event stream (server → us) ────────────────────────
+        // ── Event stream (server → us) ────────────────────────────────
         let events_resp = signaling
-            .join_channel(JoinChannelRequest {
+            .join(JoinRequest {
                 client_id: client_id.clone(),
-                channel: channel.to_string(),
             })
             .await?;
         let mut events = events_resp.into_inner();
@@ -226,12 +221,12 @@ impl Session {
             while let Some(evt) = events.next().await {
                 match evt {
                     Ok(ce) => match ce.event {
-                        Some(ChEvent::Joined(j)) => {
+                        Some(Ev::Joined(j)) => {
                             let mut st = state_for_events.lock().unwrap();
                             st.members.insert(j.client_id.clone(), j.display_name.clone());
                             st.log(format!("→ {} joined", j.display_name));
                         }
-                        Some(ChEvent::Left(l)) => {
+                        Some(Ev::Left(l)) => {
                             let mut st = state_for_events.lock().unwrap();
                             let name = st
                                 .members
@@ -245,7 +240,7 @@ impl Session {
                             }
                             st.log(format!("← {name} left"));
                         }
-                        Some(ChEvent::Ptt(p)) => {
+                        Some(Ev::Ptt(p)) => {
                             // Update holder state and detect transitions in one
                             // critical section, then play beeps / flip the audio
                             // gate outside the lock.
@@ -278,22 +273,22 @@ impl Session {
                                 state_for_events
                                     .lock()
                                     .unwrap()
-                                    .log(format!("🔒 {talker_name} took the channel"));
+                                    .log(format!("🔒 {talker_name} took the floor"));
                             } else if released {
                                 let tone = audio::beep(800.0, 100, 0.25);
                                 push_playback(&playback_for_events, &tone);
-                                state_for_events.lock().unwrap().log("🔓 channel cleared");
+                                state_for_events.lock().unwrap().log("🔓 floor cleared");
                             }
                         }
                         None => {}
                     },
                     Err(e) => {
-                        warn!(error = %e, "channel event stream error");
+                        warn!(error = %e, "event stream error");
                         break;
                     }
                 }
             }
-            info!("channel event stream closed");
+            info!("event stream closed");
         });
 
         // ── PTT outbound stream (us → server) ─────────────────────────
@@ -343,7 +338,6 @@ impl Session {
 
         Ok(Self {
             client_id,
-            channel: channel.to_string(),
             audio_token,
             // Shared with events_task — it's the only writer. Flipped to
             // `true` only when the server's broadcast confirms us as holder.
@@ -364,7 +358,6 @@ impl Session {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let evt = PttEvent {
             client_id: self.client_id.clone(),
-            channel: self.channel.clone(),
             pressed,
             sequence: seq,
         };
@@ -388,9 +381,8 @@ impl Session {
     async fn close(mut self) {
         let _ = self
             .signaling
-            .leave_channel(LeaveChannelRequest {
+            .leave(LeaveRequest {
                 client_id: self.client_id.clone(),
-                channel: self.channel.clone(),
             })
             .await;
         for t in &self.tasks {

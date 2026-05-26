@@ -3,24 +3,24 @@
 //! Every `INTERVAL` we scan the registry and evict any client whose
 //! `last_seen` (refreshed on every inbound UDP packet — see [`crate::audio`])
 //! is older than `TIMEOUT`. Eviction is the same cleanup that
-//! `Signaling::leave_channel` performs:
+//! `Signaling::leave` performs:
 //!
 //!   - drop the client from the registry and token table
-//!   - remove them from every channel's member list
+//!   - remove them from the room's member list
 //!   - if they were holding the PTT lock, clear it
-//!   - broadcast `MemberLeft` to remaining channel members
+//!   - broadcast `MemberLeft` to remaining room members
 //!   - if they were the holder, also broadcast a PTT release so peers'
 //!     UIs unlock and play the release beep
 //!
 //! Effect: a client that crashes mid-transmission no longer freezes the
-//! channel — the lock is released automatically within `TIMEOUT`.
+//! room — the lock is released automatically within `TIMEOUT`.
 
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc;
 use tracing::info;
 
-use toki_proto::v1::{ChannelEvent, MemberLeft, PttEvent, channel_event};
+use toki_proto::v1::{Event, MemberLeft, PttEvent, event};
 
 use crate::state::SharedRegistry;
 
@@ -55,9 +55,8 @@ async fn reap_once(registry: &SharedRegistry) {
         let stale_ids: Vec<String> = r
             .clients
             .iter()
-            .filter_map(|(id, c)| {
-                (now.duration_since(c.last_seen) > TIMEOUT).then(|| id.clone())
-            })
+            .filter(|(_, c)| now.duration_since(c.last_seen) > TIMEOUT)
+            .map(|(id, _)| id.clone())
             .collect();
 
         let mut broadcasts = Vec::new();
@@ -67,38 +66,30 @@ async fn reap_once(registry: &SharedRegistry) {
             };
             r.tokens.remove(&client.audio_token);
 
-            // One broadcast group per channel they were in: remaining
-            // channel members get notified.
-            for ch_name in &client.channels {
-                let was_holder = if let Some(ch) = r.channels.get_mut(ch_name) {
-                    ch.members.retain(|m| m != &id);
-                    let holding = ch.holder.as_deref() == Some(id.as_str());
-                    if holding {
-                        ch.holder = None;
-                    }
-                    holding
-                } else {
-                    false
-                };
+            let was_holder = {
+                let room = &mut r.room;
+                room.members.retain(|m| m != &id);
+                let holding = room.holder.as_deref() == Some(id.as_str());
+                if holding {
+                    room.holder = None;
+                }
+                holding
+            };
 
-                let recipients: Vec<mpsc::Sender<ChannelEvent>> = r
-                    .channels
-                    .get(ch_name)
-                    .map(|c| c.members.clone())
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|m| r.clients.get(m))
-                    .filter_map(|c| c.events_tx.clone())
-                    .collect();
+            let recipients: Vec<mpsc::Sender<Event>> = r
+                .room
+                .members
+                .iter()
+                .filter_map(|m| r.clients.get(m))
+                .filter_map(|c| c.events_tx.clone())
+                .collect();
 
-                broadcasts.push(EvictionBroadcast {
-                    client_id: id.clone(),
-                    display_name: client.display_name.clone(),
-                    channel: ch_name.clone(),
-                    recipients,
-                    was_holder,
-                });
-            }
+            broadcasts.push(EvictionBroadcast {
+                client_id: id.clone(),
+                display_name: client.display_name.clone(),
+                recipients,
+                was_holder,
+            });
         }
         broadcasts
     };
@@ -107,19 +98,17 @@ async fn reap_once(registry: &SharedRegistry) {
         info!(
             client = %b.client_id,
             name = %b.display_name,
-            channel = %b.channel,
             was_holder = b.was_holder,
             "evicted stale client",
         );
-        let left = ChannelEvent {
-            event: Some(channel_event::Event::Left(MemberLeft {
+        let left = Event {
+            event: Some(event::Event::Left(MemberLeft {
                 client_id: b.client_id.clone(),
             })),
         };
-        let release = b.was_holder.then(|| ChannelEvent {
-            event: Some(channel_event::Event::Ptt(PttEvent {
+        let release = b.was_holder.then(|| Event {
+            event: Some(event::Event::Ptt(PttEvent {
                 client_id: b.client_id.clone(),
-                channel: b.channel.clone(),
                 pressed: false,
                 sequence: 0,
             })),
@@ -136,7 +125,6 @@ async fn reap_once(registry: &SharedRegistry) {
 struct EvictionBroadcast {
     client_id: String,
     display_name: String,
-    channel: String,
-    recipients: Vec<mpsc::Sender<ChannelEvent>>,
+    recipients: Vec<mpsc::Sender<Event>>,
     was_holder: bool,
 }

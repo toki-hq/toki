@@ -3,11 +3,12 @@ use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
+use tracing::info;
 use uuid::Uuid;
 
 use toki_proto::v1::{
-    ChannelEvent, JoinChannelRequest, LeaveChannelRequest, LeaveChannelResponse, PttAck, PttEvent,
-    RegisterRequest, RegisterResponse, channel_event,
+    Event, JoinRequest, LeaveRequest, LeaveResponse, PttAck, PttEvent, RegisterRequest,
+    RegisterResponse, event,
     signaling_server::{Signaling, SignalingServer},
 };
 
@@ -27,11 +28,11 @@ impl SignalingSvc {
     }
 }
 
-type EventStream = Pin<Box<dyn Stream<Item = Result<ChannelEvent, Status>> + Send>>;
+type EventStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
 
 #[tonic::async_trait]
 impl Signaling for SignalingSvc {
-    type JoinChannelStream = EventStream;
+    type JoinStream = EventStream;
 
     async fn register(
         &self,
@@ -43,11 +44,11 @@ impl Signaling for SignalingSvc {
 
         let client = Client {
             id: id.clone(),
-            display_name: req.display_name,
+            display_name: req.display_name.clone(),
             audio_token: token.clone(),
             audio_addr: None,
             events_tx: None,
-            channels: Vec::new(),
+            joined: false,
             // Start the heartbeat clock at registration. The client will
             // refresh this within ~100 ms via its initial UDP keepalive,
             // and every 3 s thereafter.
@@ -57,6 +58,15 @@ impl Signaling for SignalingSvc {
         let mut registry = self.registry.lock().await;
         registry.tokens.insert(token.clone(), id.clone());
         registry.clients.insert(id.clone(), client);
+        let total = registry.clients.len();
+        drop(registry);
+
+        info!(
+            client_id = %id,
+            name = %req.display_name,
+            total_clients = total,
+            "client registered",
+        );
 
         Ok(Response::new(RegisterResponse {
             client_id: id,
@@ -65,12 +75,12 @@ impl Signaling for SignalingSvc {
         }))
     }
 
-    async fn join_channel(
+    async fn join(
         &self,
-        request: Request<JoinChannelRequest>,
-    ) -> Result<Response<Self::JoinChannelStream>, Status> {
+        request: Request<JoinRequest>,
+    ) -> Result<Response<Self::JoinStream>, Status> {
         let req = request.into_inner();
-        let (tx, rx) = mpsc::channel::<ChannelEvent>(64);
+        let (tx, rx) = mpsc::channel::<Event>(64);
 
         let mut registry = self.registry.lock().await;
 
@@ -80,28 +90,33 @@ impl Signaling for SignalingSvc {
                 .get_mut(&req.client_id)
                 .ok_or_else(|| Status::not_found("unknown client"))?;
             client.events_tx = Some(tx.clone());
-            if !client.channels.contains(&req.channel) {
-                client.channels.push(req.channel.clone());
-            }
+            client.joined = true;
             client.display_name.clone()
         };
 
-        let (other_ids, current_holder) = {
-            let channel = registry.channels.entry(req.channel.clone()).or_default();
-            if !channel.members.contains(&req.client_id) {
-                channel.members.push(req.client_id.clone());
+        let (other_ids, current_holder, total_members) = {
+            let room = &mut registry.room;
+            if !room.members.contains(&req.client_id) {
+                room.members.push(req.client_id.clone());
             }
-            let others: Vec<String> = channel
+            let others: Vec<String> = room
                 .members
                 .iter()
                 .filter(|id| *id != &req.client_id)
                 .cloned()
                 .collect();
-            (others, channel.holder.clone())
+            (others, room.holder.clone(), room.members.len())
         };
 
-        let join_event = ChannelEvent {
-            event: Some(channel_event::Event::Joined(toki_proto::v1::MemberJoined {
+        info!(
+            client_id = %req.client_id,
+            name = %display_name,
+            members = total_members,
+            "client joined room",
+        );
+
+        let join_event = Event {
+            event: Some(event::Event::Joined(toki_proto::v1::MemberJoined {
                 client_id: req.client_id.clone(),
                 display_name,
             })),
@@ -110,8 +125,8 @@ impl Signaling for SignalingSvc {
         // Backfill the new joiner with the existing roster…
         for id in &other_ids {
             if let Some(existing) = registry.clients.get(id) {
-                let backfill = ChannelEvent {
-                    event: Some(channel_event::Event::Joined(toki_proto::v1::MemberJoined {
+                let backfill = Event {
+                    event: Some(event::Event::Joined(toki_proto::v1::MemberJoined {
                         client_id: existing.id.clone(),
                         display_name: existing.display_name.clone(),
                     })),
@@ -124,10 +139,9 @@ impl Signaling for SignalingSvc {
         // UI starts in the correct state (button disabled, "X is talking").
         if let Some(holder_id) = current_holder {
             if holder_id != req.client_id {
-                let backfill = ChannelEvent {
-                    event: Some(channel_event::Event::Ptt(PttEvent {
+                let backfill = Event {
+                    event: Some(event::Event::Ptt(PttEvent {
                         client_id: holder_id,
-                        channel: req.channel.clone(),
                         pressed: true,
                         sequence: 0,
                     })),
@@ -146,59 +160,60 @@ impl Signaling for SignalingSvc {
         }
 
         let stream = ReceiverStream::new(rx).map(Ok);
-        Ok(Response::new(Box::pin(stream) as Self::JoinChannelStream))
+        Ok(Response::new(Box::pin(stream) as Self::JoinStream))
     }
 
-    async fn leave_channel(
+    async fn leave(
         &self,
-        request: Request<LeaveChannelRequest>,
-    ) -> Result<Response<LeaveChannelResponse>, Status> {
+        request: Request<LeaveRequest>,
+    ) -> Result<Response<LeaveResponse>, Status> {
         let req = request.into_inner();
 
-        let (recipients, left_event, release_event) = {
+        let (recipients, left_event, release_event, display_name, remaining) = {
             let mut registry = self.registry.lock().await;
 
-            // Remove the leaver from the channel, and detect whether they
+            // Remove the leaver from the room, and detect whether they
             // were holding the PTT lock (so we can broadcast a release).
-            let was_holder = if let Some(ch) = registry.channels.get_mut(&req.channel) {
-                ch.members.retain(|id| id != &req.client_id);
-                if ch.holder.as_deref() == Some(req.client_id.as_str()) {
-                    ch.holder = None;
+            let was_holder = {
+                let room = &mut registry.room;
+                room.members.retain(|id| id != &req.client_id);
+                if room.holder.as_deref() == Some(req.client_id.as_str()) {
+                    room.holder = None;
                     true
                 } else {
                     false
                 }
-            } else {
-                false
             };
 
+            let display_name = registry
+                .clients
+                .get(&req.client_id)
+                .map(|c| c.display_name.clone())
+                .unwrap_or_else(|| req.client_id.clone());
+
             if let Some(client) = registry.clients.get_mut(&req.client_id) {
-                client.channels.retain(|c| c != &req.channel);
+                client.joined = false;
             }
 
-            let member_ids: Vec<String> = registry
-                .channels
-                .get(&req.channel)
-                .map(|c| c.members.clone())
-                .unwrap_or_default();
+            let member_ids: Vec<String> = registry.room.members.clone();
+            let remaining = member_ids.len();
 
-            let recipients: Vec<mpsc::Sender<ChannelEvent>> = member_ids
+            let recipients: Vec<mpsc::Sender<Event>> = member_ids
                 .iter()
                 .filter_map(|id| registry.clients.get(id))
                 .filter_map(|c| c.events_tx.clone())
                 .collect();
 
-            let left_event = ChannelEvent {
-                event: Some(channel_event::Event::Left(toki_proto::v1::MemberLeft {
+            let left_event = Event {
+                event: Some(event::Event::Left(toki_proto::v1::MemberLeft {
                     client_id: req.client_id.clone(),
                 })),
             };
 
             let release_event = if was_holder {
-                Some(ChannelEvent {
-                    event: Some(channel_event::Event::Ptt(PttEvent {
+                Some(Event {
+                    event: Some(event::Event::Ptt(PttEvent {
                         client_id: req.client_id.clone(),
-                        channel: req.channel.clone(),
                         pressed: false,
                         sequence: 0,
                     })),
@@ -207,8 +222,21 @@ impl Signaling for SignalingSvc {
                 None
             };
 
-            (recipients, left_event, release_event)
+            (
+                recipients,
+                left_event,
+                release_event,
+                display_name,
+                remaining,
+            )
         };
+
+        info!(
+            client_id = %req.client_id,
+            name = %display_name,
+            members = remaining,
+            "client left room",
+        );
 
         for tx in &recipients {
             let _ = tx.send(left_event.clone()).await;
@@ -217,12 +245,12 @@ impl Signaling for SignalingSvc {
             }
         }
 
-        Ok(Response::new(LeaveChannelResponse {}))
+        Ok(Response::new(LeaveResponse {}))
     }
 
-    /// Walkie-talkie arbitration. Only PTT events that change channel state
+    /// Walkie-talkie arbitration. Only PTT events that change room state
     /// are broadcast:
-    ///   - `pressed = true` is granted iff no one currently holds the channel.
+    ///   - `pressed = true` is granted iff no one currently holds the room.
     ///     Denied requests are silently dropped — the requester's UI already
     ///     reflects the actual holder via the broadcast they received (or
     ///     the join-time backfill).
@@ -236,18 +264,18 @@ impl Signaling for SignalingSvc {
         while let Some(evt) = stream.next().await {
             let evt = evt?;
 
-            let broadcast: Option<(bool, Vec<mpsc::Sender<ChannelEvent>>)> = {
+            let broadcast: Option<(bool, Vec<mpsc::Sender<Event>>)> = {
                 let mut registry = self.registry.lock().await;
 
                 let action = {
-                    let channel = registry.channels.entry(evt.channel.clone()).or_default();
-                    match (channel.holder.as_deref(), evt.pressed) {
+                    let room = &mut registry.room;
+                    match (room.holder.as_deref(), evt.pressed) {
                         (None, true) => {
-                            channel.holder = Some(evt.client_id.clone());
+                            room.holder = Some(evt.client_id.clone());
                             Some(true)
                         }
                         (Some(h), false) if h == evt.client_id => {
-                            channel.holder = None;
+                            room.holder = None;
                             Some(false)
                         }
                         _ => None,
@@ -255,12 +283,8 @@ impl Signaling for SignalingSvc {
                 };
 
                 action.map(|pressed| {
-                    let member_ids: Vec<String> = registry
-                        .channels
-                        .get(&evt.channel)
-                        .map(|c| c.members.clone())
-                        .unwrap_or_default();
-                    let recipients: Vec<mpsc::Sender<ChannelEvent>> = member_ids
+                    let member_ids: Vec<String> = registry.room.members.clone();
+                    let recipients: Vec<mpsc::Sender<Event>> = member_ids
                         .iter()
                         .filter_map(|id| registry.clients.get(id))
                         .filter_map(|c| c.events_tx.clone())
@@ -273,10 +297,9 @@ impl Signaling for SignalingSvc {
                 continue;
             };
 
-            let event = ChannelEvent {
-                event: Some(channel_event::Event::Ptt(PttEvent {
+            let event = Event {
+                event: Some(event::Event::Ptt(PttEvent {
                     client_id: evt.client_id.clone(),
-                    channel: evt.channel.clone(),
                     pressed,
                     sequence: evt.sequence,
                 })),

@@ -24,11 +24,17 @@
 //!   - Multi-channel input is downmixed to mono by averaging channels.
 //!   - Mono output samples are replicated across all device channels.
 //!   - Non-f32 sample formats (i16, u16) are converted in the callback.
-//!   - Sample-rate mismatch is logged but NOT resampled — both clients
-//!     should run at the same device rate for clean audio. Mixed rates
-//!     (e.g. macOS 48 kHz ↔ Windows 44.1 kHz) will play at the wrong pitch.
+//!   - Sample-rate mismatch is resolved by an inline linear resampler at
+//!     each boundary: capture → wire (48 kHz) before send, wire → device
+//!     rate as the output callback drains. This keeps timing consistent
+//!     across clients (a frame = 10 ms of real time regardless of who's
+//!     running at 44.1 / 48 / 96 kHz natively), which is what prevents
+//!     the periodic clicks you'd otherwise get when a Windows client
+//!     (44.1) talks to a macOS client (48) — without resampling, frames
+//!     arrive faster or slower than the receiver consumes them.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow};
@@ -50,6 +56,47 @@ pub struct AudioHandle {
     /// Send `Set{Input,Output}` commands here to hot-swap the active
     /// streams. Cheap and `Clone`-able.
     pub control: AudioControl,
+    /// Shared linear gains read by the audio callbacks every frame.
+    /// Update via [`AudioGains::set_input`] / [`AudioGains::set_output`]
+    /// — changes apply on the next callback (sub-10 ms typical), no
+    /// stream restart needed.
+    pub gains: AudioGains,
+}
+
+/// Lock-free linear gain controls shared between the UI thread (writer)
+/// and the cpal audio callbacks (readers). We use `AtomicU32` with
+/// `f32::to_bits` so the callback path stays mutex-free — important
+/// because cpal callbacks run on a real-time-priority thread that
+/// must never block on the UI.
+#[derive(Clone)]
+pub struct AudioGains {
+    input: Arc<AtomicU32>,
+    output: Arc<AtomicU32>,
+}
+
+impl AudioGains {
+    fn new(input: f32, output: f32) -> Self {
+        Self {
+            input: Arc::new(AtomicU32::new(input.to_bits())),
+            output: Arc::new(AtomicU32::new(output.to_bits())),
+        }
+    }
+
+    pub fn set_input(&self, gain: f32) {
+        self.input.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_output(&self, gain: f32) {
+        self.output.store(gain.to_bits(), Ordering::Relaxed);
+    }
+
+    fn input_atomic(&self) -> Arc<AtomicU32> {
+        self.input.clone()
+    }
+
+    fn output_atomic(&self) -> Arc<AtomicU32> {
+        self.output.clone()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -87,17 +134,25 @@ enum AudioCmd {
 pub fn spawn(
     initial_input: Option<String>,
     initial_output: Option<String>,
+    initial_input_gain: f32,
+    initial_output_gain: f32,
 ) -> Result<AudioHandle> {
     let (mic_tx, mic_rx) = unbounded_channel::<Vec<i16>>();
+    // Pre-size the playback ring for ~500 ms of wire-rate audio so we
+    // don't reallocate during normal jitter absorption.
     let playback: PlaybackBuf = Arc::new(Mutex::new(VecDeque::with_capacity(
-        PREFERRED_RATE as usize / 2,
+        SAMPLE_RATE_HZ as usize / 2,
     )));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AudioCmd>();
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
 
+    let gains = AudioGains::new(initial_input_gain, initial_output_gain);
+
     let mic_tx_for_thread = mic_tx;
     let playback_for_thread = playback.clone();
+    let in_gain_for_thread = gains.input_atomic();
+    let out_gain_for_thread = gains.output_atomic();
 
     std::thread::Builder::new()
         .name("toki-audio".into())
@@ -105,10 +160,18 @@ pub fn spawn(
             let host = cpal::default_host();
             let _ = init_tx.send(enumerate(&host));
 
-            let mut input_stream =
-                open_input_for(&host, initial_input.as_deref(), &mic_tx_for_thread);
-            let mut output_stream =
-                open_output_for(&host, initial_output.as_deref(), &playback_for_thread);
+            let mut input_stream = open_input_for(
+                &host,
+                initial_input.as_deref(),
+                &mic_tx_for_thread,
+                &in_gain_for_thread,
+            );
+            let mut output_stream = open_output_for(
+                &host,
+                initial_output.as_deref(),
+                &playback_for_thread,
+                &out_gain_for_thread,
+            );
 
             // cpal streams run on their own threads; this loop is idle
             // most of the time, only waking up to hot-swap on user
@@ -121,13 +184,21 @@ pub fn spawn(
                         // one — WASAPI is happier with one stream per
                         // device class at a time.
                         drop(input_stream.take());
-                        input_stream =
-                            open_input_for(&host, name.as_deref(), &mic_tx_for_thread);
+                        input_stream = open_input_for(
+                            &host,
+                            name.as_deref(),
+                            &mic_tx_for_thread,
+                            &in_gain_for_thread,
+                        );
                     }
                     Ok(AudioCmd::SetOutput(name)) => {
                         drop(output_stream.take());
-                        output_stream =
-                            open_output_for(&host, name.as_deref(), &playback_for_thread);
+                        output_stream = open_output_for(
+                            &host,
+                            name.as_deref(),
+                            &playback_for_thread,
+                            &out_gain_for_thread,
+                        );
                     }
                     Err(_) => break,
                 }
@@ -145,6 +216,7 @@ pub fn spawn(
         playback,
         devices,
         control: AudioControl { tx: cmd_tx },
+        gains,
     })
 }
 
@@ -190,10 +262,11 @@ fn open_input_for(
     host: &cpal::Host,
     name: Option<&str>,
     mic_tx: &UnboundedSender<Vec<i16>>,
+    gain: &Arc<AtomicU32>,
 ) -> Option<cpal::Stream> {
     let device = pick_input(host, name)?;
     let device_name = device.name().unwrap_or_else(|_| "?".into());
-    let stream = match open_input(&device, mic_tx.clone()) {
+    let stream = match open_input(&device, mic_tx.clone(), gain.clone()) {
         Ok(s) => s,
         Err(e) => {
             warn!(device = %device_name, error = %e, "failed to open input stream");
@@ -212,10 +285,11 @@ fn open_output_for(
     host: &cpal::Host,
     name: Option<&str>,
     playback: &PlaybackBuf,
+    gain: &Arc<AtomicU32>,
 ) -> Option<cpal::Stream> {
     let device = pick_output(host, name)?;
     let device_name = device.name().unwrap_or_else(|_| "?".into());
-    let stream = match open_output(&device, playback.clone()) {
+    let stream = match open_output(&device, playback.clone(), gain.clone()) {
         Ok(s) => s,
         Err(e) => {
             warn!(device = %device_name, error = %e, "failed to open output stream");
@@ -256,9 +330,13 @@ const PREFERRED: cpal::StreamConfig = cpal::StreamConfig {
     buffer_size: cpal::BufferSize::Default,
 };
 
-fn open_input(dev: &cpal::Device, mic_tx: UnboundedSender<Vec<i16>>) -> Result<cpal::Stream> {
+fn open_input(
+    dev: &cpal::Device,
+    mic_tx: UnboundedSender<Vec<i16>>,
+    gain: Arc<AtomicU32>,
+) -> Result<cpal::Stream> {
     // First try our platform-preferred mono f32 config.
-    match build_input_stream::<f32>(dev, &PREFERRED, 1, mic_tx.clone()) {
+    match build_input_stream::<f32>(dev, &PREFERRED, 1, mic_tx.clone(), gain.clone()) {
         Ok(s) => {
             info!("input: 1 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
             return Ok(s);
@@ -276,22 +354,23 @@ fn open_input(dev: &cpal::Device, mic_tx: UnboundedSender<Vec<i16>>) -> Result<c
     let format = supported.sample_format();
     let cfg = supported.config();
     warn!("input: using device default {channels} ch @ {rate} Hz {format:?}");
-    if rate != PREFERRED_RATE {
-        warn!(
-            "input rate {rate} ≠ preferred {PREFERRED_RATE}; cross-OS clients on different device rates will hear pitch-shifted audio"
-        );
-    }
+    // Rate mismatch is fine — the stream builder resamples to wire rate
+    // (48 kHz) before sending, so cross-OS clients see consistent timing.
 
     match format {
-        cpal::SampleFormat::F32 => build_input_stream::<f32>(dev, &cfg, channels, mic_tx),
-        cpal::SampleFormat::I16 => build_input_stream::<i16>(dev, &cfg, channels, mic_tx),
-        cpal::SampleFormat::U16 => build_input_stream::<u16>(dev, &cfg, channels, mic_tx),
+        cpal::SampleFormat::F32 => build_input_stream::<f32>(dev, &cfg, channels, mic_tx, gain),
+        cpal::SampleFormat::I16 => build_input_stream::<i16>(dev, &cfg, channels, mic_tx, gain),
+        cpal::SampleFormat::U16 => build_input_stream::<u16>(dev, &cfg, channels, mic_tx, gain),
         other => Err(anyhow!("unsupported input sample format: {other:?}")),
     }
 }
 
-fn open_output(dev: &cpal::Device, playback: PlaybackBuf) -> Result<cpal::Stream> {
-    match build_output_stream::<f32>(dev, &PREFERRED, 1, playback.clone()) {
+fn open_output(
+    dev: &cpal::Device,
+    playback: PlaybackBuf,
+    gain: Arc<AtomicU32>,
+) -> Result<cpal::Stream> {
+    match build_output_stream::<f32>(dev, &PREFERRED, 1, playback.clone(), gain.clone()) {
         Ok(s) => {
             info!("output: 1 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
             return Ok(s);
@@ -309,17 +388,86 @@ fn open_output(dev: &cpal::Device, playback: PlaybackBuf) -> Result<cpal::Stream
     let format = supported.sample_format();
     let cfg = supported.config();
     warn!("output: using device default {channels} ch @ {rate} Hz {format:?}");
-    if rate != PREFERRED_RATE {
-        warn!(
-            "output rate {rate} ≠ preferred {PREFERRED_RATE}; cross-OS clients on different device rates will hear pitch-shifted audio"
-        );
-    }
+    // Rate mismatch is fine — the stream builder resamples from wire
+    // rate (48 kHz) to the device rate on the fly.
 
     match format {
-        cpal::SampleFormat::F32 => build_output_stream::<f32>(dev, &cfg, channels, playback),
-        cpal::SampleFormat::I16 => build_output_stream::<i16>(dev, &cfg, channels, playback),
-        cpal::SampleFormat::U16 => build_output_stream::<u16>(dev, &cfg, channels, playback),
+        cpal::SampleFormat::F32 => build_output_stream::<f32>(dev, &cfg, channels, playback, gain),
+        cpal::SampleFormat::I16 => build_output_stream::<i16>(dev, &cfg, channels, playback, gain),
+        cpal::SampleFormat::U16 => build_output_stream::<u16>(dev, &cfg, channels, playback, gain),
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
+    }
+}
+
+/// Tiny stateful linear resampler. Used at the boundary between cpal's
+/// native device rate and the wire's canonical 48 kHz so cross-OS calls
+/// stay timing-synchronized: a frame represents 10 ms of real time on
+/// both ends, regardless of who's at 44.1 / 48 / 96 kHz natively.
+///
+/// Linear interpolation is plenty for voice — far cheaper than a proper
+/// FIR resampler and the audible difference is well below the noise
+/// floor of a typical microphone. We carry `last` across calls so
+/// interpolation across chunk boundaries doesn't click.
+struct LinearResampler {
+    /// `input_rate / output_rate`. Each output sample advances this many
+    /// positions in the input stream.
+    step: f64,
+    /// Position of the next output sample in input-index space. Carried
+    /// across calls — when this exceeds the input length we shift it
+    /// relative to the *next* chunk (subtract the current chunk length).
+    pos: f64,
+    /// Last input sample from the previous chunk, used as the "left"
+    /// sample when `pos < 0` on the next call.
+    last: i16,
+}
+
+impl LinearResampler {
+    fn new(in_rate: u32, out_rate: u32) -> Self {
+        Self {
+            step: in_rate as f64 / out_rate as f64,
+            pos: 0.0,
+            last: 0,
+        }
+    }
+
+    fn pass_through(&self) -> bool {
+        (self.step - 1.0).abs() < 1e-9
+    }
+
+    /// Append resampled output to `out`. Does NOT clear `out` — caller
+    /// chooses whether to reuse the buffer. Empty input is a no-op.
+    fn process(&mut self, input: &[i16], out: &mut Vec<i16>) {
+        if input.is_empty() {
+            return;
+        }
+        if self.pass_through() {
+            out.extend_from_slice(input);
+            self.last = *input.last().unwrap();
+            return;
+        }
+        // We stop one short of `input.len() - 1` so we always have both
+        // `input[idx]` and `input[idx+1]` available. The fractional
+        // overflow past the end is carried to the next call via `pos`.
+        let mut pos = self.pos;
+        let max_pos = (input.len() - 1) as f64;
+        while pos < max_pos {
+            let idx_f = pos.floor();
+            let frac = pos - idx_f;
+            let idx = idx_f as isize;
+            let s0 = if idx < 0 {
+                self.last as f64
+            } else {
+                input[idx as usize] as f64
+            };
+            let s1 = input[(idx + 1) as usize] as f64;
+            let interp = s0 + (s1 - s0) * frac;
+            out.push(interp.clamp(i16::MIN as f64, i16::MAX as f64) as i16);
+            pos += self.step;
+        }
+        self.last = *input.last().unwrap();
+        // Shift pos relative to the *next* chunk's first sample.
+        // Result lies in `[max_pos - input.len(), step)` ≈ `[-1, step)`.
+        self.pos = pos - input.len() as f64;
     }
 }
 
@@ -328,21 +476,41 @@ fn build_input_stream<T>(
     cfg: &cpal::StreamConfig,
     channels: u16,
     mic_tx: UnboundedSender<Vec<i16>>,
+    gain: Arc<AtomicU32>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + Send + 'static,
     f32: FromSample<T>,
 {
     let ch = channels as usize;
+    let dev_rate = cfg.sample_rate.0;
+    // Resample capture → wire rate (always 48 kHz) so frames sent over
+    // UDP carry a consistent 10 ms of real time. Without this, a 44.1 kHz
+    // capture would accumulate 480 samples in 10.88 ms — and a 48 kHz
+    // peer would drain them in 10 ms, causing periodic clicks.
+    let mut resampler = LinearResampler::new(dev_rate, SAMPLE_RATE_HZ);
     let mut accum: Vec<i16> = Vec::with_capacity(FRAME_SAMPLES);
+    let mut downmixed: Vec<i16> = Vec::with_capacity(2048);
+    let mut wire: Vec<i16> = Vec::with_capacity(2048);
     let stream = dev.build_input_stream(
         cfg,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
+            // Read the current gain once per callback — it's stable
+            // across the ~10 ms callback duration and reading every
+            // sample is unnecessary overhead.
+            let g = f32::from_bits(gain.load(Ordering::Relaxed));
             // Interleaved samples; downmix N channels to mono by averaging.
+            downmixed.clear();
             for frame in data.chunks_exact(ch) {
                 let sum: f32 = frame.iter().map(|&s| s.to_sample::<f32>()).sum();
-                let avg = sum / ch as f32;
+                let avg = (sum / ch as f32) * g;
                 let v = (avg.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+                downmixed.push(v);
+            }
+            // Resample to wire rate, then chunk into 480-sample frames.
+            wire.clear();
+            resampler.process(&downmixed, &mut wire);
+            for &v in &wire {
                 accum.push(v);
                 if accum.len() >= FRAME_SAMPLES {
                     let frame = std::mem::replace(&mut accum, Vec::with_capacity(FRAME_SAMPLES));
@@ -361,19 +529,54 @@ fn build_output_stream<T>(
     cfg: &cpal::StreamConfig,
     channels: u16,
     playback: PlaybackBuf,
+    gain: Arc<AtomicU32>,
 ) -> Result<cpal::Stream>
 where
     T: SizedSample + FromSample<f32> + Send + 'static,
 {
     let ch = channels as usize;
+    let dev_rate = cfg.sample_rate.0;
+    // The playback ring stores wire-rate (48 kHz) samples; we resample
+    // to the device's native rate as we drain. Mirror of the input
+    // path — keeps the ring's 10-ms-per-480-samples timing intact and
+    // device-rate concerns isolated to the callback.
+    let mut resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
+    let mut wire_chunk: Vec<i16> = Vec::with_capacity(512);
+    let mut resampled: Vec<i16> = Vec::with_capacity(1024);
+    let mut ready: std::collections::VecDeque<i16> = std::collections::VecDeque::with_capacity(4096);
     let stream = dev.build_output_stream(
         cfg,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-            let mut buf = playback.lock().unwrap();
+            let g = f32::from_bits(gain.load(Ordering::Relaxed));
+            let frames_needed = data.len() / ch;
+
+            // Refill `ready` from the wire-rate playback ring, resampling
+            // as we go. We pull chunks rather than one sample at a time
+            // so the resampler's per-call fixed costs amortize well.
+            while ready.len() < frames_needed {
+                wire_chunk.clear();
+                {
+                    let mut buf = playback.lock().unwrap();
+                    for _ in 0..256 {
+                        if let Some(s) = buf.pop_front() {
+                            wire_chunk.push(s);
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                if wire_chunk.is_empty() {
+                    break; // ring is dry, callback will pad with silence
+                }
+                resampled.clear();
+                resampler.process(&wire_chunk, &mut resampled);
+                ready.extend(resampled.iter().copied());
+            }
+
             // Pop one mono sample, replicate it across N output channels.
             for frame in data.chunks_mut(ch) {
-                let mono = buf.pop_front().unwrap_or(0);
-                let f = mono as f32 / i16::MAX as f32;
+                let mono = ready.pop_front().unwrap_or(0);
+                let f = ((mono as f32 / i16::MAX as f32) * g).clamp(-1.0, 1.0);
                 let s: T = T::from_sample(f);
                 for slot in frame.iter_mut() {
                     *slot = s;
@@ -386,13 +589,13 @@ where
     Ok(stream)
 }
 
-/// Append decoded PCM into the playback ring. Caps the queue at 500 ms to
-/// prevent latency from snowballing if we receive faster than the speaker
-/// drains.
+/// Append wire-rate (48 kHz) PCM into the playback ring. Caps the queue
+/// at 500 ms to prevent latency from snowballing if we receive faster
+/// than the speaker drains.
 pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
     let mut guard = buf.lock().unwrap();
-    // 500 ms at the local device rate.
-    let cap = (PREFERRED_RATE / 2) as usize;
+    // 500 ms at wire rate.
+    let cap = (SAMPLE_RATE_HZ / 2) as usize;
     for &s in samples {
         if guard.len() >= cap {
             guard.pop_front();
@@ -402,17 +605,17 @@ pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
 }
 
 /// Generate a single-tone "roger beep" with a short linear fade in/out so it
-/// doesn't click. The result is plain i16 PCM at the project sample rate —
-/// push it through `push_playback` to play it locally.
+/// doesn't click. The result is plain i16 PCM at wire rate (48 kHz) —
+/// push it through `push_playback` to play it locally; the output
+/// callback handles the device-rate conversion.
 pub fn beep(freq_hz: f32, duration_ms: u32, amplitude: f32) -> Vec<i16> {
-    // Generated at the local device rate so the beep is the right
-    // duration and frequency for the stream it'll be mixed into.
-    let total = (PREFERRED_RATE as f32 * duration_ms as f32 / 1000.0) as usize;
-    let fade = (PREFERRED_RATE as f32 * 0.005) as usize; // 5 ms ramp
+    let rate = SAMPLE_RATE_HZ;
+    let total = (rate as f32 * duration_ms as f32 / 1000.0) as usize;
+    let fade = (rate as f32 * 0.005) as usize; // 5 ms ramp
     let amp = i16::MAX as f32 * amplitude.clamp(0.0, 1.0);
     (0..total)
         .map(|i| {
-            let t = i as f32 / PREFERRED_RATE as f32;
+            let t = i as f32 / rate as f32;
             let env = if i < fade {
                 i as f32 / fade as f32
             } else if i + fade > total {

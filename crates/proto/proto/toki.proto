@@ -4,15 +4,20 @@ package toki.v1;
 
 // Signaling service for the Toki walkie-talkie network.
 // Audio frames travel out-of-band over UDP; this service carries
-// authentication, channel membership, and presence/PTT events.
+// authentication, room membership, and presence/PTT events.
+//
+// Toki has a single global room — there's no channel addressing.
+// After registering, a client subscribes to receive presence and PTT
+// broadcasts; a separate streaming RPC carries the client's own PTT
+// state transitions to the server.
 service Signaling {
   rpc Register(RegisterRequest) returns (RegisterResponse);
-  rpc JoinChannel(JoinChannelRequest) returns (stream ChannelEvent);
-  rpc LeaveChannel(LeaveChannelRequest) returns (LeaveChannelResponse);
+  rpc Join(JoinRequest) returns (stream Event);
+  rpc Leave(LeaveRequest) returns (LeaveResponse);
 
   // Client streams PTT state transitions (key down / key up).
-  // Server multicasts these as ChannelEvents to other members
-  // via the JoinChannel stream.
+  // Server multicasts these as Events to every other subscriber
+  // via the Join stream.
   rpc PushToTalk(stream PttEvent) returns (PttAck);
 }
 
@@ -29,19 +34,17 @@ message RegisterResponse {
   string audio_endpoint = 3;
 }
 
-message JoinChannelRequest {
+message JoinRequest {
   string client_id = 1;
-  string channel = 2;
 }
 
-message LeaveChannelRequest {
+message LeaveRequest {
   string client_id = 1;
-  string channel = 2;
 }
 
-message LeaveChannelResponse {}
+message LeaveResponse {}
 
-message ChannelEvent {
+message Event {
   oneof event {
     MemberJoined joined = 1;
     MemberLeft left = 2;
@@ -60,9 +63,8 @@ message MemberLeft {
 
 message PttEvent {
   string client_id = 1;
-  string channel = 2;
-  bool pressed = 3;
-  uint64 sequence = 4;
+  bool pressed = 2;
+  uint64 sequence = 3;
 }
 
 message PttAck {}

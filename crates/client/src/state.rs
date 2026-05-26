@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 pub struct ClientState {
     pub connection: ConnState,
     pub self_id: Option<String>,
-    /// client_id → display_name for everyone in the current channel.
+    /// client_id → display_name for everyone in the room.
     pub members: HashMap<String, String>,
-    /// Walkie-talkie lock: client_id of whoever is currently transmitting on
-    /// the channel, or `None` if the channel is free. Updated only from
-    /// authoritative server broadcasts — the local press never sets this.
+    /// Walkie-talkie lock: client_id of whoever is currently transmitting,
+    /// or `None` if the floor is free. Updated only from authoritative
+    /// server broadcasts — the local press never sets this.
     pub holder: Option<String>,
     pub log: VecDeque<String>,
 }

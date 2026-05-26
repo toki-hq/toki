@@ -54,30 +54,19 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
                 continue;
             }
 
-            let active_channels: Vec<String> = registry
-                .clients
-                .get(&sender_id)
-                .map(|c| c.channels.clone())
-                .unwrap_or_default();
-
+            // Walkie-talkie: only forward audio from the room's PTT
+            // holder. Anyone else's packets are dropped, even though
+            // their token authenticated — they don't have the lock.
             let mut targets: Vec<SocketAddr> = Vec::new();
-            for channel in &active_channels {
-                if let Some(ch) = registry.channels.get(channel) {
-                    // Walkie-talkie: only forward audio from the channel's
-                    // PTT holder. Anyone else's packets are dropped, even
-                    // though their token authenticated — they don't have
-                    // the lock.
-                    if ch.holder.as_deref() != Some(sender_id.as_str()) {
+            let room = &registry.room;
+            if room.holder.as_deref() == Some(sender_id.as_str()) {
+                for id in &room.members {
+                    if id == &sender_id {
                         continue;
                     }
-                    for id in &ch.members {
-                        if id == &sender_id {
-                            continue;
-                        }
-                        if let Some(other) = registry.clients.get(id) {
-                            if let Some(addr) = other.audio_addr {
-                                targets.push(addr);
-                            }
+                    if let Some(other) = registry.clients.get(id) {
+                        if let Some(addr) = other.audio_addr {
+                            targets.push(addr);
                         }
                     }
                 }

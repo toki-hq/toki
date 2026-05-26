@@ -2717,19 +2717,11 @@ impl TokiApp {
                 self.config.save();
             }
         });
-
-        settings_row(ui, "MIC GAIN", |ui| {
-            let mut g = self.config.audio.input_gain;
-            let resp = ui.add(egui::Slider::new(&mut g, 0.0..=2.0).show_value(false));
-            ui.monospace(format!("{:>3.0}%", g * 100.0));
-            if resp.changed() {
-                self.config.audio.input_gain = g;
-                self.audio_gains.set_input(g);
-            }
-            if resp.drag_stopped() || resp.lost_focus() {
-                self.config.save();
-            }
-        });
+        // Mic / Speaker gain sliders used to live here. They moved to
+        // the bottom-row knobs (MIC VOL / SPK VOL) on the strip, which
+        // adjust the same `config.audio.{input,output}_gain` fields —
+        // duplicating them in Settings just left two ways to change
+        // the same value out of sync.
     }
 
 

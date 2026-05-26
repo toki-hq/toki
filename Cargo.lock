@@ -3814,6 +3814,7 @@ dependencies = [
  "egui-colorgradient",
  "futures",
  "global-hotkey",
+ "image",
  "prost",
  "rustfft",
  "serde",

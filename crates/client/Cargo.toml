@@ -7,6 +7,40 @@ edition.workspace = true
 name = "toki"
 path = "src/main.rs"
 
+# ── cargo-bundle metadata ───────────────────────────────────────────
+# Consumed by `cargo install cargo-bundle && cargo bundle -p toki-client`.
+# The macOS path lands a finished bundle at:
+#   target/{debug,release}/bundle/osx/Toki.app
+#
+# Paths below are relative to this Cargo.toml's directory
+# (`crates/client/`).
+[package.metadata.bundle]
+name = "Toki"
+# Reverse-DNS identifier — matches the repo's GitHub org so installs
+# from different forks don't collide on the same identifier. Adjust if
+# you ever publish under your own domain.
+identifier = "com.github.c-t-n.toki"
+# Pre-built .icns in the icon folder — `build-platform-icons.sh`
+# regenerates it from the hand-tuned PNG set.
+icon = ["assets/icon/Toki.icns"]
+short_description = "Hardware-feeling walkie-talkie for desktops"
+long_description = """
+Toki is a small walkie-talkie-style VOIP client. Hold a key, talk;
+release, listen. Frequencies map 1:1 to rooms on a self-hosted Toki
+server, so a group can carve up channels exactly like a hardware radio.
+"""
+# macOS app category — "Utilities" is the closest fit for a small
+# always-on communication tool.
+category = "public.app-category.utilities"
+copyright = "© 2026 Toki contributors"
+# Toki uses cpal + the system audio APIs, which work back to 10.15.
+# eframe 0.32 also targets 10.15+ — earlier macOS won't link.
+osx_minimum_system_version = "10.15"
+# Extra Info.plist entries cargo-bundle doesn't have a typed slot for:
+# microphone usage description (required for audio capture on macOS
+# 10.14+), network exceptions for the HTTP gRPC handshake.
+osx_info_plist_exts = ["macos/Info.plist.ext.xml"]
+
 [dependencies]
 toki-proto = { workspace = true }
 tokio = { workspace = true }
@@ -30,3 +64,7 @@ rustfft = "6"
 serde = { workspace = true }
 toml = "0.8"
 dirs = "5"
+# Used only to decode the bundled window-icon PNG into raw RGBA at
+# startup. `default-features = false` strips ImageMagick-style format
+# plugins we don't need; `png` is the only encoder/decoder we use.
+image = { version = "0.25", default-features = false, features = ["png"] }

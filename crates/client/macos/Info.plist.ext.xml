@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    macOS Info.plist extension consumed by cargo-bundle. The contents
+    of the <dict> below are merged into the auto-generated Info.plist
+    that lands inside Toki.app/Contents/.
+
+    Two reasons this file exists:
+
+      1. macOS 10.14+ requires NSMicrophoneUsageDescription before an
+         app can request mic access. Without it, the OS *silently
+         denies* every record callback and Toki ships unable to
+         transmit. The user-facing copy is shown verbatim in the
+         permission dialog the first time the user PTTs.
+
+      2. Toki's default server URL is plain HTTP (gRPC over HTTP/2
+         cleartext). macOS Application Transport Security blocks
+         arbitrary HTTP by default; NSAllowsArbitraryLoads keeps
+         self-hosted servers on a LAN working. Tighten this in
+         production deployments by adding an NSExceptionDomains entry
+         pinned to your specific server, and serving over TLS.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Toki uses the microphone to transmit voice on the active radio channel when you hold the Push-To-Talk key.</string>
+
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!--
+        The app is a normal foreground window app — explicitly opt out
+        of LSUIElement / LSBackgroundOnly so launchd treats it as
+        regular, dockable.
+    -->
+    <key>LSUIElement</key>
+    <false/>
+
+    <!--
+        High-DPI rendering — without this Toki paints at 1× on Retina
+        displays and the phosphor glyphs look smudgy. eframe already
+        opts in via cocoa metadata, but this is the platform-canonical
+        flag and harmless on Intel.
+    -->
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

@@ -39,15 +39,47 @@ fn main() -> eframe::Result<()> {
     // borderless chassis with hand-drawn traffic-light dots is in the
     // spec as a follow-up; this gets the look right first, then we can
     // strip the decorations later.
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([theme::WIDGET_W, theme::WIDGET_H])
+        .with_min_inner_size([480.0, theme::WIDGET_H])
+        .with_max_inner_size([760.0, theme::WIDGET_H])
+        .with_resizable(true)
+        .with_title("Toki");
+    if let Some(icon) = load_window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([theme::WIDGET_W, theme::WIDGET_H])
-            .with_min_inner_size([480.0, theme::WIDGET_H])
-            .with_max_inner_size([760.0, theme::WIDGET_H])
-            .with_resizable(true)
-            .with_title("Toki"),
+        viewport,
         ..Default::default()
     };
+
+    /// Decode the bundled window-icon PNG into the raw RGBA buffer
+    /// `egui::IconData` expects. Logged-and-skipped on failure rather
+    /// than fatal — a missing icon is a cosmetic issue, not a reason
+    /// to refuse to launch.
+    ///
+    /// Uses the 256 × 256 PNG since most modern desktop shells request
+    /// either 256 or scale up from it; the 16/32 px versions in the
+    /// bundle are only used inside platform packaging files
+    /// (Toki.icns, Toki.ico) where the OS picks the best size itself.
+    fn load_window_icon() -> Option<egui::IconData> {
+        const PNG: &[u8] = include_bytes!("../assets/icon/toki-icon-256.png");
+        match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+            Ok(img) => {
+                let rgba = img.into_rgba8();
+                let (w, h) = rgba.dimensions();
+                Some(egui::IconData {
+                    rgba: rgba.into_raw(),
+                    width: w,
+                    height: h,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not decode bundled window icon");
+                None
+            }
+        }
+    }
 
     eframe::run_native(
         "Toki",

@@ -36,6 +36,15 @@ pub struct ConnectionConfig {
     /// middle of the band.
     #[serde(default = "default_frequency")]
     pub frequency: String,
+    /// Shared-secret password for servers that gate registration.
+    /// Empty string (the default) is treated as "no password" both
+    /// here and on the server — the wire field is still sent, the
+    /// server just ignores it in open mode. Stored in plaintext
+    /// alongside the rest of the user's settings — same threat model
+    /// as Wi-Fi credentials in the OS keychain would have, but
+    /// without the keychain integration.
+    #[serde(default)]
+    pub password: String,
 }
 
 fn default_frequency() -> String {
@@ -48,6 +57,7 @@ impl Default for ConnectionConfig {
             server: "http://127.0.0.1:50051".into(),
             display_name: "anon".into(),
             frequency: default_frequency(),
+            password: String::new(),
         }
     }
 }

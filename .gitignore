@@ -17,3 +17,8 @@
 
 # Local design / scratch assets — not part of the shipped codebase
 design/
+
+# Server-side runtime config (may contain the shared-secret password).
+# Each operator drops their own `config.toml` next to the binary or
+# points TOKI_CONFIG at one — it must not land in version control.
+/config.toml

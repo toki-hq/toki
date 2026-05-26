@@ -18,15 +18,40 @@ use crate::state::{Client, Registry, SharedRegistry};
 pub struct SignalingSvc {
     registry: SharedRegistry,
     audio_endpoint: String,
+    /// `Some` if the server requires a shared-secret password.
+    /// Compared in constant time against the caller's
+    /// `RegisterRequest.password`. `None` means open mode — no auth.
+    password: Option<String>,
 }
 
 impl SignalingSvc {
-    pub fn new(registry: SharedRegistry, audio_endpoint: String) -> SignalingServer<Self> {
+    pub fn new(
+        registry: SharedRegistry,
+        audio_endpoint: String,
+        password: Option<String>,
+    ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
             registry,
             audio_endpoint,
+            password,
         })
     }
+}
+
+/// Constant-time byte comparison. Returns `true` iff `a` and `b` have
+/// the same length and bytes. Short-circuits *only* on length so the
+/// timing leak is "you guessed the right password length"; the byte
+/// loop runs to completion regardless of mismatches. No `subtle` crate
+/// dependency since the comparison is short and the property is easy.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 type EventStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
@@ -40,6 +65,20 @@ impl Signaling for SignalingSvc {
         request: Request<RegisterRequest>,
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
+
+        // Password gate — checked before we mint a session or allocate
+        // any registry state. Open-mode servers (no configured
+        // password) skip the check entirely.
+        if let Some(required) = &self.password {
+            if !ct_eq(required.as_bytes(), req.password.as_bytes()) {
+                tracing::warn!(
+                    name = %req.display_name,
+                    "register rejected: bad password"
+                );
+                return Err(Status::unauthenticated("invalid password"));
+            }
+        }
+
         let id = Uuid::new_v4().to_string();
         let token = Uuid::new_v4().as_bytes().to_vec();
 

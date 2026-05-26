@@ -24,6 +24,12 @@ service Signaling {
 
 message RegisterRequest {
   string display_name = 1;
+  // Shared-secret password the server may require before accepting a
+  // registration. Empty string when the client has no password
+  // configured; servers running in open mode ignore the field entirely.
+  // Servers comparing the password do so in constant time and reject
+  // mismatches with gRPC status `UNAUTHENTICATED`.
+  string password = 2;
 }
 
 message RegisterResponse {

@@ -71,6 +71,10 @@ impl RadioState {
 struct ConnectForm {
     url: String,
     username: String,
+    /// Shared-secret password for servers that gate registration.
+    /// Empty when the target server is open-mode. Rendered with
+    /// `egui::TextEdit::password(true)` so the entry is masked.
+    password: String,
 }
 
 pub struct TokiApp {
@@ -219,6 +223,7 @@ impl TokiApp {
                 server,
                 display_name,
                 frequency: frequency.clone(),
+                password: config.connection.password.clone(),
             });
         }
 
@@ -1101,7 +1106,7 @@ impl eframe::App for TokiApp {
             let viewport_id = egui::ViewportId::from_hash_of("toki-connect");
             let builder = egui::ViewportBuilder::default()
                 .with_title("Toki — Connect")
-                .with_inner_size([420.0, 240.0])
+                .with_inner_size([420.0, 280.0])
                 .with_min_inner_size([360.0, 200.0])
                 .with_resizable(false);
             ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
@@ -2061,6 +2066,7 @@ impl TokiApp {
                 server: self.config.connection.server.trim().to_string(),
                 display_name: self.config.connection.display_name.trim().to_string(),
                 frequency,
+                password: self.config.connection.password.clone(),
             });
         }
 
@@ -2170,6 +2176,7 @@ impl TokiApp {
                 server: server.clone(),
                 display_name: display_name.clone(),
                 frequency,
+                password: self.config.connection.password.clone(),
             });
         }
 
@@ -2251,6 +2258,7 @@ impl TokiApp {
         if resp.clicked() {
             self.connect_form.url = self.config.connection.server.clone();
             self.connect_form.username = self.config.connection.display_name.clone();
+            self.connect_form.password = self.config.connection.password.clone();
             self.show_connect = true;
         }
 
@@ -2575,6 +2583,19 @@ impl TokiApp {
             }
             let _ = resp; // (text edit response unused beyond display)
         });
+        settings_row(ui, "PASSWORD", |ui| {
+            // Optional — leave blank when joining an open-mode server.
+            // `password(true)` swaps the rendered glyphs for •••• so the
+            // value isn't visible to anyone glancing at the screen, but
+            // we still store and send the underlying string.
+            ui.add(
+                egui::TextEdit::singleline(&mut self.connect_form.password)
+                    .desired_width(200.0)
+                    .password(true)
+                    .hint_text("optional")
+                    .font(egui::TextStyle::Monospace),
+            );
+        });
 
         ui.add_space(10.0);
         ui.horizontal(|ui| {
@@ -2582,6 +2603,7 @@ impl TokiApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let server = self.connect_form.url.trim().to_string();
                 let username = self.connect_form.username.trim().to_string();
+                let password = self.connect_form.password.clone();
                 let can_connect = !server.is_empty() && !username.is_empty();
 
                 let connect_btn = ui.add_enabled(can_connect, egui::Button::new("CONNECT"));
@@ -2590,6 +2612,7 @@ impl TokiApp {
                     // Connect command, then close the dialog.
                     self.config.connection.server = server.clone();
                     self.config.connection.display_name = username.clone();
+                    self.config.connection.password = password.clone();
                     self.config.save();
                     let frequency =
                         T::frequency_label(T::frequency_of(self.channel_idx));
@@ -2597,6 +2620,7 @@ impl TokiApp {
                         server,
                         display_name: username,
                         frequency,
+                        password,
                     });
                     self.show_connect = false;
                 }

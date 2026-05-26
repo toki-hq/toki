@@ -35,6 +35,10 @@ pub enum Cmd {
         server: String,
         display_name: String,
         frequency: String,
+        /// Shared-secret password for servers running in
+        /// password-gated mode. Empty string when the user hasn't
+        /// configured one; the server ignores it in open mode.
+        password: String,
     },
     Disconnect,
     /// Leave the current frequency room *without* dropping the session.
@@ -117,6 +121,7 @@ async fn handle_cmd(
             server,
             display_name,
             frequency,
+            password,
         } => {
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
@@ -127,6 +132,7 @@ async fn handle_cmd(
                 &server,
                 &display_name,
                 &frequency,
+                &password,
                 state.clone(),
                 playback.clone(),
             )
@@ -217,6 +223,7 @@ impl Session {
         server: &str,
         display_name: &str,
         frequency: &str,
+        password: &str,
         state: SharedState,
         playback: PlaybackBuf,
     ) -> Result<Self> {
@@ -234,6 +241,7 @@ impl Session {
         let reg = signaling
             .register(RegisterRequest {
                 display_name: display_name.into(),
+                password: password.into(),
             })
             .await?
             .into_inner();

@@ -19,7 +19,7 @@ use tonic::transport::Channel;
 use tracing::{info, warn};
 
 use toki_proto::v1::{
-    JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
+    ChangeFrequencyRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
     event::Event as Ev, signaling_client::SignalingClient,
 };
 use toki_proto::wire::{
@@ -33,8 +33,13 @@ pub enum Cmd {
     Connect {
         server: String,
         display_name: String,
+        frequency: String,
     },
     Disconnect,
+    /// Move to a different frequency room. Server emits MemberLeft on
+    /// the old room and MemberJoined backfill on the new room, all on
+    /// the existing event stream.
+    ChangeFrequency(String),
     PttDown,
     PttUp,
 }
@@ -103,18 +108,28 @@ async fn handle_cmd(
         Cmd::Connect {
             server,
             display_name,
+            frequency,
         } => {
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
                 return;
             }
             state.lock().unwrap().connection = ConnState::Connecting;
-            match Session::open(&server, &display_name, state.clone(), playback.clone()).await {
+            match Session::open(
+                &server,
+                &display_name,
+                &frequency,
+                state.clone(),
+                playback.clone(),
+            )
+            .await
+            {
                 Ok(s) => {
                     {
                         let mut st = state.lock().unwrap();
                         st.connection = ConnState::Connected;
-                        st.log(format!("connected as {display_name}"));
+                        st.frequency = Some(frequency.clone());
+                        st.log(format!("connected as {display_name} on {frequency} MHz"));
                     }
                     *session = Some(s);
                 }
@@ -133,7 +148,13 @@ async fn handle_cmd(
                 st.members.clear();
                 st.holder = None;
                 st.self_id = None;
+                st.frequency = None;
                 st.log("disconnected");
+            }
+        }
+        Cmd::ChangeFrequency(freq) => {
+            if let Some(s) = session {
+                s.change_frequency(&freq, state).await;
             }
         }
         Cmd::PttDown => {
@@ -164,6 +185,7 @@ impl Session {
     async fn open(
         server: &str,
         display_name: &str,
+        frequency: &str,
         state: SharedState,
         playback: PlaybackBuf,
     ) -> Result<Self> {
@@ -192,6 +214,8 @@ impl Session {
         {
             let mut st = state.lock().unwrap();
             st.self_id = Some(client_id.clone());
+            st.display_name = display_name.to_string();
+            st.frequency = Some(frequency.to_string());
             // Show ourselves in the roster immediately — the server doesn't
             // echo our own MemberJoined back to us.
             st.members.insert(client_id.clone(), display_name.to_string());
@@ -209,6 +233,7 @@ impl Session {
         let events_resp = signaling
             .join(JoinRequest {
                 client_id: client_id.clone(),
+                frequency: frequency.to_string(),
             })
             .await?;
         let mut events = events_resp.into_inner();
@@ -280,6 +305,22 @@ impl Session {
                                 state_for_events.lock().unwrap().log("🔓 floor cleared");
                             }
                         }
+                        Some(Ev::FrequencyChanged(fc)) => {
+                            // Server acknowledged our move. Clear the
+                            // old roster (we're about to receive the new
+                            // room's MemberJoined backfill) and re-seed
+                            // ourselves so we don't vanish from our own
+                            // member list.
+                            let mut st = state_for_events.lock().unwrap();
+                            st.members.clear();
+                            if let Some(self_id) = st.self_id.clone() {
+                                let our_name = st.display_name.clone();
+                                st.members.insert(self_id, our_name);
+                            }
+                            st.holder = None;
+                            st.frequency = Some(fc.frequency.clone());
+                            st.log(format!("→ frequency {} MHz", fc.frequency));
+                        }
                         None => {}
                     },
                     Err(e) => {
@@ -348,6 +389,29 @@ impl Session {
             signaling,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
+    }
+
+    /// Ask the server to move us to a new frequency. The server emits
+    /// `FrequencyChanged` on our event stream once the move is done;
+    /// our event handler clears the local roster on receipt and waits
+    /// for the new room's MemberJoined backfill.
+    async fn change_frequency(&self, frequency: &str, state: &SharedState) {
+        // Drop any local PTT state immediately — the old room's lock
+        // will be released by the server, but our audio gate must not
+        // leak between rooms.
+        self.ptt.store(false, Ordering::Relaxed);
+        let mut signaling = self.signaling.clone();
+        let req = ChangeFrequencyRequest {
+            client_id: self.client_id.clone(),
+            frequency: frequency.to_string(),
+        };
+        if let Err(e) = signaling.change_frequency(req).await {
+            warn!(error = %e, "change_frequency failed");
+            state
+                .lock()
+                .unwrap()
+                .log(format!("frequency change failed: {e}"));
+        }
     }
 
     /// Request a PTT state change. The actual audio gate is not flipped

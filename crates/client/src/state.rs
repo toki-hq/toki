@@ -9,7 +9,14 @@ use std::sync::{Arc, Mutex};
 pub struct ClientState {
     pub connection: ConnState,
     pub self_id: Option<String>,
-    /// client_id → display_name for everyone in the room.
+    /// Our own display name, mirrored here so the runtime can re-seed
+    /// `members` with ourselves after a frequency change (the server's
+    /// roster backfill only contains *other* members).
+    pub display_name: String,
+    /// Currently-joined frequency room, e.g. `"446.05"`. `None` between
+    /// connect and the initial Join, and again after disconnect.
+    pub frequency: Option<String>,
+    /// client_id → display_name for everyone on the current frequency.
     pub members: HashMap<String, String>,
     /// Walkie-talkie lock: client_id of whoever is currently transmitting,
     /// or `None` if the floor is free. Updated only from authoritative

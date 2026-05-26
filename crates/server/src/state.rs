@@ -14,21 +14,20 @@ pub struct Client {
     pub audio_token: Vec<u8>,
     pub audio_addr: Option<SocketAddr>,
     pub events_tx: Option<mpsc::Sender<Event>>,
-    /// True after a successful `Join` — false at register time and after
-    /// `Leave`. We track this explicitly (rather than just checking
-    /// `events_tx.is_some()`) so the audio relay can skip non-members
-    /// even if their event stream is still being torn down.
-    pub joined: bool,
+    /// The frequency room the client is currently in. `None` between
+    /// `Register` and `Join`, and again after `Leave`. We key the
+    /// audio relay's forwarding fan-out off this — silent clients on
+    /// frequency A never receive a sender's voice on frequency B.
+    pub current_frequency: Option<String>,
     /// Refreshed on every UDP packet from this client (keepalive or audio).
     /// The reaper evicts clients whose `last_seen` is older than the
     /// configured timeout — see `reaper`.
     pub last_seen: Instant,
 }
 
-/// The one global room. Toki used to support multiple named channels but
-/// nobody used the abstraction, so it was collapsed into this single
-/// shared room: every joined client is a member, and at most one of them
-/// holds PTT at a time.
+/// One frequency channel. Each holds its own member list and PTT lock —
+/// frequencies are independent walkie-talkie channels that don't see
+/// each other's traffic.
 #[derive(Default)]
 pub struct Room {
     pub members: Vec<String>,
@@ -40,7 +39,10 @@ pub struct Room {
 #[derive(Default)]
 pub struct Registry {
     pub clients: HashMap<String, Client>,
-    pub room: Room,
+    /// Rooms keyed by frequency string (e.g. `"446.05"`). Lazily
+    /// inserted on first join; we don't pre-populate the full
+    /// 41-channel grid because most are usually empty.
+    pub rooms: HashMap<String, Room>,
     pub tokens: HashMap<Vec<u8>, String>,
 }
 

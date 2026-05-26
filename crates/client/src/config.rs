@@ -23,12 +23,23 @@ pub struct Config {
     pub connection: ConnectionConfig,
 }
 
-/// Persisted server address and identity. Defaults match the original
-/// hard-coded form values so first-launch behavior is unchanged.
+/// Persisted server address, identity, and last-selected frequency.
+/// Defaults match the original hard-coded form values so first-launch
+/// behavior is unchanged.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ConnectionConfig {
     pub server: String,
     pub display_name: String,
+    /// Last frequency the user was on. Stored as `"446.05"`-style
+    /// string for stability across float-formatting changes; parsed
+    /// into a channel index by the UI on load. Defaults to the
+    /// middle of the band.
+    #[serde(default = "default_frequency")]
+    pub frequency: String,
+}
+
+fn default_frequency() -> String {
+    "447.00".into()
 }
 
 impl Default for ConnectionConfig {
@@ -36,6 +47,7 @@ impl Default for ConnectionConfig {
         Self {
             server: "http://127.0.0.1:50051".into(),
             display_name: "anon".into(),
+            frequency: default_frequency(),
         }
     }
 }

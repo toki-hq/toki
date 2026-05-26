@@ -54,19 +54,29 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
                 continue;
             }
 
-            // Walkie-talkie: only forward audio from the room's PTT
-            // holder. Anyone else's packets are dropped, even though
-            // their token authenticated — they don't have the lock.
+            // Walkie-talkie: only forward audio from the sender's
+            // current-frequency room PTT holder. We look up the
+            // sender's current_frequency, then check that room's
+            // holder/members. Senders on a frequency where they're
+            // not the holder, or who aren't in any room, get dropped
+            // even though their token authenticated.
             let mut targets: Vec<SocketAddr> = Vec::new();
-            let room = &registry.room;
-            if room.holder.as_deref() == Some(sender_id.as_str()) {
-                for id in &room.members {
-                    if id == &sender_id {
-                        continue;
-                    }
-                    if let Some(other) = registry.clients.get(id) {
-                        if let Some(addr) = other.audio_addr {
-                            targets.push(addr);
+            let frequency = registry
+                .clients
+                .get(&sender_id)
+                .and_then(|c| c.current_frequency.clone());
+            if let Some(freq) = frequency {
+                if let Some(room) = registry.rooms.get(&freq) {
+                    if room.holder.as_deref() == Some(sender_id.as_str()) {
+                        for id in &room.members {
+                            if id == &sender_id {
+                                continue;
+                            }
+                            if let Some(other) = registry.clients.get(id) {
+                                if let Some(addr) = other.audio_addr {
+                                    targets.push(addr);
+                                }
+                            }
                         }
                     }
                 }

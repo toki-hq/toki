@@ -66,19 +66,34 @@ async fn reap_once(registry: &SharedRegistry) {
             };
             r.tokens.remove(&client.audio_token);
 
-            let was_holder = {
-                let room = &mut r.room;
+            // Pull them out of their frequency room (if any). Mirror
+            // of `Signaling::leave`'s cleanup, minus the explicit RPC.
+            let Some(frequency) = client.current_frequency.clone() else {
+                // Never joined a room — no one to notify.
+                continue;
+            };
+            let was_holder = if let Some(room) = r.rooms.get_mut(&frequency) {
                 room.members.retain(|m| m != &id);
                 let holding = room.holder.as_deref() == Some(id.as_str());
                 if holding {
                     room.holder = None;
                 }
                 holding
+            } else {
+                false
             };
+            // Drop the room if it just emptied.
+            if let Some(room) = r.rooms.get(&frequency) {
+                if room.members.is_empty() && room.holder.is_none() {
+                    r.rooms.remove(&frequency);
+                }
+            }
 
             let recipients: Vec<mpsc::Sender<Event>> = r
-                .room
-                .members
+                .rooms
+                .get(&frequency)
+                .map(|room| room.members.clone())
+                .unwrap_or_default()
                 .iter()
                 .filter_map(|m| r.clients.get(m))
                 .filter_map(|c| c.events_tx.clone())
@@ -87,6 +102,7 @@ async fn reap_once(registry: &SharedRegistry) {
             broadcasts.push(EvictionBroadcast {
                 client_id: id.clone(),
                 display_name: client.display_name.clone(),
+                frequency,
                 recipients,
                 was_holder,
             });
@@ -98,6 +114,7 @@ async fn reap_once(registry: &SharedRegistry) {
         info!(
             client = %b.client_id,
             name = %b.display_name,
+            frequency = %b.frequency,
             was_holder = b.was_holder,
             "evicted stale client",
         );
@@ -125,6 +142,7 @@ async fn reap_once(registry: &SharedRegistry) {
 struct EvictionBroadcast {
     client_id: String,
     display_name: String,
+    frequency: String,
     recipients: Vec<mpsc::Sender<Event>>,
     was_holder: bool,
 }

@@ -101,6 +101,14 @@ impl TokiApp {
         });
         let installed = hotkey::install(cmd_tx.clone(), initial);
 
+        // Seed the channel index from the saved frequency. If the
+        // string is bogus, fall back to the middle of the band.
+        let channel_idx = T::channel_of_label(&config.connection.frequency)
+            .unwrap_or(T::FREQ_CHANNEL_COUNT / 2);
+        // Normalize the saved frequency label in case it had drift,
+        // so the wire string and the displayed value agree.
+        let frequency = T::frequency_label(T::frequency_of(channel_idx));
+
         // Auto-connect on launch using the saved server/name. The user
         // expects "walkie-talkies stay on" — Toki should be live as
         // soon as the window opens, not require a Connect click first.
@@ -110,6 +118,7 @@ impl TokiApp {
             let _ = cmd_tx.send(Cmd::Connect {
                 server,
                 display_name,
+                frequency: frequency.clone(),
             });
         }
 
@@ -127,7 +136,7 @@ impl TokiApp {
             show_settings: false,
             muted: false,
             gain_before_mute: 1.0,
-            channel_idx: 1, // matches the design screenshots (DESIGN @ 462.5875)
+            channel_idx,
             waveform: VecDeque::from(vec![0.0; T::WAVEFORM_SAMPLES]),
             last_tick: Instant::now(),
             wave_phase: 0.0,
@@ -196,6 +205,21 @@ impl TokiApp {
         // 33 ms ≈ 30 fps — fast enough that waveform scrolls smoothly
         // and the TX countdown ticks visibly.
         ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// Count of members on the current frequency (us + others), read
+    /// directly from the shared state. Used for the activity light.
+    fn snapshot_members_count(&self) -> usize {
+        self.state.lock().unwrap().members.len()
+    }
+
+    /// Persist the new channel selection to config and tell the
+    /// runtime to ChangeFrequency on the server.
+    fn send_frequency_change(&mut self) {
+        let freq = T::frequency_label(T::frequency_of(self.channel_idx));
+        self.config.connection.frequency = freq.clone();
+        self.config.save();
+        let _ = self.cmd_tx.send(Cmd::ChangeFrequency(freq));
     }
 }
 
@@ -688,45 +712,110 @@ impl TokiApp {
 
         let pad_x = T::OLED_PAD_X;
         let pad_y = T::OLED_PAD_Y;
-        let label_pos = Pos2::new(rect.left() + pad_x, rect.top() + pad_y + 4.0);
+
+        // ── Activity light (top-right) ─────────────────────────────
+        // No caption now that there's no other text up there — the
+        // glowing dot reads on its own. Lit (primary, glowing) when
+        // more than one member is on this frequency; dim ink_mute
+        // when alone or disconnected.
+
+        // Top row: CHANNEL NN label + activity light. The light glows
+        // (primary) when more than one member is on this frequency,
+        // sits dim (ink_mute) when we're alone or disconnected.
+        let activity = self.snapshot_members_count() > 1;
+        let label_y = rect.top() + pad_y + 4.0;
+        let dot_x = rect.right() - pad_x - 4.0;
+        let dot_y = label_y + 4.0;
+        if activity {
+            glow_dot(painter, Pos2::new(dot_x, dot_y), 3.0, T::PRIMARY, 1.0);
+        } else {
+            painter.circle_filled(Pos2::new(dot_x, dot_y), 3.0, T::INK_MUTE);
+        }
+        // Tiny "ACT" caption next to the light, on its left — gives
+        // the dot a label without crowding the corner.
         painter.text(
-            label_pos,
-            Align2::LEFT_TOP,
-            format!("CHANNEL {:02}", self.channel_idx + 1),
-            font_mono(9.0),
-            T::PRIMARY_DIM,
+            Pos2::new(dot_x - 6.0, dot_y),
+            Align2::RIGHT_CENTER,
+            "ACT",
+            font_mono(7.0),
+            if activity { T::PRIMARY_DIM } else { T::INK_MUTE },
         );
 
-        // Frequency — the showpiece. Big mono numbers, primary color, glow.
-        let ch = &T::CHANNELS[self.channel_idx];
-        let freq_text = format!("{:.4}", ch.freq);
+        // ── Frequency readout ──────────────────────────────────────
+        // Now the only text on this panel, so we let it dominate:
+        // bigger font and centered both horizontally and vertically
+        // between the top edge and the chevron row. Width-fit via
+        // `egui::Painter::layout_no_wrap` so we know the true glyph
+        // advance and don't rely on a fudged "mono char width" guess.
+        let freq = T::frequency_of(self.channel_idx);
+        let freq_text = T::frequency_label(freq);
         let active_color = if matches!(st, RadioState::Tx) { T::TX } else { T::PRIMARY };
         let active_glow = if matches!(st, RadioState::Tx) { T::TX_GLOW } else { T::PRIMARY_GLOW };
-        let freq_pos = Pos2::new(rect.left() + pad_x, rect.center().y - 2.0);
+
+        // Available horizontal space between the panel pads, minus a
+        // bit of room for the " MHz" suffix.
+        let available_w = rect.width() - 2.0 * pad_x;
+        // Try a generous size; if the layout actually overflows we
+        // step down. With the band's 3.2-digit numbers (e.g. "447.05")
+        // 38 px fits the 200-px-wide regular OLED comfortably.
+        let mut font_size = 38.0_f32;
+        let unit_font = font_mono(12.0);
+        let unit_galley = painter.layout_no_wrap(
+            "MHz".to_string(),
+            unit_font.clone(),
+            T::PRIMARY_DIM,
+        );
+        let unit_advance = unit_galley.size().x + 6.0; // gap to digits
+        loop {
+            let g = painter.layout_no_wrap(
+                freq_text.clone(),
+                font_mono(font_size),
+                active_color,
+            );
+            if g.size().x + unit_advance <= available_w || font_size <= 22.0 {
+                break;
+            }
+            font_size -= 1.0;
+        }
+        let freq_font = font_mono(font_size);
+        let freq_galley = painter.layout_no_wrap(
+            freq_text.clone(),
+            freq_font.clone(),
+            active_color,
+        );
+        let block_w = freq_galley.size().x + unit_advance;
+        // Vertically center between the top edge (after activity-dot
+        // row) and the chevron row (≈ bottom edge minus 18 px).
+        let band_top = rect.top() + pad_y + 14.0;
+        let band_bot = rect.bottom() - pad_y - 22.0;
+        let center_y = (band_top + band_bot) * 0.5;
+        let freq_left = rect.left() + (rect.width() - block_w) * 0.5;
         glow_text(
             painter,
-            freq_pos,
+            Pos2::new(freq_left, center_y),
             Align2::LEFT_CENTER,
             &freq_text,
-            font_mono(28.0),
+            freq_font,
             active_color,
             active_glow,
             1.0,
         );
-        // MHz unit, baseline-aligned to the right of the digits.
-        let freq_w = freq_text.len() as f32 * 16.5; // rough mono advance
+        // "MHz" baseline-aligned to the digits. The digits' baseline
+        // sits roughly at (center + font_size * 0.30) for a mono font;
+        // good enough that the suffix tracks the readout cleanly.
+        let baseline_y = center_y + font_size * 0.30;
         painter.text(
-            Pos2::new(rect.left() + pad_x + freq_w + 4.0, rect.center().y + 4.0),
+            Pos2::new(freq_left + freq_galley.size().x + 6.0, baseline_y),
             Align2::LEFT_BOTTOM,
             "MHz",
-            font_mono(11.0),
+            unit_font,
             T::PRIMARY_DIM,
         );
 
-        // Bottom row: ◀  NAME  ▶
-        let bottom_y = rect.bottom() - pad_y - 6.0;
-        let chev_w = 22.0;
-        let chev_h = 18.0;
+        // ── Chevron row (no label between them) ────────────────────
+        let bottom_y = rect.bottom() - pad_y - 16.0;
+        let chev_w = 56.0;
+        let chev_h = 28.0;
         let left_chev = Rect::from_min_size(
             Pos2::new(rect.left() + pad_x, bottom_y - chev_h / 2.0),
             Vec2::new(chev_w, chev_h),
@@ -736,26 +825,49 @@ impl TokiApp {
             Vec2::new(chev_w, chev_h),
         );
 
-        if self.chevron(ui, painter, left_chev, "◀") {
+        // Chevron clicks switch channels. We disable cycling during TX
+        // (you can't change frequency mid-transmission — the design
+        // spec calls this out as a hard constraint). Changing in RX
+        // is allowed: you simply leave the current peer's room.
+        let can_switch = !matches!(st, RadioState::Tx);
+        let prev_idx = self.channel_idx;
+        if can_switch && self.chevron(ui, painter, left_chev, "◀") {
             self.channel_idx = if self.channel_idx == 0 {
-                T::CHANNELS.len() - 1
+                T::FREQ_CHANNEL_COUNT - 1
             } else {
                 self.channel_idx - 1
             };
+        } else if !can_switch {
+            self.chevron_disabled(painter, left_chev, "◀");
         }
-        if self.chevron(ui, painter, right_chev, "▶") {
-            self.channel_idx = (self.channel_idx + 1) % T::CHANNELS.len();
+        if can_switch && self.chevron(ui, painter, right_chev, "▶") {
+            self.channel_idx = (self.channel_idx + 1) % T::FREQ_CHANNEL_COUNT;
+        } else if !can_switch {
+            self.chevron_disabled(painter, right_chev, "▶");
         }
 
-        glow_text(
-            painter,
-            Pos2::new(rect.center().x, bottom_y),
+        if prev_idx != self.channel_idx {
+            self.send_frequency_change();
+        }
+    }
+
+    /// Greyed-out chevron when the user can't change frequency (TX
+    /// state). Same border + glyph but in `ink_mute` instead of
+    /// `primary`, and no click sense.
+    fn chevron_disabled(&self, painter: &egui::Painter, rect: Rect, glyph: &str) {
+        painter.rect(
+            rect,
+            CornerRadius::same(T::RADIUS_CHEVRON as u8),
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, T::INK_MUTE),
+            StrokeKind::Inside,
+        );
+        painter.text(
+            rect.center(),
             Align2::CENTER_CENTER,
-            ch.name,
-            font_mono(10.0),
-            T::INK,
-            T::PRIMARY_GLOW,
-            0.4,
+            glyph,
+            font_mono(11.0),
+            T::INK_MUTE,
         );
     }
 
@@ -1296,9 +1408,12 @@ impl TokiApp {
         if !matches!(self.state.lock().unwrap().connection, ConnState::Connected) {
             settings_row(&mut content_ui, "", |ui| {
                 if ui.button("CONNECT").clicked() {
+                    let frequency =
+                        T::frequency_label(T::frequency_of(self.channel_idx));
                     let _ = self.cmd_tx.send(Cmd::Connect {
                         server: self.config.connection.server.trim().to_string(),
                         display_name: self.config.connection.display_name.trim().to_string(),
+                        frequency,
                     });
                 }
             });

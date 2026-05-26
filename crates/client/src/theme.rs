@@ -89,22 +89,44 @@ pub const ICON_BTN_D: f32 = 28.0;
 pub const TX_LIMIT_MS: u32 = 30_000;
 pub const WAVEFORM_SAMPLES: usize = 64;
 
-/// 8 fixed display channels (see `design-tokens.md`). The proto layer
-/// dropped channel addressing — every Toki client joins the same single
-/// room — so the channel selector here is purely cosmetic for v1:
-/// chevrons cycle the displayed channel without affecting routing.
-pub struct ChannelDisplay {
-    pub freq: f32,
-    pub name: &'static str,
+// ── Frequency band ──────────────────────────────────────────────────────
+// Toki uses the PMR446-adjacent 446.00–448.00 MHz band, with 0.05 MHz
+// (50 kHz) channel spacing — 41 distinct channels. Each frequency maps
+// to its own logical room on the server; the chevrons in the UI cycle
+// between them and send `ChangeFrequency` to the server.
+pub const FREQ_MIN_MHZ: f32 = 446.00;
+/// Upper band edge — documented for clarity; the runtime never compares
+/// against this directly (we use `FREQ_CHANNEL_COUNT` to bound the
+/// selector). Kept here so the relationship `MIN + (COUNT-1)*STEP = MAX`
+/// is obvious to anyone reading the module.
+#[allow(dead_code)]
+pub const FREQ_MAX_MHZ: f32 = 448.00;
+pub const FREQ_STEP_MHZ: f32 = 0.05;
+pub const FREQ_CHANNEL_COUNT: usize = 41; // (max - min) / step + 1
+
+/// MHz value of channel `idx` in `[0, FREQ_CHANNEL_COUNT)`. Clamps
+/// out-of-range indices to the nearest endpoint to be defensive — the
+/// UI should never produce one, but config files might.
+pub fn frequency_of(idx: usize) -> f32 {
+    let i = idx.min(FREQ_CHANNEL_COUNT - 1);
+    FREQ_MIN_MHZ + i as f32 * FREQ_STEP_MHZ
 }
 
-pub const CHANNELS: [ChannelDisplay; 8] = [
-    ChannelDisplay { freq: 462.5625, name: "GENERAL" },
-    ChannelDisplay { freq: 462.5875, name: "DESIGN" },
-    ChannelDisplay { freq: 462.6125, name: "ENGINEER" },
-    ChannelDisplay { freq: 462.6375, name: "OPS" },
-    ChannelDisplay { freq: 462.6625, name: "FIELD-1" },
-    ChannelDisplay { freq: 462.6875, name: "FIELD-2" },
-    ChannelDisplay { freq: 462.7125, name: "STANDBY" },
-    ChannelDisplay { freq: 467.5625, name: "EMERGENCY" },
-];
+/// Inverse of [`frequency_of`]: given a label like `"446.05"`, return
+/// the channel index. Used to seed the UI from saved config.
+pub fn channel_of_label(s: &str) -> Option<usize> {
+    let f: f32 = s.parse().ok()?;
+    let i = ((f - FREQ_MIN_MHZ) / FREQ_STEP_MHZ).round() as i32;
+    if (0..FREQ_CHANNEL_COUNT as i32).contains(&i) {
+        Some(i as usize)
+    } else {
+        None
+    }
+}
+
+/// Canonical wire string for a frequency, e.g. `"446.05"`. We always
+/// use 2 decimals — the band's step is 50 kHz, so any extra precision
+/// would be spurious.
+pub fn frequency_label(freq_mhz: f32) -> String {
+    format!("{freq_mhz:.2}")
+}

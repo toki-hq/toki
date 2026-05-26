@@ -6,18 +6,19 @@ package toki.v1;
 // Audio frames travel out-of-band over UDP; this service carries
 // authentication, room membership, and presence/PTT events.
 //
-// Toki has a single global room — there's no channel addressing.
-// After registering, a client subscribes to receive presence and PTT
-// broadcasts; a separate streaming RPC carries the client's own PTT
-// state transitions to the server.
+// Toki addresses rooms by *frequency* — a string like "446.05" naming
+// a discrete radio channel (446.00–448.00 MHz in 0.05 MHz steps). The
+// server keeps one logical room per frequency; clients move between
+// them via `ChangeFrequency` without re-opening the event stream.
 service Signaling {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Join(JoinRequest) returns (stream Event);
   rpc Leave(LeaveRequest) returns (LeaveResponse);
+  rpc ChangeFrequency(ChangeFrequencyRequest) returns (ChangeFrequencyResponse);
 
   // Client streams PTT state transitions (key down / key up).
-  // Server multicasts these as Events to every other subscriber
-  // via the Join stream.
+  // Server multicasts these as Events to every other member of
+  // the sender's current frequency room.
   rpc PushToTalk(stream PttEvent) returns (PttAck);
 }
 
@@ -36,6 +37,8 @@ message RegisterResponse {
 
 message JoinRequest {
   string client_id = 1;
+  // Initial frequency room to join, e.g. "446.05".
+  string frequency = 2;
 }
 
 message LeaveRequest {
@@ -44,11 +47,26 @@ message LeaveRequest {
 
 message LeaveResponse {}
 
+// Move the client from their current frequency room to a new one. The
+// server emits MemberLeft to the old room, MemberJoined to the new
+// room (including a roster backfill on the client's own event stream),
+// and clears any held PTT lock on the old room.
+message ChangeFrequencyRequest {
+  string client_id = 1;
+  string frequency = 2;
+}
+
+message ChangeFrequencyResponse {}
+
 message Event {
   oneof event {
     MemberJoined joined = 1;
     MemberLeft left = 2;
     PttEvent ptt = 3;
+    // Sent when the server moves us between rooms — gives the UI a
+    // confirmed "you are now on frequency X" signal so it can render
+    // a clean roster (the surrounding Joined/Left events fill it).
+    FrequencyChanged frequency_changed = 4;
   }
 }
 
@@ -59,6 +77,10 @@ message MemberJoined {
 
 message MemberLeft {
   string client_id = 1;
+}
+
+message FrequencyChanged {
+  string frequency = 1;
 }
 
 message PttEvent {

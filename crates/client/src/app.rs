@@ -524,10 +524,111 @@ fn offline_reason(snap: &StateSnapshot, is_offline: bool) -> String {
     }
 }
 
+/// Cleaner "wifi-no-signal" icon — three smooth signal arcs with a
+/// bold diagonal bar that visually punches through them via a
+/// background-coloured shadow stroke painted underneath the bar. The
+/// `bg` argument should match the surface the icon sits on (typically
+/// `T::OLED`); without that step the bar would just overlay the arcs
+/// at the intersections and the "no signal" reading would be muddier.
+///
+/// All five strokes (3 arcs + bar shadow + bar) use plain
+/// `line_segment`s — egui's Painter is happiest with that, and SVG
+/// rasterization isn't wired into the chassis yet.
+fn paint_wifi_barred_icon(
+    painter: &egui::Painter,
+    center: Pos2,
+    size: f32,
+    color: Color32,
+    bg: Color32,
+) {
+    let stroke = Stroke::new(1.8, color);
+    // Anchor the arcs so the "fan" emanates from a point just below
+    // the icon's vertical centre. `base_y` is the dot we eventually
+    // paint as the wifi's foot.
+    let base_y = center.y + size * 0.42;
+    let arc_span = std::f32::consts::PI * 0.70; // 126°
+    let arc_start = (std::f32::consts::PI - arc_span) / 2.0 + std::f32::consts::PI;
+    // Three arcs at decreasing radii — the classic wifi fan.
+    for radius_scale in [1.05_f32, 0.70, 0.36] {
+        let r = size * radius_scale;
+        let segments = 28;
+        let mut prev = None;
+        for i in 0..=segments {
+            let t = i as f32 / segments as f32;
+            let theta = arc_start + arc_span * t;
+            let p = Pos2::new(
+                center.x + theta.cos() * r,
+                base_y + theta.sin() * r * 0.62,
+            );
+            if let Some(p0) = prev {
+                painter.line_segment([p0, p], stroke);
+            }
+            prev = Some(p);
+        }
+    }
+    // Foot dot.
+    painter.circle_filled(Pos2::new(center.x, base_y), 1.6, color);
+
+    // Diagonal bar: paint a wider background-coloured stroke first so
+    // the arcs visually disappear behind the bar (punch-through).
+    let s = size * 1.05;
+    let p1 = Pos2::new(center.x - s, center.y - s * 0.95);
+    let p2 = Pos2::new(center.x + s, center.y + s * 0.95);
+    painter.line_segment([p1, p2], Stroke::new(4.2, bg));
+    painter.line_segment([p1, p2], Stroke::new(2.0, color));
+}
+
+/// Two-prong wall plug at `center`, scaled to `size`. Body is a small
+/// rounded rectangle with two prongs poking upward and a short cable
+/// curving out the bottom-right corner — reads as "plug it back in",
+/// which matches the Quick Connect button's "reuse last config"
+/// semantics.
+fn paint_plug_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let stroke = Stroke::new(1.8, color);
+
+    // Body: ~1.5× wider than tall, slightly below `center` so the
+    // prongs above balance the bounding box visually.
+    let body_w = size * 1.55;
+    let body_h = size * 1.0;
+    let body = Rect::from_center_size(
+        Pos2::new(center.x, center.y + size * 0.12),
+        Vec2::new(body_w, body_h),
+    );
+    painter.rect_stroke(
+        body,
+        CornerRadius::same(2),
+        stroke,
+        StrokeKind::Inside,
+    );
+
+    // Prongs: two thin filled rects rising from the body's top edge.
+    let prong_h = size * 0.55;
+    let prong_w = 1.8;
+    let prong_y_top = body.top() - prong_h;
+    let prong_dx = size * 0.38;
+    for dx in [-prong_dx, prong_dx] {
+        let prong = Rect::from_min_max(
+            Pos2::new(center.x + dx - prong_w / 2.0, prong_y_top),
+            Pos2::new(center.x + dx + prong_w / 2.0, body.top()),
+        );
+        painter.rect_filled(prong, CornerRadius::same(1), color);
+    }
+
+    // Cable: two short segments approximating a soft curve out the
+    // bottom-right of the body. Avoids depending on egui's QuadraticBezier
+    // helper, which would otherwise be the right tool here.
+    let cable_a = Pos2::new(center.x + body_w * 0.10, body.bottom());
+    let cable_b = Pos2::new(center.x + body_w * 0.35, body.bottom() + size * 0.32);
+    let cable_c = Pos2::new(center.x + body_w * 0.55, body.bottom() + size * 0.50);
+    painter.line_segment([cable_a, cable_b], stroke);
+    painter.line_segment([cable_b, cable_c], stroke);
+}
+
 /// 22×22-ish "wifi-off" glyph at `center`, scaled to `size`. Three
 /// arcs (signal lobes) crossed by a diagonal slash, all stroked in
 /// `color`. Hand-drawn primitives rather than SVG because we don't
 /// have an icon-rasterization pipeline wired into the chassis yet.
+#[allow(dead_code)]
 fn paint_wifi_off_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
     let stroke = Stroke::new(1.8, color);
     // Three concentric arcs (the wifi "fan") above the center dot.
@@ -1697,7 +1798,7 @@ impl TokiApp {
 
         // Icon glyph.
         if is_offline {
-            paint_wifi_off_icon(painter, icon_center, 11.0, accent);
+            paint_wifi_barred_icon(painter, icon_center, 11.0, accent, T::OLED);
         } else {
             // 1.4 s/turn spin per the spec.
             let angle = self.elapsed_secs() * std::f32::consts::TAU / 1.4;
@@ -2074,7 +2175,7 @@ impl TokiApp {
         // Left: icon + label stacked over subtext.
         let icon_x = rect.left() + 18.0 + 6.0;
         let label_y = rect.center().y - 6.0;
-        paint_wifi_off_icon(painter, Pos2::new(icon_x, label_y), 7.5, accent_color);
+        paint_plug_icon(painter, Pos2::new(icon_x, label_y), 7.5, accent_color);
         let text_x = icon_x + 18.0;
         glow_text(
             painter,

@@ -53,8 +53,19 @@ async fn main() -> anyhow::Result<()> {
         password_required = password.is_some(),
         "signaling listening",
     );
+    // Cap inbound message size well below Tonic's 4 MB default. Every
+    // legitimate request the client sends is small: `RegisterRequest`
+    // is two short strings, `JoinRequest` is a UUID + a six-character
+    // frequency, `PttEvent` is even smaller. 8 KB is a comfortable
+    // ceiling — anything above this is either a bug or a memory-
+    // amplification probe (the proto decoder allocates before the
+    // handler runs, so a 4 MB request burns 4 MB of server heap even
+    // when the password check is going to reject it).
     let grpc = Server::builder()
-        .add_service(SignalingSvc::new(registry, advertised_audio, password))
+        .add_service(
+            SignalingSvc::new(registry, advertised_audio, password)
+                .max_decoding_message_size(8 * 1024),
+        )
         .serve(grpc_addr);
 
     tokio::select! {

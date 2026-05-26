@@ -28,6 +28,11 @@ pub const TX_GLOW: Color32 = Color32::from_rgba_premultiplied(0x80, 0x5d, 0x27, 
 
 /// `oklch(0.68 0.22 25)` — busy/collision (red).
 pub const WARN: Color32 = Color32::from_rgb(0xff, 0x5c, 0x5c);
+/// `warn` at ~35% alpha — used as the *glow color* behind any red
+/// surface. Sibling of `TX_GLOW` / `PRIMARY_GLOW`. Kept dimmer than
+/// the others (35% vs 50%) because the eye picks red glows out of a
+/// dark UI much more easily — at parity it reads as alarming.
+pub const WARN_GLOW: Color32 = Color32::from_rgba_premultiplied(0x39, 0x14, 0x14, 0x5a);
 
 // ── Hardware shell (theme-independent) ──────────────────────────────────
 pub const SHELL: Color32 = Color32::from_rgb(0x0a, 0x0b, 0x0a);

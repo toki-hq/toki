@@ -23,13 +23,27 @@ use crate::state::{self, ConnState, SharedState};
 use crate::theme as T;
 
 /// Logical UI state derived from the runtime snapshot + local hold flag.
-/// Mirrors the four states in `design/behavior-spec.md`.
+/// Mirrors the six states in `design/behavior-spec.md` — `offline` and
+/// `reconnecting` are transport-layer states that suppress all radio
+/// activity; the other four describe normal half-duplex behavior on a
+/// healthy connection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum RadioState {
+    Offline,
+    Reconnecting,
     Idle,
     Tx,
     Rx,
     Busy,
+}
+
+impl RadioState {
+    /// While the radio is in one of these states the user can't TX,
+    /// can't switch channels, and the center OLED + PTT button are
+    /// swapped for the offline/reconnect surfaces.
+    fn is_transport_down(self) -> bool {
+        matches!(self, RadioState::Offline | RadioState::Reconnecting)
+    }
 }
 
 pub struct TokiApp {
@@ -73,6 +87,12 @@ pub struct TokiApp {
     last_tick: Instant,
     /// Counter for the synthesized waveform's phase modulation.
     wave_phase: f32,
+    /// App start time. Drives all UI animations (blinking dots,
+    /// spinning refresh icon, RECONNECT button sweep) via
+    /// `(Instant::now() - start_time).as_secs_f32()` modulated by
+    /// each effect's period. Cheaper than maintaining N parallel phase
+    /// accumulators and avoids float-drift over long sessions.
+    start_time: Instant,
 }
 
 impl TokiApp {
@@ -146,7 +166,12 @@ impl TokiApp {
             waveform: VecDeque::from(vec![0.0; T::WAVEFORM_SAMPLES]),
             last_tick: Instant::now(),
             wave_phase: 0.0,
+            start_time: Instant::now(),
         }
+    }
+
+    fn elapsed_secs(&self) -> f32 {
+        self.start_time.elapsed().as_secs_f32()
     }
 
     fn snapshot(&self) -> StateSnapshot {
@@ -169,6 +194,13 @@ impl TokiApp {
     }
 
     fn radio_state(&self, snap: &StateSnapshot) -> RadioState {
+        // Transport health wins over radio activity — if we're not on
+        // the wire, we can't possibly be in tx/rx/etc.
+        match &snap.connection {
+            ConnState::Connecting => return RadioState::Reconnecting,
+            ConnState::Disconnected | ConnState::Failed(_) => return RadioState::Offline,
+            ConnState::Connected => {}
+        }
         if snap.is_transmitting {
             RadioState::Tx
         } else if snap.holder.is_some() {
@@ -302,6 +334,141 @@ struct StateSnapshot {
 
 fn font_mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
+}
+
+/// Best-effort truncation to fit inside `max_w` pixels at the given
+/// font. We strip from the end and append "…" — the offline panel's
+/// subtitle uses this so a long error string doesn't bleed past the
+/// panel edge.
+fn truncate_to_width(painter: &egui::Painter, s: &str, font: FontId, max_w: f32) -> String {
+    let galley = painter.layout_no_wrap(s.to_string(), font.clone(), Color32::WHITE);
+    if galley.size().x <= max_w {
+        return s.to_string();
+    }
+    let mut out = String::from(s);
+    while !out.is_empty() {
+        out.pop();
+        let with_ell = format!("{out}…");
+        let g = painter.layout_no_wrap(with_ell.clone(), font.clone(), Color32::WHITE);
+        if g.size().x <= max_w {
+            return with_ell;
+        }
+    }
+    "…".into()
+}
+
+/// Map the runtime's `ConnState` to a short user-facing reason line.
+/// Matches the offline-reason vocabulary in `design/behavior-spec.md`
+/// — short enough to fit the 12-char column the spec calls out.
+fn offline_reason(snap: &StateSnapshot, is_offline: bool) -> String {
+    if !is_offline {
+        // Reconnecting — show what we're contacting, not a reason.
+        return "Resolving server…".into();
+    }
+    match &snap.connection {
+        ConnState::Disconnected => "DISCONNECTED".into(),
+        ConnState::Failed(e) => {
+            // Pluck a short, all-caps phrase out of the underlying
+            // error if we can recognize it — falls back to the raw
+            // message otherwise.
+            let lower = e.to_ascii_lowercase();
+            if lower.contains("auth") {
+                "AUTH FAILED".into()
+            } else if lower.contains("refused") || lower.contains("unreachable")
+                || lower.contains("connect")
+            {
+                "SERVER UNREACHABLE".into()
+            } else if lower.contains("timeout") {
+                "CONNECTION LOST".into()
+            } else {
+                e.clone()
+            }
+        }
+        // Shouldn't be observed in offline branch but harmless.
+        ConnState::Connecting | ConnState::Connected => "OFFLINE".into(),
+    }
+}
+
+/// 22×22-ish "wifi-off" glyph at `center`, scaled to `size`. Three
+/// arcs (signal lobes) crossed by a diagonal slash, all stroked in
+/// `color`. Hand-drawn primitives rather than SVG because we don't
+/// have an icon-rasterization pipeline wired into the chassis yet.
+fn paint_wifi_off_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Color32) {
+    let stroke = Stroke::new(1.8, color);
+    // Three concentric arcs (the wifi "fan") above the center dot.
+    let base_y = center.y + size * 0.40;
+    for (i, scale) in [(2.0_f32, 0.95_f32), (1.4, 0.65), (0.8, 0.35)].iter().enumerate() {
+        let r = size * scale.1;
+        let pts = 14;
+        let mut prev = None;
+        for k in 0..=pts {
+            let t = k as f32 / pts as f32;
+            let theta = std::f32::consts::PI + t * std::f32::consts::PI; // bottom half
+            let p = Pos2::new(
+                center.x + theta.cos() * r,
+                base_y + theta.sin() * r * 0.55,
+            );
+            if let Some(p0) = prev {
+                painter.line_segment([p0, p], stroke);
+            }
+            prev = Some(p);
+        }
+        // Slight fade for inner arcs so the icon reads.
+        let _ = i;
+    }
+    // The center "dot" (foot of the wifi).
+    painter.circle_filled(Pos2::new(center.x, base_y), 1.8, color);
+    // Diagonal slash across the whole icon.
+    let s = size * 1.15;
+    let p1 = Pos2::new(center.x - s, center.y - s);
+    let p2 = Pos2::new(center.x + s, center.y + s);
+    painter.line_segment([p1, p2], Stroke::new(2.0, color));
+}
+
+/// 22×22-ish "refresh" arrow at `center`, rotated to `angle_rad`.
+/// Two arc segments with little arrow heads at the open ends; used
+/// as a poor-man's spinner during the reconnect handshake.
+fn paint_refresh_icon(
+    painter: &egui::Painter,
+    center: Pos2,
+    radius: f32,
+    angle_rad: f32,
+    color: Color32,
+) {
+    let stroke = Stroke::new(2.0, color);
+    let segments = 32;
+    // Open arc covers ~260°. Leave a 50° gap split between the two ends.
+    let gap = 0.4; // rad
+    let total = std::f32::consts::TAU - gap;
+    let start = angle_rad - total / 2.0;
+    let mut prev: Option<Pos2> = None;
+    for i in 0..=segments {
+        let t = i as f32 / segments as f32;
+        let theta = start + total * t;
+        let p = Pos2::new(center.x + theta.cos() * radius, center.y + theta.sin() * radius);
+        if let Some(p0) = prev {
+            painter.line_segment([p0, p], stroke);
+        }
+        prev = Some(p);
+    }
+    // Small arrow head at the end of the arc to suggest direction.
+    let theta_end = start + total;
+    let tip = Pos2::new(
+        center.x + theta_end.cos() * radius,
+        center.y + theta_end.sin() * radius,
+    );
+    let h = radius * 0.45;
+    let tangent = theta_end + std::f32::consts::FRAC_PI_2;
+    let back = Pos2::new(
+        tip.x - tangent.cos() * h * 0.7 + theta_end.cos() * h * 0.5,
+        tip.y - tangent.sin() * h * 0.7 + theta_end.sin() * h * 0.5,
+    );
+    let back2 = Pos2::new(
+        tip.x - tangent.cos() * h * 0.7 - theta_end.cos() * h * 0.5,
+        tip.y - tangent.sin() * h * 0.7 - theta_end.sin() * h * 0.5,
+    );
+    painter.line_segment([tip, back], stroke);
+    painter.line_segment([tip, back2], stroke);
 }
 
 /// One row in the settings overlay: fixed-width label + arbitrary
@@ -691,18 +858,30 @@ impl TokiApp {
         }
         x -= 14.0;
 
-        // Status chip: dot + label. Tuning takes priority over Idle
-        // so the user gets a clear "I'm between frequencies" cue —
-        // orange dot + "TUNING" label until the debounce settles.
-        let (chip_color, chip_label, chip_glow) = if self.is_tuning() {
-            (T::TX, "TUNING", 1.0)
-        } else {
-            match st {
-                RadioState::Tx => (T::TX, "TX", 1.2),
-                RadioState::Rx => (T::PRIMARY, "RX", 1.2),
-                RadioState::Busy => (T::WARN, "BUSY", 1.0),
-                RadioState::Idle => (T::PRIMARY_DIM, "IDLE", 0.3),
+        // Status chip: dot + label. Transport-down states win over
+        // everything (you literally can't be on the air); then tuning
+        // (debouncing channel switch); then radio activity. Per the
+        // spec, the "reconnecting" dot blinks (1.1 s ease) and its
+        // chip text is `CONN…` rather than the full word.
+        let blink_alpha = 0.4 + 0.6
+            * (0.5
+                + 0.5
+                    * (self.elapsed_secs() * std::f32::consts::TAU / 1.1).sin());
+        let (chip_color, chip_label, chip_glow, label_color) = match st {
+            // Offline dot was reading as "alarming" at intensity 1.0;
+            // toned to 0.5 so it still stands out against IDLE/RX
+            // without screaming.
+            RadioState::Offline => (T::WARN, "OFFLINE", 0.5, T::WARN),
+            RadioState::Reconnecting => {
+                let alpha = (blink_alpha * 255.0) as u8;
+                let pulsing = Color32::from_rgba_unmultiplied(T::TX.r(), T::TX.g(), T::TX.b(), alpha);
+                (pulsing, "CONN…", 1.0, T::INK_DIM)
             }
+            _ if self.is_tuning() => (T::TX, "TUNING", 1.0, T::INK_DIM),
+            RadioState::Tx => (T::TX, "TX", 1.2, T::INK_DIM),
+            RadioState::Rx => (T::PRIMARY, "RX", 1.2, T::INK_DIM),
+            RadioState::Busy => (T::WARN, "BUSY", 1.0, T::INK_DIM),
+            RadioState::Idle => (T::PRIMARY_DIM, "IDLE", 0.3, T::INK_DIM),
         };
         // Label first (we draw right-to-left): place label, then dot.
         let label_w = chip_label.len() as f32 * 6.5 + 8.0;
@@ -712,7 +891,7 @@ impl TokiApp {
             Align2::LEFT_CENTER,
             chip_label,
             font_mono(10.0),
-            T::INK_DIM,
+            label_color,
         );
         x -= 12.0;
         glow_dot(painter, Pos2::new(x, y_mid), 3.0, chip_color, chip_glow);
@@ -819,10 +998,35 @@ impl TokiApp {
         // between the top edge and the chevron row. Width-fit via
         // `egui::Painter::layout_no_wrap` so we know the true glyph
         // advance and don't rely on a fudged "mono char width" guess.
+        //
+        // When transport is down we strip the readout to a dim "—"
+        // and drop the glow entirely (per `behavior-spec.md`:
+        // "frequency dimmed to ink-mute (no glow)"). The MHz suffix
+        // disappears too — there's no value to label.
         let freq = T::frequency_of(self.channel_idx);
-        let freq_text = T::frequency_label(freq);
-        let active_color = if matches!(st, RadioState::Tx) { T::TX } else { T::PRIMARY };
-        let active_glow = if matches!(st, RadioState::Tx) { T::TX_GLOW } else { T::PRIMARY_GLOW };
+        let offline_view = st.is_transport_down();
+        let freq_text = if offline_view {
+            "—".to_string()
+        } else {
+            T::frequency_label(freq)
+        };
+        let active_color = if offline_view {
+            T::INK_MUTE
+        } else if matches!(st, RadioState::Tx) {
+            T::TX
+        } else {
+            T::PRIMARY
+        };
+        let active_glow = if offline_view {
+            // Transparent — `glow_text` paints multiple alpha-faded
+            // copies in this color; the all-zero alpha effectively
+            // skips them.
+            Color32::TRANSPARENT
+        } else if matches!(st, RadioState::Tx) {
+            T::TX_GLOW
+        } else {
+            T::PRIMARY_GLOW
+        };
 
         // Available horizontal space between the panel pads, minus a
         // bit of room for the " MHz" suffix.
@@ -870,19 +1074,27 @@ impl TokiApp {
             freq_font,
             active_color,
             active_glow,
-            1.0,
+            if offline_view { 0.0 } else { 1.0 },
         );
         // "MHz" baseline-aligned to the digits. The digits' baseline
         // sits roughly at (center + font_size * 0.30) for a mono font;
         // good enough that the suffix tracks the readout cleanly.
+        // Suppressed in the offline view — the "—" placeholder
+        // doesn't need a unit.
         let baseline_y = center_y + font_size * 0.30;
-        painter.text(
-            Pos2::new(freq_left + freq_galley.size().x + 6.0, baseline_y),
-            Align2::LEFT_BOTTOM,
-            "MHz",
-            unit_font,
-            T::PRIMARY_DIM,
-        );
+        if !offline_view {
+            painter.text(
+                Pos2::new(freq_left + freq_galley.size().x + 6.0, baseline_y),
+                Align2::LEFT_BOTTOM,
+                "MHz",
+                unit_font,
+                T::PRIMARY_DIM,
+            );
+        }
+        // `baseline_y` is only relevant for the MHz suffix above; in
+        // the offline branch nothing reads it, so suppress the unused
+        // warning rather than reorder the block.
+        let _ = baseline_y;
 
         // ── Chevron row (no label between them) ────────────────────
         let bottom_y = rect.bottom() - pad_y - 16.0;
@@ -901,7 +1113,10 @@ impl TokiApp {
         // (you can't change frequency mid-transmission — the design
         // spec calls this out as a hard constraint). Changing in RX
         // is allowed: you simply leave the current peer's room.
-        let can_switch = !matches!(st, RadioState::Tx);
+        // Chevrons are off-limits during TX (you can't channel-hop
+        // mid-transmission per the spec) AND while transport is down
+        // (there's no room to join until we've handshaken).
+        let can_switch = !matches!(st, RadioState::Tx) && !st.is_transport_down();
         let prev_idx = self.channel_idx;
         if can_switch && self.chevron(ui, painter, left_chev, "◀") {
             self.channel_idx = if self.channel_idx == 0 {
@@ -978,6 +1193,13 @@ impl TokiApp {
         paint_panel(painter, rect, T::OLED, T::OLED_RIM, T::RADIUS_OLED, None);
         paint_scanlines(painter, rect, T::RADIUS_OLED);
 
+        // Transport-down states replace the waveform + status with a
+        // dedicated "OfflineCenter" panel (icon + reason + footer).
+        if st.is_transport_down() {
+            self.paint_offline_center(painter, rect, snap, st);
+            return;
+        }
+
         // Carve out top portion for the waveform, bottom strip for the
         // status line (10 px high text, a few px of padding).
         let pad_x = 12.0;
@@ -1004,6 +1226,15 @@ impl TokiApp {
         let left_x = rect.left() + pad_x;
         let right_x = rect.right() - pad_x;
         match st {
+            // Transport-down arms are unreachable here — the early
+            // return above (in `paint_oled_center`) routes them to
+            // `paint_offline_center` before we get here. Cover them
+            // for exhaustiveness so any future code rearrangement
+            // doesn't silently lose the offline UI.
+            RadioState::Offline | RadioState::Reconnecting => {
+                // Render an empty status row; the offline panel
+                // owns this entire OLED above.
+            }
             RadioState::Idle => {
                 let label = if matches!(snap.connection, ConnState::Connected) {
                     "READY · CHANNEL CLEAR"
@@ -1095,6 +1326,156 @@ impl TokiApp {
         }
     }
 
+    /// The center-OLED contents when transport is down. Two rows:
+    ///   * Hero: animated round icon (wifi-off blinking when offline,
+    ///     refresh spinning when reconnecting) + title + reason.
+    ///   * Footer: server URL on the left, "TRANSMISSION DISABLED" /
+    ///     "PLEASE WAIT" on the right.
+    fn paint_offline_center(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        snap: &StateSnapshot,
+        st: RadioState,
+    ) {
+        let pad_x = 12.0;
+        let pad_y = 8.0;
+        let inner = Rect::from_min_max(
+            Pos2::new(rect.left() + pad_x, rect.top() + pad_y),
+            Pos2::new(rect.right() - pad_x, rect.bottom() - pad_y),
+        );
+        let is_offline = matches!(st, RadioState::Offline);
+        let accent = if is_offline { T::WARN } else { T::TX };
+        // Use the dimmed `*_GLOW` companion of each accent for halo
+        // work — passing the saturated accent itself reads as a flare.
+        let accent_glow = if is_offline { T::WARN_GLOW } else { T::TX_GLOW };
+
+        // ── Hero row ────────────────────────────────────────────────
+        let footer_h = 16.0;
+        let hero_rect = Rect::from_min_max(
+            inner.min,
+            Pos2::new(inner.right(), inner.bottom() - footer_h - 4.0),
+        );
+        let icon_d = 38.0;
+        let icon_center = Pos2::new(
+            hero_rect.left() + icon_d / 2.0 + 2.0,
+            hero_rect.center().y,
+        );
+
+        // Icon background — only offline gets the soft red wash; the
+        // reconnecting icon spins on a transparent backdrop.
+        if is_offline {
+            // Blink the wash with a 1.6s pulse: 0.5 ↔ 1.0 of base alpha.
+            // Halved from the original 8% to 4% — red surfaces stack
+            // visually faster than amber, so even the previous tiny
+            // value was reading as a hot wash.
+            let pulse = 0.5
+                + 0.5
+                    * (self.elapsed_secs() * std::f32::consts::TAU / 1.6).sin();
+            let alpha = (0.04 * 255.0 * pulse) as u8;
+            let wash = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha);
+            painter.circle_filled(icon_center, icon_d / 2.0, wash);
+        }
+        // Outer glow halo. Reconnecting (amber) keeps the previous
+        // intensity; offline (red) is dimmed to ~half because the eye
+        // weights red glows heavier than amber.
+        let halo_alpha = if is_offline { 16 } else { 30 };
+        painter.circle_filled(
+            icon_center,
+            icon_d / 2.0 + 4.0,
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), halo_alpha),
+        );
+        // Faint border to define the disc.
+        painter.circle_stroke(
+            icon_center,
+            icon_d / 2.0,
+            Stroke::new(
+                1.0,
+                Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 90),
+            ),
+        );
+
+        // Icon glyph.
+        if is_offline {
+            paint_wifi_off_icon(painter, icon_center, 11.0, accent);
+        } else {
+            // 1.4 s/turn spin per the spec.
+            let angle = self.elapsed_secs() * std::f32::consts::TAU / 1.4;
+            paint_refresh_icon(painter, icon_center, 10.0, angle, accent);
+        }
+
+        // Text column to the right of the icon.
+        let text_x = icon_center.x + icon_d / 2.0 + 14.0;
+        let title = if is_offline { "NO SIGNAL" } else { "CONNECTING…" };
+        let reason = offline_reason(snap, is_offline);
+        // Title (mono 13, primary-glow style). Red gets a smaller
+        // glow multiplier than amber — at parity the red bleeds.
+        let title_intensity = if is_offline { 0.45 } else { 0.7 };
+        glow_text(
+            painter,
+            Pos2::new(text_x, hero_rect.center().y - 6.0),
+            Align2::LEFT_CENTER,
+            title,
+            font_mono(13.0),
+            accent,
+            accent_glow,
+            title_intensity,
+        );
+        // Subtitle (truncated if needed).
+        let max_subtitle_w = inner.right() - text_x;
+        let subtitle = truncate_to_width(painter, &reason, font_mono(10.0), max_subtitle_w);
+        painter.text(
+            Pos2::new(text_x, hero_rect.center().y + 8.0),
+            Align2::LEFT_CENTER,
+            subtitle,
+            font_mono(10.0),
+            T::INK_DIM,
+        );
+
+        // ── Footer ─────────────────────────────────────────────────
+        let footer_y = inner.bottom() - footer_h / 2.0;
+        let divider_y = footer_y - footer_h / 2.0;
+        let border_color = if is_offline {
+            Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 45)
+        } else {
+            T::PRIMARY_INK
+        };
+        painter.line_segment(
+            [
+                Pos2::new(inner.left(), divider_y),
+                Pos2::new(inner.right(), divider_y),
+            ],
+            Stroke::new(1.0, border_color),
+        );
+
+        let server_label = self.config.connection.server.trim();
+        let server_label = server_label
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        painter.text(
+            Pos2::new(inner.left(), footer_y + 2.0),
+            Align2::LEFT_CENTER,
+            "SERVER",
+            font_mono(10.0),
+            T::INK_DIM,
+        );
+        painter.text(
+            Pos2::new(inner.left() + 50.0, footer_y + 2.0),
+            Align2::LEFT_CENTER,
+            server_label,
+            font_mono(10.0),
+            T::INK,
+        );
+        let right_label = if is_offline { "TRANSMISSION DISABLED" } else { "PLEASE WAIT" };
+        painter.text(
+            Pos2::new(inner.right(), footer_y + 2.0),
+            Align2::RIGHT_CENTER,
+            right_label,
+            font_mono(10.0),
+            T::INK_MUTE,
+        );
+    }
+
     fn paint_waveform(&self, painter: &egui::Painter, rect: Rect, st: RadioState) {
         let active = matches!(st, RadioState::Tx | RadioState::Rx);
         let color = match st {
@@ -1180,13 +1561,125 @@ impl TokiApp {
             T::INK_MUTE,
         );
 
-        // PTT — fills the rest of the row.
+        // PTT button (or Reconnect button when transport is down) —
+        // fills the rest of the row.
         let ptt_x = knob_rect.right() + T::GAP_BOTTOM;
         let ptt_rect = Rect::from_min_size(
             Pos2::new(ptt_x, rect.center().y - T::PTT_H / 2.0),
             Vec2::new(rect.right() - ptt_x, T::PTT_H),
         );
-        self.paint_ptt(ui, painter, ptt_rect, st);
+        if st.is_transport_down() {
+            self.paint_reconnect(ui, painter, ptt_rect, st);
+        } else {
+            self.paint_ptt(ui, painter, ptt_rect, st);
+        }
+    }
+
+    /// The PTT button's replacement when we're not online. Same
+    /// dimensions and corner radius — only the surface and behavior
+    /// differ. Clicking while `Offline` triggers a reconnect; while
+    /// `Reconnecting` the button is non-interactive (cursor doesn't
+    /// matter — there's no hover state to speak of yet).
+    fn paint_reconnect(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        st: RadioState,
+    ) {
+        let is_offline = matches!(st, RadioState::Offline);
+        let (top, bottom, border, label, hint, glyph_color) = if is_offline {
+            (
+                Color32::from_rgb(0x6b, 0x21, 0x21),
+                Color32::from_rgb(0x3b, 0x12, 0x12),
+                Color32::from_rgba_unmultiplied(T::WARN.r(), T::WARN.g(), T::WARN.b(), 128),
+                "RECONNECT",
+                "TAP TO RETRY",
+                T::WARN,
+            )
+        } else {
+            (
+                Color32::from_rgb(0x6b, 0x49, 0x1c),
+                Color32::from_rgb(0x3f, 0x2a, 0x10),
+                T::TX,
+                "CONNECTING…",
+                "· · ·",
+                T::TX,
+            )
+        };
+
+        let sense = if is_offline { Sense::click() } else { Sense::hover() };
+        let resp = ui.allocate_rect(rect, sense);
+        if is_offline && resp.clicked() {
+            // Re-dispatch a fresh Connect with the saved config. The
+            // runtime ignores the request if a session is already open;
+            // here it can't be, so this always fires the handshake.
+            let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
+            let _ = self.cmd_tx.send(Cmd::Connect {
+                server: self.config.connection.server.trim().to_string(),
+                display_name: self.config.connection.display_name.trim().to_string(),
+                frequency,
+            });
+        }
+
+        // Background gradient + 1 px inset stroke matches the PTT
+        // button's recipe — same chassis aesthetic.
+        let corners = CornerRadius::same(T::RADIUS_PTT as u8);
+        paint_vertical_gradient(painter, rect, corners, &[(0.0, top), (1.0, bottom)]);
+        painter.rect_stroke(rect, corners, Stroke::new(1.0, border), StrokeKind::Inside);
+
+        if !is_offline {
+            // Sweep highlight: a soft band sliding left-to-right
+            // every 1.6 s, drawn as a couple of short vertical bars
+            // with low alpha. egui can't smoothly mask a moving
+            // gradient against a rounded rect without a custom mesh,
+            // so this is the cheap approximation.
+            let t = (self.elapsed_secs() / 1.6).fract();
+            let band_x = rect.left() + (rect.width() + 80.0) * t - 40.0;
+            let bar_w = 24.0;
+            let bar_rect = Rect::from_min_max(
+                Pos2::new(band_x, rect.top() + 1.0),
+                Pos2::new(band_x + bar_w, rect.bottom() - 1.0),
+            );
+            let bar_rect = bar_rect.intersect(rect);
+            if bar_rect.is_positive() {
+                painter.rect_filled(
+                    bar_rect,
+                    CornerRadius::ZERO,
+                    Color32::from_rgba_unmultiplied(T::TX.r(), T::TX.g(), T::TX.b(), 40),
+                );
+            }
+        }
+
+        // Left cluster: round icon + glowing label.
+        let icon_x = rect.left() + 18.0 + 8.0;
+        let label_y = rect.center().y;
+        if is_offline {
+            paint_wifi_off_icon(painter, Pos2::new(icon_x, label_y), 8.0, glyph_color);
+        } else {
+            let angle = self.elapsed_secs() * std::f32::consts::TAU / 1.4;
+            paint_refresh_icon(painter, Pos2::new(icon_x, label_y), 7.5, angle, glyph_color);
+        }
+        let text_x = icon_x + 18.0;
+        glow_text(
+            painter,
+            Pos2::new(text_x, label_y),
+            Align2::LEFT_CENTER,
+            label,
+            font_ui(13.0, true),
+            glyph_color,
+            if is_offline { T::WARN_GLOW } else { T::TX_GLOW },
+            if is_offline { 0.45 } else { 0.7 },
+        );
+
+        // Right hint.
+        painter.text(
+            Pos2::new(rect.right() - 18.0, label_y),
+            Align2::RIGHT_CENTER,
+            hint,
+            font_mono(9.0),
+            Color32::from_rgba_unmultiplied(0xff, 0xff, 0xff, 100),
+        );
     }
 
     fn paint_knob(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect) {

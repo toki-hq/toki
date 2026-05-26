@@ -40,6 +40,21 @@ enum RadioState {
     Busy,
 }
 
+/// Which audio direction a `paint_knob` call drives. Both knobs share
+/// the same visuals — only the underlying field, the apply path
+/// (input vs output gain), and the indicator colour-when-muted differ.
+#[derive(Clone, Copy)]
+enum KnobKind {
+    /// Input (microphone) gain. Applied unconditionally; mute is an
+    /// output-only concept.
+    Mic,
+    /// Output (speaker) gain. While muted, the knob updates
+    /// `config.audio.output_gain` and `gain_before_mute` so the next
+    /// unmute reflects the user's chosen level — but does *not* call
+    /// `audio_gains.set_output`, which would defeat the mute.
+    Speaker,
+}
+
 impl RadioState {
     /// While the radio is in one of these states the user can't TX,
     /// can't switch channels, and the center OLED + PTT button are
@@ -1952,26 +1967,38 @@ impl TokiApp {
         rect: Rect,
         st: RadioState,
     ) {
-        // Knob on the left, vertical-centered.
-        let knob_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + T::KNOB_D / 2.0 + 4.0, rect.center().y - 4.0),
+        // Two knobs on the left, vertically centred and laid out side
+        // by side: mic gain (capture) first, then speaker gain
+        // (playback). The output mute toggle still lives in the top
+        // bar — the SPK knob just sets the *level* that's restored on
+        // unmute (and applied immediately while unmuted).
+        let knob_y = rect.center().y - 4.0;
+        let knob_gap = T::GAP_BOTTOM;
+        let mic_rect = Rect::from_center_size(
+            Pos2::new(rect.left() + T::KNOB_D / 2.0 + 4.0, knob_y),
             Vec2::splat(T::KNOB_D),
         );
-        self.paint_knob(ui, painter, knob_rect);
-        // "MIC VOL" caption — names what the knob actually controls
-        // (input gain on the capture side, separate from the output
-        // mute icon at the top of the panel).
-        painter.text(
-            Pos2::new(knob_rect.center().x, knob_rect.bottom() + 8.0),
-            Align2::CENTER_CENTER,
-            "MIC VOL",
-            font_mono(8.0),
-            T::INK_MUTE,
+        let spk_rect = Rect::from_center_size(
+            Pos2::new(mic_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
+            Vec2::splat(T::KNOB_D),
         );
+        self.paint_knob(ui, painter, mic_rect, KnobKind::Mic);
+        self.paint_knob(ui, painter, spk_rect, KnobKind::Speaker);
+        // Captions — 3-letter shorthand so both fit cleanly under
+        // 42 px knobs at 8 px mono.
+        for (r, label) in [(mic_rect, "MIC VOL"), (spk_rect, "SPK VOL")] {
+            painter.text(
+                Pos2::new(r.center().x, r.bottom() + 8.0),
+                Align2::CENTER_CENTER,
+                label,
+                font_mono(8.0),
+                T::INK_MUTE,
+            );
+        }
 
         // PTT button (or Reconnect button when transport is down) —
         // fills the rest of the row.
-        let ptt_x = knob_rect.right() + T::GAP_BOTTOM;
+        let ptt_x = spk_rect.right() + T::GAP_BOTTOM;
         let ptt_rect = Rect::from_min_size(
             Pos2::new(ptt_x, rect.center().y - T::PTT_H / 2.0),
             Vec2::new(rect.right() - ptt_x, T::PTT_H),
@@ -2264,39 +2291,58 @@ impl TokiApp {
         );
     }
 
-    fn paint_knob(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect) {
+    fn paint_knob(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        kind: KnobKind,
+    ) {
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
 
-        // Click-drag adjusts the *mic* gain by the angle delta around
-        // the knob center. Sensitivity is intentionally low — a full
-        // sweep takes ~3π of drag (about a full circle plus a half),
-        // which feels precise instead of twitchy and lets the user
-        // do meaningful 5–10% adjustments without overshooting.
+        // Click-drag adjusts the bound gain by the *horizontal* pixel
+        // delta of the pointer. Right increases, left decreases —
+        // matches the universal "slider" mental model and avoids the
+        // "which way around the knob am I rotating?" ambiguity of
+        // angle-based interaction. We previously rotated around the
+        // knob center; users found that twitchy near the rim and
+        // unintuitive near the dead-center.
+        //
+        // Sensitivity history (per-frame divisor in pixels):
+        //   8 px/unit  ≈ snappy software slider
+        //   250 px/unit ≈ current — a full 0→2.0 sweep takes ~500 px
+        //   of horizontal drag (about half a monitor-width), which feels
+        //   like a real, heavily-detented hardware pot: large gestures
+        //   for coarse moves, deliberate small motions for the 1–2%
+        //   nudges users actually want.
         if resp.dragged() {
-            if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
-                if let Some(prev) = ui.input(|i| i.pointer.press_origin()) {
-                    let cx = rect.center().x;
-                    let cy = rect.center().y;
-                    let a_now = (pos.y - cy).atan2(pos.x - cx);
-                    let a_prev = (prev.y - cy).atan2(prev.x - cx);
-                    let mut delta = a_now - a_prev;
-                    if delta > std::f32::consts::PI {
-                        delta -= std::f32::consts::TAU;
-                    } else if delta < -std::f32::consts::PI {
-                        delta += std::f32::consts::TAU;
+            let dx = ui.input(|i| i.pointer.delta().x);
+            if dx != 0.0 {
+                let increment = dx / 250.0;
+                let current_unit = match kind {
+                    KnobKind::Mic => self.config.audio.input_gain / 2.0,
+                    KnobKind::Speaker => self.config.audio.output_gain / 2.0,
+                };
+                let new_unit = (current_unit + increment).clamp(0.0, 1.0);
+                let gain = new_unit * 2.0;
+                match kind {
+                    KnobKind::Mic => {
+                        self.config.audio.input_gain = gain;
+                        // Mic gain is independent of mute (which
+                        // gates the *output* side) — apply
+                        // unconditionally.
+                        self.audio_gains.set_input(gain);
                     }
-                    // Apply only the per-frame increment so the knob
-                    // doesn't snap on each drag start. Divisor was 1.4π
-                    // (snappy); 3.0π makes the knob about half as
-                    // sensitive — closer to a real hardware pot.
-                    let increment = delta / (std::f32::consts::PI * 3.0);
-                    let new_val =
-                        (self.config.audio.input_gain / 2.0 + increment).clamp(0.0, 1.0);
-                    let gain = new_val * 2.0;
-                    self.config.audio.input_gain = gain;
-                    // Mic gain is independent of mute (which gates the
-                    // *output* side) — apply it unconditionally.
-                    self.audio_gains.set_input(gain);
+                    KnobKind::Speaker => {
+                        self.config.audio.output_gain = gain;
+                        if self.muted {
+                            // Stage the post-mute target — applying
+                            // now would punch through the mute.
+                            self.gain_before_mute = gain;
+                        } else {
+                            self.audio_gains.set_output(gain);
+                        }
+                    }
                 }
             }
         }
@@ -2304,8 +2350,12 @@ impl TokiApp {
             self.config.save();
         }
 
-        // Map input gain [0..2] → knob display value [0..1].
-        let v = (self.config.audio.input_gain / 2.0).clamp(0.0, 1.0);
+        // Map current gain [0..2] → display value [0..1].
+        let v = match kind {
+            KnobKind::Mic => self.config.audio.input_gain / 2.0,
+            KnobKind::Speaker => self.config.audio.output_gain / 2.0,
+        }
+        .clamp(0.0, 1.0);
         let angle_deg = -135.0 + v * 270.0;
         let angle = angle_deg.to_radians();
 
@@ -2315,10 +2365,15 @@ impl TokiApp {
         // Inner disc.
         painter.circle_filled(rect.center(), T::KNOB_D / 2.0 - 4.0, T::SHELL_TOP);
 
-        // Indicator line at top of inner disc, rotated to angle.
+        // Indicator line at top of inner disc, rotated to angle. The
+        // Speaker knob dims its indicator while muted — visual cue
+        // that the knob's value is staged but not currently audible.
         let r_outer = T::KNOB_D / 2.0 - 6.0;
         let r_inner = T::KNOB_D / 2.0 - 13.0;
-        let ind_color = T::PRIMARY;
+        let ind_color = match kind {
+            KnobKind::Speaker if self.muted => T::INK_MUTE,
+            _ => T::PRIMARY,
+        };
         let cx = rect.center().x;
         let cy = rect.center().y;
         // The "top" before rotation is -π/2; angle is rotation from that.

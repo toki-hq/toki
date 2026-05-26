@@ -14,6 +14,7 @@ use toki_proto::v1::{
 };
 
 use crate::state::{Client, Registry, SharedRegistry};
+use crate::validation;
 
 pub struct SignalingSvc {
     registry: SharedRegistry,
@@ -66,13 +67,21 @@ impl Signaling for SignalingSvc {
     ) -> Result<Response<RegisterResponse>, Status> {
         let req = request.into_inner();
 
+        // Validate display name *before* the password check so we
+        // can't be tricked into logging control characters via the
+        // "register rejected: bad password" warning. Both checks are
+        // cheap; ordering them this way also means an attacker
+        // probing for a password length leak has to send valid
+        // names, which makes the warn-log a useful audit trail.
+        let display_name = validation::display_name(&req.display_name)?;
+
         // Password gate — checked before we mint a session or allocate
         // any registry state. Open-mode servers (no configured
         // password) skip the check entirely.
         if let Some(required) = &self.password {
             if !ct_eq(required.as_bytes(), req.password.as_bytes()) {
                 tracing::warn!(
-                    name = %req.display_name,
+                    name = %display_name,
                     "register rejected: bad password"
                 );
                 return Err(Status::unauthenticated("invalid password"));
@@ -84,7 +93,7 @@ impl Signaling for SignalingSvc {
 
         let client = Client {
             id: id.clone(),
-            display_name: req.display_name.clone(),
+            display_name: display_name.clone(),
             audio_token: token.clone(),
             audio_addr: None,
             events_tx: None,
@@ -103,7 +112,7 @@ impl Signaling for SignalingSvc {
 
         info!(
             client_id = %id,
-            name = %req.display_name,
+            name = %display_name,
             total_clients = total,
             "client registered",
         );
@@ -120,9 +129,12 @@ impl Signaling for SignalingSvc {
         request: Request<JoinRequest>,
     ) -> Result<Response<Self::JoinStream>, Status> {
         let req = request.into_inner();
-        if req.frequency.is_empty() {
-            return Err(Status::invalid_argument("frequency is required"));
-        }
+        // Canonicalise the frequency — both rejects out-of-band /
+        // non-step-aligned values and collapses equivalent string
+        // forms ("446.05", "446.050") onto a single room key so
+        // hand-crafted clients can't squat fresh rooms by varying
+        // the formatting.
+        let frequency = validation::frequency(&req.frequency)?;
         let (tx, rx) = mpsc::channel::<Event>(64);
 
         let mut registry = self.registry.lock().await;
@@ -134,13 +146,13 @@ impl Signaling for SignalingSvc {
                 .get_mut(&req.client_id)
                 .ok_or_else(|| Status::not_found("unknown client"))?;
             client.events_tx = Some(tx.clone());
-            client.current_frequency = Some(req.frequency.clone());
+            client.current_frequency = Some(frequency.clone());
             client.display_name.clone()
         };
 
         // Add to the room, snapshot the roster + holder for backfill.
         let (other_ids, current_holder, total_members) = {
-            let room = registry.rooms.entry(req.frequency.clone()).or_default();
+            let room = registry.rooms.entry(frequency.clone()).or_default();
             if !room.members.contains(&req.client_id) {
                 room.members.push(req.client_id.clone());
             }
@@ -156,7 +168,7 @@ impl Signaling for SignalingSvc {
         info!(
             client_id = %req.client_id,
             name = %display_name,
-            frequency = %req.frequency,
+            frequency = %frequency,
             members = total_members,
             "client joined frequency",
         );
@@ -266,9 +278,10 @@ impl Signaling for SignalingSvc {
         request: Request<ChangeFrequencyRequest>,
     ) -> Result<Response<ChangeFrequencyResponse>, Status> {
         let req = request.into_inner();
-        if req.frequency.is_empty() {
-            return Err(Status::invalid_argument("frequency is required"));
-        }
+        // Canonicalise + validate the target frequency. Same rules as
+        // `join`: out-of-band / non-step-aligned / malformed strings
+        // are rejected with INVALID_ARGUMENT.
+        let new_freq = validation::frequency(&req.frequency)?;
 
         let (
             old_recipients,
@@ -298,7 +311,10 @@ impl Signaling for SignalingSvc {
             };
 
             // If they're already on the requested frequency, no-op.
-            if old_freq_opt.as_deref() == Some(req.frequency.as_str()) {
+            // Compare against the canonical form so a client that
+            // sends "446.05" then "446.050" doesn't trigger a leave-
+            // and-rejoin cycle.
+            if old_freq_opt.as_deref() == Some(new_freq.as_str()) {
                 return Ok(Response::new(ChangeFrequencyResponse {}));
             }
 
@@ -314,7 +330,7 @@ impl Signaling for SignalingSvc {
 
             // Add to new room.
             let (new_other_ids, new_holder, new_members) = {
-                let room = registry.rooms.entry(req.frequency.clone()).or_default();
+                let room = registry.rooms.entry(new_freq.clone()).or_default();
                 if !room.members.contains(&req.client_id) {
                     room.members.push(req.client_id.clone());
                 }
@@ -329,14 +345,14 @@ impl Signaling for SignalingSvc {
 
             // Update the client's tracked frequency.
             if let Some(client) = registry.clients.get_mut(&req.client_id) {
-                client.current_frequency = Some(req.frequency.clone());
+                client.current_frequency = Some(new_freq.clone());
             }
 
             info!(
                 client_id = %req.client_id,
                 name = %display_name,
                 from = old_freq_opt.as_deref().unwrap_or("(none)"),
-                to = %req.frequency,
+                to = %new_freq,
                 new_members,
                 "client changed frequency",
             );
@@ -358,7 +374,7 @@ impl Signaling for SignalingSvc {
                 client_tx,
                 display_name,
                 old_freq_opt,
-                req.frequency.clone(),
+                new_freq,
             )
         };
         let _ = display_name;

@@ -1659,11 +1659,13 @@ impl TokiApp {
             Vec2::splat(T::KNOB_D),
         );
         self.paint_knob(ui, painter, knob_rect);
-        // "VOL" caption.
+        // "MIC VOL" caption — names what the knob actually controls
+        // (input gain on the capture side, separate from the output
+        // mute icon at the top of the panel).
         painter.text(
             Pos2::new(knob_rect.center().x, knob_rect.bottom() + 8.0),
             Align2::CENTER_CENTER,
-            "VOL",
+            "MIC VOL",
             font_mono(8.0),
             T::INK_MUTE,
         );
@@ -1792,8 +1794,11 @@ impl TokiApp {
     fn paint_knob(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect) {
         let resp = ui.allocate_rect(rect, Sense::click_and_drag());
 
-        // Click-drag adjusts the value relative to the angle change
-        // around the knob center. Forgiving sweep (1.4π = full range).
+        // Click-drag adjusts the *mic* gain by the angle delta around
+        // the knob center. Sensitivity is intentionally low — a full
+        // sweep takes ~3π of drag (about a full circle plus a half),
+        // which feels precise instead of twitchy and lets the user
+        // do meaningful 5–10% adjustments without overshooting.
         if resp.dragged() {
             if let Some(pos) = ui.input(|i| i.pointer.interact_pos()) {
                 if let Some(prev) = ui.input(|i| i.pointer.press_origin()) {
@@ -1808,15 +1813,17 @@ impl TokiApp {
                         delta += std::f32::consts::TAU;
                     }
                     // Apply only the per-frame increment so the knob
-                    // doesn't snap on each drag start.
-                    let increment = delta / (std::f32::consts::PI * 1.4);
+                    // doesn't snap on each drag start. Divisor was 1.4π
+                    // (snappy); 3.0π makes the knob about half as
+                    // sensitive — closer to a real hardware pot.
+                    let increment = delta / (std::f32::consts::PI * 3.0);
                     let new_val =
-                        (self.config.audio.output_gain / 2.0 + increment).clamp(0.0, 1.0);
+                        (self.config.audio.input_gain / 2.0 + increment).clamp(0.0, 1.0);
                     let gain = new_val * 2.0;
-                    self.config.audio.output_gain = gain;
-                    if !self.muted {
-                        self.audio_gains.set_output(gain);
-                    }
+                    self.config.audio.input_gain = gain;
+                    // Mic gain is independent of mute (which gates the
+                    // *output* side) — apply it unconditionally.
+                    self.audio_gains.set_input(gain);
                 }
             }
         }
@@ -1824,9 +1831,9 @@ impl TokiApp {
             self.config.save();
         }
 
-        // Map output gain [0..2] → display value [0..1] for the knob.
-        let v = (self.config.audio.output_gain / 2.0).clamp(0.0, 1.0);
-        let angle_deg = -135.0 + if self.muted { 0.0 } else { v } * 270.0;
+        // Map input gain [0..2] → knob display value [0..1].
+        let v = (self.config.audio.input_gain / 2.0).clamp(0.0, 1.0);
+        let angle_deg = -135.0 + v * 270.0;
         let angle = angle_deg.to_radians();
 
         // Outer disc.
@@ -1838,41 +1845,29 @@ impl TokiApp {
         // Indicator line at top of inner disc, rotated to angle.
         let r_outer = T::KNOB_D / 2.0 - 6.0;
         let r_inner = T::KNOB_D / 2.0 - 13.0;
-        let ind_color = if self.muted { T::INK_MUTE } else { T::PRIMARY };
+        let ind_color = T::PRIMARY;
         let cx = rect.center().x;
         let cy = rect.center().y;
         // The "top" before rotation is -π/2; angle is rotation from that.
         let theta = angle - std::f32::consts::FRAC_PI_2;
         let p_out = Pos2::new(cx + theta.cos() * r_outer, cy + theta.sin() * r_outer);
         let p_in = Pos2::new(cx + theta.cos() * r_inner, cy + theta.sin() * r_inner);
-        if !self.muted {
-            painter.line_segment(
-                [p_out, p_in],
-                Stroke::new(3.5, Color32::from_rgba_unmultiplied(
-                    ind_color.r(), ind_color.g(), ind_color.b(), 70,
-                )),
-            );
-        }
+        // Soft halo behind the indicator + the indicator itself.
+        painter.line_segment(
+            [p_out, p_in],
+            Stroke::new(
+                3.5,
+                Color32::from_rgba_unmultiplied(
+                    ind_color.r(),
+                    ind_color.g(),
+                    ind_color.b(),
+                    70,
+                ),
+            ),
+        );
         painter.line_segment([p_out, p_in], Stroke::new(2.0, ind_color));
-
-        // 11 tick marks every 27° from -135° to +135°.
-        for i in 0..11 {
-            let a = (-135.0 + i as f32 * 27.0).to_radians();
-            let r1 = T::KNOB_D / 2.0 + 2.0;
-            let r2 = if i % 5 == 0 { T::KNOB_D / 2.0 + 5.5 } else { T::KNOB_D / 2.0 + 4.0 };
-            let lit = !self.muted && (i as f32 / 10.0) <= v + 0.04;
-            let color = if lit {
-                T::PRIMARY
-            } else {
-                Color32::from_rgba_premultiplied(0x1e, 0x1e, 0x1e, 0x1e)
-            };
-            let p1 = Pos2::new(cx + a.cos() * r1, cy + a.sin() * r1);
-            let p2 = Pos2::new(cx + a.cos() * r2, cy + a.sin() * r2);
-            painter.line_segment(
-                [p1, p2],
-                Stroke::new(if i % 5 == 0 { 1.6 } else { 1.0 }, color),
-            );
-        }
+        // No tick marks around the rim — the indicator alone reads
+        // cleanly and avoids the "what do these dots mean?" question.
     }
 
     fn paint_ptt(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, st: RadioState) {
@@ -1885,18 +1880,27 @@ impl TokiApp {
         // clickable when connected — pressing during RX intentionally
         // triggers the `busy` UI state (the server still denies the
         // request, so no audio leaks).
+        //
+        // Release is gated on the *global* pointer state rather than
+        // `is_pointer_button_down_on()` because the latter can flicker
+        // to `false` for a frame or two during a sustained hold (egui's
+        // hit-test against the button rect occasionally misses on
+        // sub-pixel mouse motion or when other widgets repaint). Each
+        // flicker used to fire a spurious PttUp / PttDown pair, which
+        // hit the runtime's 250 ms cooldown and produced a visible
+        // "constantly spammed" pulse pattern. Holding latches `ptt_held`
+        // and we only let go when no pointer button is down anywhere.
         if connected {
-            let was_down = self.ptt_held;
-            let is_down = resp.is_pointer_button_down_on();
-            if was_down && !ui.input(|i| i.pointer.any_down()) {
-                // No pointer anywhere — release.
-                self.ptt_held = false;
-                let _ = self.cmd_tx.send(Cmd::PttUp);
-            } else if is_down != was_down {
-                self.ptt_held = is_down;
-                let _ = self
-                    .cmd_tx
-                    .send(if is_down { Cmd::PttDown } else { Cmd::PttUp });
+            let any_down = ui.input(|i| i.pointer.any_down());
+            let pressed_on_button = resp.is_pointer_button_down_on();
+            if self.ptt_held {
+                if !any_down {
+                    self.ptt_held = false;
+                    let _ = self.cmd_tx.send(Cmd::PttUp);
+                }
+            } else if pressed_on_button {
+                self.ptt_held = true;
+                let _ = self.cmd_tx.send(Cmd::PttDown);
             }
         }
 

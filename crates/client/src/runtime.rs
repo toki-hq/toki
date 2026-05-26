@@ -324,14 +324,14 @@ impl Session {
                             }
 
                             if acquired {
-                                let tone = audio::beep(1200.0, 100, 0.25);
+                                let tone = audio::beep(1200.0, 100, 0.05);
                                 push_playback(&playback_for_events, &tone);
                                 state_for_events
                                     .lock()
                                     .unwrap()
                                     .log(format!("🔒 {talker_name} took the floor"));
                             } else if released {
-                                let tone = audio::beep(800.0, 100, 0.25);
+                                let tone = audio::beep(800.0, 100, 0.05);
                                 push_playback(&playback_for_events, &tone);
                                 state_for_events.lock().unwrap().log("🔓 floor cleared");
                             }

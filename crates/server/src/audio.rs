@@ -111,11 +111,35 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
                 continue;
             };
 
+            // Source-IP pinning: the gRPC Register call recorded the
+            // session's expected_ip. If this UDP packet arrived from
+            // a *different* IP, treat it as a hijack attempt and
+            // drop — even though the token authenticated. The port
+            // is allowed to vary because NAT will usually pick a
+            // different one for the UDP flow than for the TCP
+            // signaling flow. `expected_ip = None` is honoured (Unix
+            // socket transports skip the check).
+            if let Some(client) = registry.clients.get(&sender_id) {
+                if let Some(expected) = client.expected_ip {
+                    if expected != peer.ip() {
+                        warn!(
+                            ?peer,
+                            expected = %expected,
+                            client = %sender_id,
+                            "audio packet from unexpected source IP, dropping"
+                        );
+                        continue;
+                    }
+                }
+            }
+
             if let Some(client) = registry.clients.get_mut(&sender_id) {
                 client.audio_addr = Some(peer);
                 // Every UDP packet — audio or keepalive — counts as a
                 // heartbeat. The reaper task uses this to evict clients
-                // who've gone silent.
+                // who've gone silent. Safe to refresh now that we've
+                // verified the source IP above; a spoofer can't keep
+                // the session alive on the legitimate user's behalf.
                 client.last_seen = std::time::Instant::now();
             }
 

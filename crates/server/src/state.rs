@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -23,6 +23,13 @@ pub struct Client {
     /// The reaper evicts clients whose `last_seen` is older than the
     /// configured timeout — see `reaper`.
     pub last_seen: Instant,
+    /// IP the gRPC `Register` call came from (`None` only on
+    /// transports that don't expose one, e.g. Unix sockets). The
+    /// audio relay enforces that incoming UDP packets bearing this
+    /// client's token *must* originate from this IP — closes the
+    /// "token-capture → audio hijack" path. The *port* is allowed to
+    /// vary because NAT will usually pick a different one for UDP.
+    pub expected_ip: Option<IpAddr>,
 }
 
 /// One frequency channel. Each holds its own member list and PTT lock —

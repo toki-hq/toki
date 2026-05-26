@@ -239,9 +239,33 @@ impl Config {
             Ok(s) => {
                 if let Err(e) = fs::write(&path, s) {
                     tracing::warn!(error = %e, path = %path.display(), "could not write config");
+                    return;
                 }
+                // The config persists the server password in plaintext;
+                // tighten the file mode so other local users on a
+                // shared box can't read it. Best-effort — a failure
+                // here just logs (file was still written successfully).
+                tighten_permissions(&path);
             }
             Err(e) => tracing::warn!(error = %e, "could not serialize config"),
         }
     }
+}
+
+/// On Unix, set the config file to `0600` so the shared-secret
+/// password isn't world-readable on a multi-user box. No-op on
+/// Windows — NTFS ACL inheritance from the user's profile already
+/// limits access to the account that owns it.
+#[cfg(unix)]
+fn tighten_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = fs::Permissions::from_mode(0o600);
+    if let Err(e) = fs::set_permissions(path, perms) {
+        tracing::warn!(error = %e, path = %path.display(), "could not tighten config permissions");
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_permissions(_path: &std::path::Path) {
+    // Windows / other: rely on the user-profile ACL inheritance.
 }

@@ -30,6 +30,7 @@ use crate::config::{DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY, TlsFiles
 /// PEM-encoded certificate + private key pair ready to feed into
 /// Tonic's `ServerTlsConfig::identity`. Always owned `Vec<u8>` so
 /// the caller doesn't have to juggle borrows of the on-disk path.
+#[derive(Debug)]
 pub struct TlsMaterial {
     pub cert_pem: Vec<u8>,
     pub key_pem: Vec<u8>,
@@ -114,3 +115,92 @@ fn tighten_key_perms(path: &Path) {
 
 #[cfg(not(unix))]
 fn tighten_key_perms(_path: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper: build a `TlsFiles` referencing a freshly-written
+    /// rcgen cert pair in a temp directory. Returns the dir path so
+    /// the caller can clean up.
+    fn write_temp_cert() -> (PathBuf, TlsFiles) {
+        let dir = std::env::temp_dir().join(format!("toki-tls-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+        std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+        (
+            dir,
+            TlsFiles {
+                cert: cert_path,
+                key: key_path,
+            },
+        )
+    }
+
+    #[test]
+    fn resolve_loads_operator_supplied_paths() {
+        let (dir, files) = write_temp_cert();
+        let material = TlsMaterial::resolve(Some(&files)).unwrap();
+        assert_eq!(material.source, files.cert);
+        // PEM output starts with `-----BEGIN`.
+        let cert_text = std::str::from_utf8(&material.cert_pem).unwrap();
+        assert!(cert_text.starts_with("-----BEGIN"));
+        let key_text = std::str::from_utf8(&material.key_pem).unwrap();
+        assert!(key_text.starts_with("-----BEGIN"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_errors_on_missing_operator_path() {
+        let files = TlsFiles {
+            cert: PathBuf::from("/nonexistent/cert.pem"),
+            key: PathBuf::from("/nonexistent/key.pem"),
+        };
+        let err = TlsMaterial::resolve(Some(&files)).unwrap_err();
+        // The anyhow chain mentions the path so an operator can
+        // debug the config without grepping the source.
+        assert!(format!("{err:#}").contains("/nonexistent"));
+    }
+
+    /// Auto-generation walks the same code path the server boots
+    /// through. We isolate it under a temp CWD because the resolver
+    /// uses relative `tls/` paths from `cd`.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn auto_generates_self_signed_pair_when_no_config() {
+        let dir = std::env::temp_dir().join(format!("toki-tls-auto-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        // First call: no files yet, generator runs.
+        let first = TlsMaterial::resolve(None).unwrap();
+        assert!(dir.join("tls").join("cert.pem").exists());
+        assert!(dir.join("tls").join("key.pem").exists());
+
+        // Key file must be 0600 — that's the whole point of
+        // `tighten_key_perms`.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir.join("tls").join("key.pem"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "key file must be chmod 0600, was {mode:o}");
+
+        // Second call: files already exist, generator does NOT run
+        // and the cert bytes match the first call — i.e. the same
+        // identity persists across restarts.
+        let second = TlsMaterial::resolve(None).unwrap();
+        assert_eq!(first.cert_pem, second.cert_pem);
+
+        std::env::set_current_dir(original_cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

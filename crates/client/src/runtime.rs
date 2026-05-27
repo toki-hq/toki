@@ -1007,3 +1007,65 @@ fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result<Socke
         .parse()
         .with_context(|| format!("resolve {host}:{}", parsed.port()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalise_to_https_adds_scheme_to_bare_hostport() {
+        assert_eq!(normalise_to_https("127.0.0.1:50051"), "https://127.0.0.1:50051");
+    }
+
+    #[test]
+    fn normalise_to_https_upgrades_http() {
+        assert_eq!(normalise_to_https("http://server:1234"), "https://server:1234");
+    }
+
+    #[test]
+    fn normalise_to_https_passes_through_https() {
+        assert_eq!(normalise_to_https("https://server:1234"), "https://server:1234");
+    }
+
+    #[test]
+    fn pcm_from_bytes_round_trips_with_to_le_bytes() {
+        // i16::to_le_bytes / from_le_bytes are the wire format; if
+        // an endianness assumption ever slips, every audio session
+        // turns to garbage. Lock the round-trip down.
+        let samples: Vec<i16> = vec![0, 1, -1, i16::MAX, i16::MIN, 12345, -12345];
+        let bytes: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        assert_eq!(pcm_from_bytes(&bytes), samples);
+    }
+
+    #[test]
+    fn pcm_from_bytes_ignores_trailing_partial_sample() {
+        // chunks_exact drops the trailing byte, which is the
+        // desired behavior for a UDP frame that got truncated.
+        let bytes: Vec<u8> = vec![0x00, 0x01, 0x02, 0x03, 0x04];
+        let result = pcm_from_bytes(&bytes);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn resolve_audio_endpoint_passes_through_routable_addr() {
+        let resolved = resolve_audio_endpoint("203.0.113.5:50052", "https://server:50051").unwrap();
+        assert_eq!(resolved.to_string(), "203.0.113.5:50052");
+    }
+
+    #[test]
+    fn resolve_audio_endpoint_substitutes_signaling_host_for_unspecified() {
+        // Server commonly advertises 0.0.0.0:port; rewrite to the
+        // host portion of the gRPC URL.
+        let resolved =
+            resolve_audio_endpoint("0.0.0.0:50052", "https://192.168.1.50:50051").unwrap();
+        assert_eq!(resolved.to_string(), "192.168.1.50:50052");
+    }
+
+    #[test]
+    fn resolve_audio_endpoint_rejects_malformed_input() {
+        assert!(resolve_audio_endpoint("nope", "https://server:50051").is_err());
+    }
+}

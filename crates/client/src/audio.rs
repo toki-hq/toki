@@ -1208,3 +1208,124 @@ fn xorshift32(state: &mut u32) -> u32 {
 fn next_white(state: &mut u32) -> f32 {
     (xorshift32(state) as f32 / u32::MAX as f32) * 2.0 - 1.0
 }
+
+#[cfg(test)]
+mod beep_tests {
+    //! These tests exercise the pure-function audio helpers — the
+    //! ones with no cpal dependency. They protect against
+    //! regressions in:
+    //!
+    //!   * Wire-rate frame sizing (a 10 ms step at 48 kHz produces
+    //!     exactly 480 samples). Off-by-one here would clip every
+    //!     beep.
+    //!   * Rests producing zero-valued PCM, not random garbage.
+    //!   * The PRNG used by the Noise variant being deterministic
+    //!     for a fixed initial state — important because clients
+    //!     in the same room must hear the *same* hiss, not each
+    //!     a different stream.
+    //!   * Preset table lookups.
+    use super::*;
+    use toki_proto::wire::SAMPLE_RATE_HZ;
+
+    #[test]
+    fn beep_pattern_lengths_match_durations() {
+        // 100 ms at 48 kHz = 4800 samples per step.
+        let steps = vec![
+            BeepStep::Tone { freq_hz: 1000.0, duration_ms: 100 },
+            BeepStep::Rest { duration_ms: 100 },
+        ];
+        let pcm = beep_pattern(&steps, 0.5);
+        assert_eq!(pcm.len(), 9600);
+        // The samples that fall under the Rest must be exactly 0 —
+        // no PRNG noise, no leftover phase from the tone.
+        for sample in &pcm[4800..] {
+            assert_eq!(*sample, 0);
+        }
+    }
+
+    #[test]
+    fn beep_pattern_total_duration_matches_helper() {
+        let steps = &[
+            BeepStep::Tone { freq_hz: 440.0, duration_ms: 50 },
+            BeepStep::Rest { duration_ms: 200 },
+            BeepStep::Tone { freq_hz: 880.0, duration_ms: 50 },
+        ];
+        let pattern = BeepPattern { steps };
+        assert_eq!(pattern.total_duration_ms(), 300);
+    }
+
+    #[test]
+    fn beep_pattern_zero_amplitude_is_silent() {
+        let steps = vec![BeepStep::Tone { freq_hz: 1000.0, duration_ms: 50 }];
+        let pcm = beep_pattern(&steps, 0.0);
+        assert!(pcm.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn beep_pattern_noise_is_deterministic_across_runs() {
+        // Same input must give same output. If the PRNG seed ever
+        // moves to a random/time source, peers in the same room
+        // would each render a different waveform — confusing to
+        // debug, and the fingerprint hashing in the test below
+        // would break.
+        let steps = vec![BeepStep::Noise {
+            center_hz: 1000.0,
+            bandwidth_hz: 500.0,
+            duration_ms: 50,
+        }];
+        let a = beep_pattern(&steps, 0.2);
+        let b = beep_pattern(&steps, 0.2);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn beep_pattern_handles_sub_fade_lengths() {
+        // A 1 ms step is shorter than the 5 ms target fade. The
+        // renderer clamps fade to len/4 — verify it doesn't
+        // crash and still produces samples.
+        let steps = vec![BeepStep::Tone { freq_hz: 1000.0, duration_ms: 1 }];
+        let pcm = beep_pattern(&steps, 0.5);
+        let expected_samples = SAMPLE_RATE_HZ as usize / 1000;
+        assert_eq!(pcm.len(), expected_samples);
+    }
+
+    #[test]
+    fn xorshift_advances_state_and_is_nonzero() {
+        let mut state = 1;
+        let a = xorshift32(&mut state);
+        let b = xorshift32(&mut state);
+        assert_ne!(a, b);
+        assert_ne!(state, 1);
+    }
+
+    #[test]
+    fn beep_preset_by_id_falls_back_to_default() {
+        let unknown = BeepPreset::by_id("does-not-exist");
+        // Default lives at index 0, so the fallback equals it.
+        assert_eq!(unknown.id, BeepPreset::ALL[0].id);
+    }
+
+    #[test]
+    fn beep_preset_index_of_unknown_id_is_zero() {
+        assert_eq!(BeepPreset::index_of("garbage"), 0);
+        assert_eq!(BeepPreset::index_of(BeepPreset::ALL[0].id), 0);
+    }
+
+    #[test]
+    fn beep_params_current_preset_matches_index() {
+        let bp = BeepParams::new(0, 0.5);
+        assert_eq!(bp.current_preset().id, BeepPreset::ALL[0].id);
+        if BeepPreset::ALL.len() > 1 {
+            bp.set_preset_index(1);
+            assert_eq!(bp.current_preset().id, BeepPreset::ALL[1].id);
+        }
+    }
+
+    #[test]
+    fn beep_params_volume_round_trips() {
+        let bp = BeepParams::new(0, 0.25);
+        assert_eq!(bp.volume(), 0.25);
+        bp.set_volume(0.75);
+        assert_eq!(bp.volume(), 0.75);
+    }
+}

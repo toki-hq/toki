@@ -99,3 +99,35 @@ pub type SharedRegistry = Arc<Mutex<Registry>>;
 pub fn shared() -> SharedRegistry {
     Arc::new(Mutex::new(Registry::default()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hash_token_is_deterministic() {
+        let token = b"some-16-byte-tok";
+        assert_eq!(hash_token(token), hash_token(token));
+    }
+
+    #[test]
+    fn hash_token_distinguishes_different_inputs() {
+        assert_ne!(hash_token(b"alpha-tok-input!"), hash_token(b"bravo-tok-input!"));
+    }
+
+    #[test]
+    fn hash_token_has_expected_length() {
+        // The registry stores fixed-size keys — fast lookup +
+        // makes the type signature unambiguous.
+        let hash = hash_token(b"anything");
+        assert_eq!(hash.len(), TOKEN_HASH_LEN);
+    }
+
+    #[test]
+    fn registry_default_is_empty() {
+        let r = Registry::default();
+        assert!(r.clients.is_empty());
+        assert!(r.rooms.is_empty());
+        assert!(r.tokens.is_empty());
+    }
+}

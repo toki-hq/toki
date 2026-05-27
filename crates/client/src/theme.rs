@@ -151,3 +151,40 @@ pub fn channel_of_label(s: &str) -> Option<usize> {
 pub fn frequency_label(freq_mhz: f32) -> String {
     format!("{freq_mhz:.2}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frequency_of_endpoints() {
+        assert!((frequency_of(0) - FREQ_MIN_MHZ).abs() < 1e-3);
+        assert!((frequency_of(FREQ_CHANNEL_COUNT - 1) - FREQ_MAX_MHZ).abs() < 1e-3);
+    }
+
+    #[test]
+    fn frequency_of_clamps_overflow() {
+        // The UI shouldn't produce an out-of-range index, but
+        // hand-edited configs might — defensive clamp prevents a
+        // panic at startup.
+        let last = frequency_of(FREQ_CHANNEL_COUNT - 1);
+        let overflow = frequency_of(FREQ_CHANNEL_COUNT + 100);
+        assert!((overflow - last).abs() < 1e-3);
+    }
+
+    #[test]
+    fn channel_of_label_round_trips_with_frequency_of() {
+        for idx in 0..FREQ_CHANNEL_COUNT {
+            let label = frequency_label(frequency_of(idx));
+            let parsed = channel_of_label(&label).expect("label should parse back");
+            assert_eq!(parsed, idx, "channel {idx} did not round-trip");
+        }
+    }
+
+    #[test]
+    fn channel_of_label_rejects_out_of_band() {
+        assert!(channel_of_label("445.50").is_none());
+        assert!(channel_of_label("448.50").is_none());
+        assert!(channel_of_label("not-a-number").is_none());
+    }
+}

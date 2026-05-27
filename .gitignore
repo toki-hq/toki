@@ -28,6 +28,11 @@ design/
 # whole point — never commit it.
 /tls/
 
+# Coverage artifacts produced by `scripts/coverage.sh`. The HTML
+# report and lcov.info are both regeneratable, big, and binary-ish
+# — nothing version-controlled should depend on them.
+/target/coverage/
+
 # Local working notes — security follow-ups, debugging scratch, etc.
 # Tracked locally so future-you keeps the context; not shipped because
 # they're often half-thoughts that would rot in public.

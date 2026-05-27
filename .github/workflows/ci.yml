@@ -1,0 +1,110 @@
+name: ci
+
+# Build + test + coverage on every push and PR. Linux only for the
+# default matrix — macOS and Windows are valuable but eframe pulls in
+# big native deps that triple CI time, so they're commented out
+# below as an opt-in when there's something OS-specific to verify.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: short
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        # os: [ubuntu-latest, macos-latest]  # opt in if needed
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: install system deps (linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libasound2-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
+      - name: install protobuf (macos)
+        if: matrix.os == 'macos-latest'
+        run: brew install protobuf
+
+      - name: cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        # `-D warnings` would catch the long-standing
+        # `result_large_err` on tonic::Status; downgrade to warn so
+        # CI doesn't fail on something inherent to the gRPC API.
+        run: cargo clippy --workspace --all-targets -- -W clippy::all -A clippy::result_large_err
+
+      - name: build
+        run: cargo build --workspace --all-targets --locked
+
+      - name: test
+        run: cargo test --workspace --locked
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libasound2-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: run coverage
+        run: bash scripts/coverage.sh --ci
+
+      - name: upload lcov
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: target/coverage/lcov.info
+          if-no-files-found: error
+
+      # Uncomment + add CODECOV_TOKEN to repo secrets to publish.
+      # - name: upload to codecov
+      #   uses: codecov/codecov-action@v4
+      #   with:
+      #     files: target/coverage/lcov.info
+      #     token: ${{ secrets.CODECOV_TOKEN }}
+      #     fail_ci_if_error: true

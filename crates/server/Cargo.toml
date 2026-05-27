@@ -37,3 +37,16 @@ rcgen = "0.13"
 # startup. Dep is explicit so the feature flags can't drift even
 # if tonic's transitives change.
 rustls = { version = "0.23", features = ["ring"] }
+
+[dev-dependencies]
+# Used to serialise individual tests that mutate process-global
+# state (the TLS-auto-generation test sets the current working
+# directory, which can't be safely parallelised under cargo test's
+# default thread pool).
+serial_test = "3"
+tempfile = "3"
+# Wiring for the gRPC integration tests in `tests/signaling.rs`:
+# the in-process Tonic harness uses tower's service_fn to feed a
+# pre-built duplex socket into Endpoint::connect_with_connector.
+tower = "0.5"
+hyper-util = "0.1"

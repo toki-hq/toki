@@ -541,3 +541,66 @@ fn format_code(c: Code) -> String {
         _ => s,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mouse_button_indices_round_trip() {
+        for b in [
+            MouseButton::Left,
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::Other(4),
+        ] {
+            let round = MouseButton::from_index(b.to_index());
+            assert_eq!(b, round);
+        }
+    }
+
+    #[test]
+    fn mouse_button_labels_round_trip() {
+        for label in ["Left", "Right", "Middle", "Mouse4", "Mouse7"] {
+            let parsed = MouseButton::from_label(label).expect("label should parse");
+            assert_eq!(parsed.label(), label);
+        }
+    }
+
+    #[test]
+    fn mouse_button_label_rejects_garbage() {
+        assert!(MouseButton::from_label("").is_none());
+        assert!(MouseButton::from_label("MouseLeft").is_none());
+        assert!(MouseButton::from_label("Mouse-abc").is_none());
+    }
+
+    #[test]
+    fn restricted_keys_are_rejected() {
+        // Space / Enter / Escape are explicitly blacklisted — the
+        // binding flow drops them silently rather than capturing
+        // them as PTT, since they collide with "activate focused
+        // control" semantics in every dialog and form.
+        assert!(is_restricted(Input::Key(Code::Space)));
+        assert!(is_restricted(Input::Key(Code::Enter)));
+        assert!(is_restricted(Input::Key(Code::Escape)));
+    }
+
+    #[test]
+    fn ordinary_keys_pass_restriction_check() {
+        assert!(!is_restricted(Input::Key(Code::Backquote)));
+        assert!(!is_restricted(Input::Key(Code::KeyA)));
+        assert!(!is_restricted(Input::Key(Code::F8)));
+    }
+
+    #[test]
+    fn mouse_inputs_are_never_restricted() {
+        for b in [
+            MouseButton::Left,
+            MouseButton::Right,
+            MouseButton::Middle,
+            MouseButton::Other(5),
+        ] {
+            assert!(!is_restricted(Input::Mouse(b)));
+        }
+    }
+}

@@ -115,3 +115,71 @@ fn locate() -> Option<PathBuf> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_runs_in_open_mode() {
+        let cfg = Config::default();
+        assert!(cfg.normalised_password().is_none());
+        assert!(cfg.tls.is_none());
+    }
+
+    #[test]
+    fn password_is_normalised() {
+        let cfg: Config = toml::from_str("password = \"hunter2\"").unwrap();
+        assert_eq!(cfg.normalised_password().as_deref(), Some("hunter2"));
+
+        let cfg: Config = toml::from_str("password = \"  spaced  \"").unwrap();
+        assert_eq!(cfg.normalised_password().as_deref(), Some("spaced"));
+    }
+
+    #[test]
+    fn empty_or_whitespace_password_disarms_the_gate() {
+        // Both "" and a whitespace-only value collapse to None so a
+        // hand-edited config with `password = " "` doesn't
+        // accidentally arm the gate against the operator's intent.
+        let cfg: Config = toml::from_str("password = \"\"").unwrap();
+        assert!(cfg.normalised_password().is_none());
+
+        let cfg: Config = toml::from_str("password = \"   \"").unwrap();
+        assert!(cfg.normalised_password().is_none());
+    }
+
+    #[test]
+    fn tls_block_round_trips() {
+        let raw = r#"
+            [tls]
+            cert = "/etc/toki/cert.pem"
+            key = "/etc/toki/key.pem"
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let tls = cfg.tls.expect("expected [tls] block");
+        assert_eq!(tls.cert.to_string_lossy(), "/etc/toki/cert.pem");
+        assert_eq!(tls.key.to_string_lossy(), "/etc/toki/key.pem");
+    }
+
+    #[test]
+    fn missing_file_returns_defaults() {
+        // `from_path` must not error on missing file — that's the
+        // common "no config" path and the server should boot.
+        let cfg = Config::from_path(Path::new("/nonexistent/toki-test.toml")).unwrap();
+        assert!(cfg.normalised_password().is_none());
+        assert!(cfg.tls.is_none());
+    }
+
+    #[test]
+    fn malformed_toml_is_fatal() {
+        // Write a malformed TOML to a temp path, expect Err on read
+        // — we want failures to surface loudly, not silently fall
+        // back to defaults and (e.g.) disarm the password gate.
+        let dir = std::env::temp_dir();
+        let path = dir.join("toki-test-malformed.toml");
+        std::fs::write(&path, "password = ").unwrap();
+        let err = Config::from_path(&path).unwrap_err();
+        let _ = std::fs::remove_file(&path);
+        assert!(format!("{err:#}").contains("parse"));
+    }
+}

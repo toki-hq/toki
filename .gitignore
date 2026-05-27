@@ -22,3 +22,8 @@ design/
 # Each operator drops their own `config.toml` next to the binary or
 # points TOKI_CONFIG at one — it must not land in version control.
 /config.toml
+
+# Local working notes — security follow-ups, debugging scratch, etc.
+# Tracked locally so future-you keeps the context; not shipped because
+# they're often half-thoughts that would rot in public.
+/notes/

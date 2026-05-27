@@ -231,7 +231,7 @@ impl BeepPreset {
             },
             release: BeepPattern {
                 steps: &[
-                    BeepStep::Noise { center_hz: 2000.0, bandwidth_hz: 2000.0, duration_ms: 150 },
+                    BeepStep::Noise { center_hz: 1000.0, bandwidth_hz: 2000.0, duration_ms: 150 },
                 ],
             },
         },

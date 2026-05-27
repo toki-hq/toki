@@ -27,3 +27,13 @@ toml = "0.8"
 # measurable cost on the audio hot path.
 blake3 = "1"
 chacha20poly1305 = { workspace = true }
+# Self-signed cert + key generator. Used to keep gRPC TLS always-on
+# without forcing operators to provision a real cert for LAN
+# deployments — the server writes an rcgen-generated cert pair to
+# `tls/{cert,key}.pem` on first startup and reuses it thereafter.
+rcgen = "0.13"
+# rustls 0.23 requires the process to install a default
+# `CryptoProvider` before any TLS operation; we pick ring at
+# startup. Dep is explicit so the feature flags can't drift even
+# if tonic's transitives change.
+rustls = { version = "0.23", features = ["ring"] }

@@ -3,13 +3,22 @@ use std::net::SocketAddr;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
-use toki_server::{audio, config::Config, reaper, signaling::SignalingSvc, state};
+use toki_server::{audio, config::Config, reaper, signaling::SignalingSvc, state, tls};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // rustls 0.23 requires a process-level `CryptoProvider` to be
+    // installed before the first TLS handshake. The `ring` feature on
+    // our rustls dep gives us the backend; we wire it as the default
+    // here so neither tonic's server-side TLS plumbing nor any of our
+    // own rustls usage panics on first use.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("rustls crypto provider already installed"))?;
 
     // Config file is optional; missing => open mode. A *malformed*
     // file aborts startup so we don't silently disarm the password
@@ -30,31 +39,17 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("password gate DISARMED — server is in open mode");
     }
 
-    // TLS for the gRPC channel. Optional: when the config doesn't
-    // supply paths we stay on plaintext HTTP/2 (current behavior).
-    // When it does, both files are loaded into a ServerTlsConfig
-    // identity at startup so a bad path fails fast instead of
-    // mid-flight on the first handshake.
-    let tls_config: Option<ServerTlsConfig> = match &config.tls {
-        Some(tls) => {
-            let cert = std::fs::read(&tls.cert).map_err(|e| {
-                anyhow::anyhow!("read TLS cert {}: {}", tls.cert.display(), e)
-            })?;
-            let key = std::fs::read(&tls.key).map_err(|e| {
-                anyhow::anyhow!("read TLS key {}: {}", tls.key.display(), e)
-            })?;
-            tracing::info!(
-                cert = %tls.cert.display(),
-                key = %tls.key.display(),
-                "TLS ARMED — gRPC channel will use HTTPS/2"
-            );
-            Some(ServerTlsConfig::new().identity(Identity::from_pem(cert, key)))
-        }
-        None => {
-            tracing::info!("TLS DISARMED — gRPC channel is plaintext HTTP/2");
-            None
-        }
-    };
+    // TLS is mandatory. Either the operator supplied cert + key
+    // paths in [tls], or we auto-generate a self-signed pair to
+    // `tls/{cert,key}.pem` on first run and reuse it thereafter.
+    // Either way, gRPC is always HTTPS — there is no plaintext mode.
+    let tls_material = tls::TlsMaterial::resolve(config.tls.as_ref())?;
+    tracing::info!(
+        source = %tls_material.source.display(),
+        "TLS ARMED — gRPC channel will serve HTTPS/2"
+    );
+    let tls_config = ServerTlsConfig::new()
+        .identity(Identity::from_pem(&tls_material.cert_pem, &tls_material.key_pem));
 
     let grpc_addr: SocketAddr = std::env::var("TOKI_GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".into())
@@ -87,11 +82,8 @@ async fn main() -> anyhow::Result<()> {
     // amplification probe (the proto decoder allocates before the
     // handler runs, so a 4 MB request burns 4 MB of server heap even
     // when the password check is going to reject it).
-    let mut builder = Server::builder();
-    if let Some(tls) = tls_config {
-        builder = builder.tls_config(tls)?;
-    }
-    let grpc = builder
+    let grpc = Server::builder()
+        .tls_config(tls_config)?
         .add_service(
             SignalingSvc::new(registry, advertised_audio, password)
                 .max_decoding_message_size(8 * 1024),

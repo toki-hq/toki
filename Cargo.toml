@@ -12,14 +12,15 @@ repository = "https://github.com/coton/toki"
 toki-proto = { path = "crates/proto" }
 
 tokio = { version = "1.41", features = ["full"] }
-# TLS feature enables `ServerTlsConfig` / `ClientTlsConfig`; transport
-# feature (default) is required for `Server::builder().tls_config(...)`.
-# We accept the extra ~1 MB of binary size for confidentiality on the
-# gRPC signaling channel (which carries the shared-secret password
-# and per-session audio MAC key).
-tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+# TLS feature is renamed in 0.13: `tls-ring` (rustls + ring crypto)
+# replaces the old `tls` feature. We also bring back `tls-native-roots`
+# so a real CA-issued cert (Let's Encrypt etc.) Just Works on the
+# client side; self-signed certs are handled by a custom rustls
+# verifier the client installs via `rustls_client_config(...)` (added
+# in 0.13 — the main reason we're on this version).
+tonic = { version = "0.13", features = ["tls-ring", "tls-native-roots"] }
 prost = "0.13"
-tonic-build = "0.12"
+tonic-build = "0.13"
 
 bytes = "1.8"
 serde = { version = "1", features = ["derive"] }

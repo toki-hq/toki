@@ -36,12 +36,13 @@ pub struct Config {
     pub password: Option<String>,
 
     /// Optional TLS configuration for the gRPC signaling channel.
-    /// When present *and* both files exist on disk, the server
-    /// serves over HTTPS/2 and the password / per-session audio MAC
-    /// key travel encrypted on the wire. When absent, the server
-    /// stays on plaintext HTTP/2 (current behavior; LAN-only
-    /// deployments where on-path attackers aren't in the threat
-    /// model can keep operating as-is).
+    /// When present, the server loads the named cert + key files
+    /// (typically a real CA-issued cert like Let's Encrypt, or a
+    /// self-signed pair from mkcert / step). When *absent*, the
+    /// server auto-generates a self-signed cert via rcgen on first
+    /// startup, persists it to `tls/{cert,key}.pem` next to the
+    /// CWD, and reuses it on subsequent runs. Either way, gRPC is
+    /// always TLS — there's no plaintext mode.
     #[serde(default)]
     pub tls: Option<TlsFiles>,
 }
@@ -54,6 +55,14 @@ pub struct TlsFiles {
     pub cert: std::path::PathBuf,
     pub key: std::path::PathBuf,
 }
+
+/// Default location for the auto-generated self-signed cert pair.
+/// Stored relative to CWD so a fresh checkout writes them under the
+/// repo root by default; production deployments typically pass real
+/// cert paths via the `[tls]` block in config.toml.
+pub const DEFAULT_TLS_DIR: &str = "tls";
+pub const DEFAULT_TLS_CERT: &str = "tls/cert.pem";
+pub const DEFAULT_TLS_KEY: &str = "tls/key.pem";
 
 impl Config {
     /// Resolve the config file's location and load it. Returns the

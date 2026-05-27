@@ -73,3 +73,15 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # symmetric. Replaces the BLAKE3 keyed_hash MAC we previously had —
 # AEAD subsumes pure MAC.
 chacha20poly1305 = { workspace = true }
+# Tonic 0.13's `ClientTlsConfig` doesn't expose a way to install a
+# custom rustls `ServerCertVerifier`, so we build the TLS stack
+# ourselves and hand it to `Endpoint::connect_with_connector(...)`.
+# Required because the server's default is an auto-generated self-
+# signed cert, which wouldn't validate against system roots.
+# See `runtime.rs::insecure_tls_config` for the rationale and the
+# layered defenses that compensate.
+rustls = { version = "0.23", features = ["ring"] }
+tokio-rustls = "0.26"
+hyper-util = "0.1"
+tower = "0.5"
+http = "1"

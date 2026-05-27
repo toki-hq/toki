@@ -34,6 +34,12 @@ fn main() -> eframe::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
 
+    // rustls 0.23 requires the process to install a default
+    // `CryptoProvider` before any TLS handshake. Ring is the
+    // backend; install once at startup so the gRPC connector
+    // doesn't panic on first connect.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     // Strip widget — landscape, always-on-top, OS-chromed for v1 so the
     // user has a real titlebar to drag/close/minimize. The design's
     // borderless chassis with hand-drawn traffic-light dots is in the

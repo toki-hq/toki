@@ -280,34 +280,20 @@ impl Session {
         playback: PlaybackBuf,
         beeps: BeepParams,
     ) -> Result<Self> {
-        // Accept either "host:port" or a full URL. The URL scheme
-        // decides whether to use TLS: `https://` activates TLS with
-        // the system trust store (tonic's `tls-roots` feature pulls
-        // in webpki-roots-equivalent), `http://` stays plaintext.
-        // Bare "host:port" defaults to plaintext for backward compat
-        // with existing configs — users who want TLS write
-        // `https://host:port` explicitly.
-        let server_url = if server.starts_with("http://") || server.starts_with("https://") {
-            server.to_string()
-        } else {
-            format!("http://{server}")
-        };
-
-        let mut endpoint = tonic::transport::Endpoint::from_shared(server_url.clone())
+        // gRPC is always TLS. Any URL scheme other than https:// is
+        // rewritten so plaintext can't sneak back in via a stale
+        // config or a bare "host:port" string. Tonic 0.13's
+        // `ClientTlsConfig` doesn't expose a way to install a custom
+        // rustls verifier, so we build a TLS-aware connector
+        // ourselves and hand it to `connect_with_connector` — see
+        // `insecure_tls_config` for what the verifier does and why
+        // it's safe in this threat model.
+        let server_url = normalise_to_https(server);
+        let endpoint = tonic::transport::Endpoint::from_shared(server_url.clone())
             .with_context(|| format!("parse endpoint {server_url}"))?;
-        if server_url.starts_with("https://") {
-            // `ClientTlsConfig::with_native_roots` picks up the OS
-            // trust store. Operators using self-signed certs on a
-            // LAN should add their CA to the system trust store; we
-            // intentionally don't expose a per-config CA bundle yet
-            // to keep this fix UX-transparent.
-            endpoint = endpoint
-                .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
-                .with_context(|| "configure TLS")?;
-        }
         let mut signaling = SignalingClient::new(
             endpoint
-                .connect()
+                .connect_with_connector(custom_tls_connector())
                 .await
                 .with_context(|| format!("connect {server_url}"))?,
         );
@@ -766,6 +752,183 @@ fn build_authenticated_packet(
     pkt.extend_from_slice(tag.as_slice());
     pkt.extend_from_slice(&ciphertext);
     pkt
+}
+
+/// Coerce whatever the user wrote in the Connect dialog into an
+/// `https://host:port` string. Plain `http://` is auto-upgraded
+/// (gRPC has no plaintext mode any more); bare `host:port` gets the
+/// scheme prefixed; anything already https:// passes through.
+fn normalise_to_https(server: &str) -> String {
+    if let Some(rest) = server.strip_prefix("http://") {
+        format!("https://{rest}")
+    } else if server.starts_with("https://") {
+        server.to_string()
+    } else {
+        format!("https://{server}")
+    }
+}
+
+/// Build a `rustls::ClientConfig` that accepts *any* server
+/// certificate. Required because the server's default is an
+/// auto-generated self-signed cert, which wouldn't chain to a
+/// system trust root; forcing operators to provision a real cert
+/// (or install a CA on every client) would defeat the "TLS just
+/// works" goal.
+///
+/// What we lose by skipping cert validation:
+///   * Server identity is no longer authenticated by TLS itself.
+///     An active on-path attacker could substitute their own cert
+///     and terminate the TLS session, becoming a MITM.
+///
+/// What still protects the session:
+///   * The shared-secret password gate. An MITM that captures
+///     `RegisterRequest.password` once can replay it, but can't
+///     impersonate the real server's *audio relay* without also
+///     possessing the per-session ChaCha20-Poly1305 keys for
+///     every other live participant — and those are minted server-
+///     side per session, never travel out of the registry, and
+///     would have to be exfiltrated separately.
+///   * UDP audio is AEAD'd under per-session keys minted at
+///     register time. An MITM who fakes a Register exchange
+///     learns one session's key, but can't decrypt the streams of
+///     other participants in the same room (each peer has its
+///     own session key).
+///
+/// Stronger options (TOFU pinning via `~/.config/toki/known_servers.toml`,
+/// or operator-provided pinned cert) are tracked in
+/// `notes/security-followups.md`; this is the v1 simplicity vs.
+/// authenticity trade-off.
+fn insecure_tls_config() -> rustls::ClientConfig {
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+
+    #[derive(Debug)]
+    struct AcceptAny;
+
+    impl ServerCertVerifier for AcceptAny {
+        fn verify_server_cert(
+            &self,
+            _end_entity: &CertificateDer<'_>,
+            _intermediates: &[CertificateDer<'_>],
+            _server_name: &ServerName<'_>,
+            _ocsp: &[u8],
+            _now: UnixTime,
+        ) -> Result<ServerCertVerified, rustls::Error> {
+            Ok(ServerCertVerified::assertion())
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            _message: &[u8],
+            _cert: &CertificateDer<'_>,
+            _dss: &rustls::DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, rustls::Error> {
+            Ok(HandshakeSignatureValid::assertion())
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+            // Mirror rustls's default set so the handshake doesn't
+            // fail by accidentally pruning a signature scheme the
+            // server picks.
+            vec![
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                rustls::SignatureScheme::RSA_PKCS1_SHA384,
+                rustls::SignatureScheme::RSA_PKCS1_SHA512,
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                rustls::SignatureScheme::RSA_PSS_SHA512,
+                rustls::SignatureScheme::ED25519,
+                rustls::SignatureScheme::ED448,
+            ]
+        }
+    }
+
+    rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(std::sync::Arc::new(AcceptAny))
+        .with_no_client_auth()
+}
+
+/// Build a `tower::Service<http::Uri>` that connects via TCP and
+/// performs a TLS handshake using [`insecure_tls_config`] (custom
+/// verifier that accepts any cert). Returned wrapped in
+/// `hyper_util::rt::TokioIo` so it satisfies the
+/// `hyper::rt::Read + Write` bounds `Endpoint::connect_with_connector`
+/// expects.
+///
+/// The return-type signature is unavoidably verbose because
+/// `connect_with_connector` requires us to spell out the response
+/// stream and future types explicitly; clippy's complexity warning
+/// is genuine but not actionable here.
+#[allow(clippy::type_complexity)]
+fn custom_tls_connector()
+-> impl tower::Service<
+    http::Uri,
+    Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
+    Error = anyhow::Error,
+    Future = std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        hyper_util::rt::TokioIo<
+                            tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+                        >,
+                        anyhow::Error,
+                    >,
+                > + Send,
+        >,
+    >,
+> + Clone {
+    let tls = std::sync::Arc::new(insecure_tls_config());
+    tower::service_fn(move |uri: http::Uri| {
+        let tls = tls.clone();
+        Box::pin(async move {
+            let host = uri
+                .host()
+                .ok_or_else(|| anyhow!("connect uri missing host"))?
+                .to_string();
+            let port = uri.port_u16().unwrap_or(443);
+            let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
+                .await
+                .with_context(|| format!("tcp connect {host}:{port}"))?;
+            // ServerName here is what rustls will (would, if our
+            // verifier weren't a no-op) compare against the SAN in
+            // the server's cert. The verifier ignores it; we still
+            // pass the host so the SNI extension goes out
+            // correctly, which some servers gate on.
+            let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.clone())
+                .with_context(|| format!("invalid TLS server name {host}"))?;
+            let tls_stream = tokio_rustls::TlsConnector::from(tls)
+                .connect(server_name, tcp)
+                .await
+                .with_context(|| format!("tls handshake {host}:{port}"))?;
+            Ok(hyper_util::rt::TokioIo::new(tls_stream))
+        })
+            as std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                hyper_util::rt::TokioIo<
+                                    tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+                                >,
+                                anyhow::Error,
+                            >,
+                        > + Send,
+                >,
+            >
+    })
 }
 
 fn pcm_from_bytes(bytes: &[u8]) -> Vec<i16> {

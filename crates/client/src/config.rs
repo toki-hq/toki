@@ -71,9 +71,17 @@ impl Default for BeepConfig {
 /// Persisted server address, identity, and last-selected frequency.
 /// Defaults match the original hard-coded form values so first-launch
 /// behavior is unchanged.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+///
+/// `host` + `port` replaced the older single `server` string. Configs
+/// written by previous versions are migrated on load by
+/// [`ConnectionConfigDe::into_canonical`] — they keep working without
+/// the user having to retype their server address.
+#[derive(Serialize, Clone, Debug)]
+#[derive(serde::Deserialize)]
+#[serde(from = "ConnectionConfigDe")]
 pub struct ConnectionConfig {
-    pub server: String,
+    pub host: String,
+    pub port: u16,
     pub display_name: String,
     /// Last frequency the user was on. Stored as `"446.05"`-style
     /// string for stability across float-formatting changes; parsed
@@ -92,18 +100,171 @@ pub struct ConnectionConfig {
     pub password: String,
 }
 
+impl ConnectionConfig {
+    /// `host:port` as a single string. Used wherever the runtime
+    /// wants a one-shot endpoint identifier (logs, the Quick Connect
+    /// summary on the strip, etc.).
+    pub fn endpoint(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 fn default_frequency() -> String {
     "447.00".into()
+}
+
+fn default_host() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_port() -> u16 {
+    50051
 }
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         Self {
-            server: "http://127.0.0.1:50051".into(),
+            host: default_host(),
+            port: default_port(),
             display_name: "anon".into(),
             frequency: default_frequency(),
             password: String::new(),
         }
+    }
+}
+
+/// Wire shape used for deserialisation only. Accepts both:
+///   * The current form (`host = "…", port = 50051`).
+///   * The legacy form (`server = "host:port"` or
+///     `server = "http://host:port"`), present in config files
+///     written before this split.
+///
+/// `host` / `port` win when both are set; otherwise the legacy
+/// `server` is parsed for the host / port pair. If neither side
+/// provides usable values we fall back to the regular defaults.
+#[derive(serde::Deserialize)]
+struct ConnectionConfigDe {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    /// Legacy field (`server = "…"`) — read for migration only,
+    /// never written.
+    #[serde(default)]
+    server: Option<String>,
+    #[serde(default = "default_display_name")]
+    display_name: String,
+    #[serde(default = "default_frequency")]
+    frequency: String,
+    #[serde(default)]
+    password: String,
+}
+
+fn default_display_name() -> String {
+    "anon".into()
+}
+
+impl From<ConnectionConfigDe> for ConnectionConfig {
+    fn from(d: ConnectionConfigDe) -> Self {
+        let (host, port) = if let Some(host) = d.host {
+            (host, d.port.unwrap_or_else(default_port))
+        } else if let Some(server) = d.server.as_deref() {
+            parse_legacy_server(server)
+                .unwrap_or_else(|| (default_host(), default_port()))
+        } else {
+            (default_host(), default_port())
+        };
+        Self {
+            host,
+            port,
+            display_name: d.display_name,
+            frequency: d.frequency,
+            password: d.password,
+        }
+    }
+}
+
+/// Parse a legacy `server = "…"` value into the new `(host, port)`
+/// pair. Accepts the historic forms:
+///   * `"host:port"`
+///   * `"http://host:port"`
+///   * `"https://host:port"`
+///
+/// Returns `None` if the string doesn't parse cleanly; the caller
+/// then falls back to the defaults rather than panicking on a typo.
+fn parse_legacy_server(s: &str) -> Option<(String, u16)> {
+    let stripped = s
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let (host, port_str) = stripped.rsplit_once(':')?;
+    let port: u16 = port_str.parse().ok()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some((host.to_string(), port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_legacy_server_accepts_bare_host_port() {
+        assert_eq!(
+            parse_legacy_server("127.0.0.1:50051"),
+            Some(("127.0.0.1".into(), 50051))
+        );
+    }
+
+    #[test]
+    fn parse_legacy_server_strips_http_scheme() {
+        assert_eq!(
+            parse_legacy_server("http://example.com:8080"),
+            Some(("example.com".into(), 8080))
+        );
+        assert_eq!(
+            parse_legacy_server("https://example.com:8443"),
+            Some(("example.com".into(), 8443))
+        );
+    }
+
+    #[test]
+    fn parse_legacy_server_rejects_bad_inputs() {
+        assert!(parse_legacy_server("").is_none());
+        assert!(parse_legacy_server("no-port").is_none());
+        assert!(parse_legacy_server(":50051").is_none()); // empty host
+        assert!(parse_legacy_server("host:not-a-port").is_none());
+        assert!(parse_legacy_server("host:99999").is_none()); // > u16
+    }
+
+    #[test]
+    fn legacy_server_field_migrates_into_host_port() {
+        // Old config shape: a single `server` string. The new
+        // `host` / `port` pair should appear after deserialisation.
+        let raw = r#"
+            server = "192.168.1.50:60000"
+            display_name = "TOKI-1"
+        "#;
+        let cfg: ConnectionConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.host, "192.168.1.50");
+        assert_eq!(cfg.port, 60000);
+        assert_eq!(cfg.display_name, "TOKI-1");
+    }
+
+    #[test]
+    fn new_host_port_form_round_trips() {
+        let raw = r#"
+            host = "toki.example"
+            port = 1234
+            display_name = "FOX"
+        "#;
+        let cfg: ConnectionConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.host, "toki.example");
+        assert_eq!(cfg.port, 1234);
+        // Endpoint helper smooths over the format() boilerplate that
+        // every call site would otherwise duplicate.
+        assert_eq!(cfg.endpoint(), "toki.example:1234");
     }
 }
 

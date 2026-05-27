@@ -70,14 +70,32 @@ impl RadioState {
 /// Buffered values for the Connect dialog. Edits stay local until the
 /// user clicks `CONNECT`, at which point they're committed to
 /// `config.connection` and persisted. Cancelling drops the edits.
-#[derive(Default)]
 struct ConnectForm {
-    url: String,
+    host: String,
+    port: u16,
     username: String,
     /// Shared-secret password for servers that gate registration.
     /// Empty when the target server is open-mode. Rendered with
     /// `egui::TextEdit::password(true)` so the entry is masked.
     password: String,
+    /// Buffered text view of `port` while the user is typing. We
+    /// only parse back into `port` when the field loses focus, so
+    /// partial entries like `"5005"` mid-typing don't keep
+    /// snapping to a default. Empty after construction means
+    /// "(re)hydrate from `port`".
+    port_text: String,
+}
+
+impl Default for ConnectForm {
+    fn default() -> Self {
+        Self {
+            host: String::new(),
+            port: 50051,
+            username: String::new(),
+            password: String::new(),
+            port_text: String::new(),
+        }
+    }
 }
 
 pub struct TokiApp {
@@ -232,11 +250,11 @@ impl TokiApp {
         // Auto-connect on launch using the saved server/name. The user
         // expects "walkie-talkies stay on" — Toki should be live as
         // soon as the window opens, not require a Connect click first.
-        let server = config.connection.server.trim().to_string();
+        let host = config.connection.host.trim().to_string();
         let display_name = config.connection.display_name.trim().to_string();
-        if !server.is_empty() && !display_name.is_empty() {
+        if !host.is_empty() && !display_name.is_empty() {
             let _ = cmd_tx.send(Cmd::Connect {
-                server,
+                server: config.connection.endpoint(),
                 display_name,
                 frequency: frequency.clone(),
                 password: config.connection.password.clone(),
@@ -1886,10 +1904,7 @@ impl TokiApp {
             Stroke::new(1.0, border_color),
         );
 
-        let server_label = self.config.connection.server.trim();
-        let server_label = server_label
-            .trim_start_matches("http://")
-            .trim_start_matches("https://");
+        let server_label = self.config.connection.endpoint();
         painter.text(
             Pos2::new(inner.left(), footer_y + 2.0),
             Align2::LEFT_CENTER,
@@ -1900,7 +1915,7 @@ impl TokiApp {
         painter.text(
             Pos2::new(inner.left() + 50.0, footer_y + 2.0),
             Align2::LEFT_CENTER,
-            server_label,
+            &server_label,
             font_mono(10.0),
             T::INK,
         );
@@ -2080,7 +2095,7 @@ impl TokiApp {
             // here it can't be, so this always fires the handshake.
             let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
             let _ = self.cmd_tx.send(Cmd::Connect {
-                server: self.config.connection.server.trim().to_string(),
+                server: self.config.connection.endpoint(),
                 display_name: self.config.connection.display_name.trim().to_string(),
                 frequency,
                 password: self.config.connection.password.clone(),
@@ -2181,16 +2196,17 @@ impl TokiApp {
         painter: &egui::Painter,
         rect: Rect,
     ) {
-        let server = self.config.connection.server.trim().to_string();
+        let host = self.config.connection.host.trim().to_string();
         let display_name = self.config.connection.display_name.trim().to_string();
-        let enabled = !server.is_empty() && !display_name.is_empty();
+        let enabled = !host.is_empty() && !display_name.is_empty();
+        let endpoint = self.config.connection.endpoint();
 
         let sense = if enabled { Sense::click() } else { Sense::hover() };
         let resp = ui.allocate_rect(rect, sense);
         if enabled && resp.clicked() {
             let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
             let _ = self.cmd_tx.send(Cmd::Connect {
-                server: server.clone(),
+                server: endpoint.clone(),
                 display_name: display_name.clone(),
                 frequency,
                 password: self.config.connection.password.clone(),
@@ -2238,14 +2254,14 @@ impl TokiApp {
             accent_glow,
             if enabled { 0.55 } else { 0.0 },
         );
-        // Subtext: "<server>@<callsign>" or a no-config hint.
+        // Subtext: "<host:port>  ·  <callsign>" or a no-config hint.
         let subtext = if enabled {
             // Truncate to fit; we know the full string only fills here
-            // when the user picked a long URL.
+            // when the user picked a long hostname.
             let max_w = rect.right() - text_x - 12.0;
             truncate_to_width(
                 painter,
-                &format!("{server}  ·  {display_name}"),
+                &format!("{endpoint}  ·  {display_name}"),
                 font_mono(9.0),
                 max_w,
             )
@@ -2273,7 +2289,9 @@ impl TokiApp {
     ) {
         let resp = ui.allocate_rect(rect, Sense::click());
         if resp.clicked() {
-            self.connect_form.url = self.config.connection.server.clone();
+            self.connect_form.host = self.config.connection.host.clone();
+            self.connect_form.port = self.config.connection.port;
+            self.connect_form.port_text = self.config.connection.port.to_string();
             self.connect_form.username = self.config.connection.display_name.clone();
             self.connect_form.password = self.config.connection.password.clone();
             self.show_connect = true;
@@ -2568,22 +2586,45 @@ impl TokiApp {
 
     // ── Connect dialog body ────────────────────────────────────────
     //
-    // Painted into a child viewport (see `update`). Two text fields
-    // (URL, USERNAME) plus a Cancel / Connect button pair. The form is
-    // buffered in `self.connect_form` — we only commit to
-    // `self.config.connection` if the user clicks Connect.
+    // Painted into a child viewport (see `update`). Three text fields
+    // (SERVER + PORT side-by-side, USERNAME, PASSWORD) plus a
+    // Cancel / Connect button pair. The form is buffered in
+    // `self.connect_form` — we only commit to `self.config.connection`
+    // if the user clicks Connect.
     fn paint_connect_window(&mut self, ui: &mut egui::Ui) {
         ui.style_mut().visuals.override_text_color = Some(T::INK);
 
         section_header(ui, "NEW CONNECTION");
 
-        settings_row(ui, "URL", |ui| {
+        settings_row(ui, "SERVER", |ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut self.connect_form.url)
-                    .desired_width(240.0)
-                    .hint_text("host:port")
+                egui::TextEdit::singleline(&mut self.connect_form.host)
+                    .desired_width(180.0)
+                    .hint_text("127.0.0.1")
                     .font(egui::TextStyle::Monospace),
             );
+            ui.label("PORT");
+            // Port renders against a separate text buffer so partial
+            // entries while typing (e.g. "5005") don't snap back to
+            // the previous valid value on every keystroke. We parse
+            // on focus-loss; bad / out-of-range strings keep the
+            // last good port.
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut self.connect_form.port_text)
+                    .desired_width(60.0)
+                    .hint_text("50051")
+                    .font(egui::TextStyle::Monospace),
+            );
+            if resp.lost_focus() {
+                if let Ok(p) = self.connect_form.port_text.trim().parse::<u16>() {
+                    if p > 0 {
+                        self.connect_form.port = p;
+                    }
+                }
+                // Either way, re-sync the text field to the
+                // committed port so the user can see what stuck.
+                self.connect_form.port_text = self.connect_form.port.to_string();
+            }
         });
         settings_row(ui, "USERNAME", |ui| {
             // Same uppercase / 10-char cap the old Settings row used —
@@ -2618,23 +2659,33 @@ impl TokiApp {
         ui.horizontal(|ui| {
             // Right-align the action pair: Cancel | Connect.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let server = self.connect_form.url.trim().to_string();
+                let host = self.connect_form.host.trim().to_string();
+                // Parse-on-press as a backup for the lost_focus
+                // commit — handles the "user typed and clicked
+                // Connect without ever tabbing out" case.
+                if let Ok(p) = self.connect_form.port_text.trim().parse::<u16>() {
+                    if p > 0 {
+                        self.connect_form.port = p;
+                    }
+                }
+                let port = self.connect_form.port;
                 let username = self.connect_form.username.trim().to_string();
                 let password = self.connect_form.password.clone();
-                let can_connect = !server.is_empty() && !username.is_empty();
+                let can_connect = !host.is_empty() && !username.is_empty() && port > 0;
 
                 let connect_btn = ui.add_enabled(can_connect, egui::Button::new("CONNECT"));
                 if connect_btn.clicked() {
                     // Commit form → config, persist, dispatch the
                     // Connect command, then close the dialog.
-                    self.config.connection.server = server.clone();
+                    self.config.connection.host = host.clone();
+                    self.config.connection.port = port;
                     self.config.connection.display_name = username.clone();
                     self.config.connection.password = password.clone();
                     self.config.save();
                     let frequency =
                         T::frequency_label(T::frequency_of(self.channel_idx));
                     let _ = self.cmd_tx.send(Cmd::Connect {
-                        server,
+                        server: format!("{host}:{port}"),
                         display_name: username,
                         frequency,
                         password,

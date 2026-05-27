@@ -28,3 +28,8 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+# ChaCha20-Poly1305 AEAD for UDP audio confidentiality + integrity.
+# Same key bytes that previously fed BLAKE3 keyed_hash now key the
+# AEAD; replaces the detached MAC since AEAD provides both
+# authentication and confidentiality from a single primitive.
+chacha20poly1305 = "0.10"

@@ -156,6 +156,9 @@ impl Signaling for SignalingSvc {
             audio_token_hash: token_hash,
             audio_mac_key,
             audio_last_seq: 0,
+            // Start at 1 so the first outbound packet beats the
+            // peer's playback-side starting cursor of 0.
+            audio_outbound_seq: 1,
             audio_addr: None,
             events_tx: None,
             current_frequency: None,

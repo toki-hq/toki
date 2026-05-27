@@ -23,8 +23,13 @@ use toki_proto::v1::{
     ChangeFrequencyRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
     event::Event as Ev, signaling_client::SignalingClient,
 };
+use chacha20poly1305::{
+    ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
+    aead::{AeadInPlace, generic_array::GenericArray},
+};
 use toki_proto::wire::{
-    HEADER_LEN, MAX_AUDIO_PACKET, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
+    HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN, VERSION_AUDIO_PCM,
+    VERSION_KEEPALIVE, build_nonce,
 };
 
 use crate::audio::{self, BeepParams, PlaybackBuf, push_playback};
@@ -481,14 +486,54 @@ impl Session {
 
         // ── UDP recv → playback ───────────────────────────────────────
         let udp_for_recv = udp.clone();
+        let key_for_recv = audio_mac_key;
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_AUDIO_PACKET];
+            let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_for_recv));
+            // Server→peer seq counter for strict-monotonic replay
+            // protection on the inbound path. Server starts at 1,
+            // matching the client→server direction.
+            let mut server_last_seq: u64 = 0;
             loop {
                 match udp_for_recv.recv(&mut buf).await {
                     Ok(0) => continue,
                     Ok(n) => {
-                        // Server forwards just the PCM payload — decode and mix.
-                        let samples = pcm_from_bytes(&buf[..n]);
+                        if n < HEADER_LEN_S2C {
+                            warn!(n, "server packet too small, dropping");
+                            continue;
+                        }
+                        // S2C layout: seq (8) | tag (16) | ciphertext
+                        let seq_bytes: [u8; SEQ_LEN] = buf[..SEQ_LEN]
+                            .try_into()
+                            .expect("slice has SEQ_LEN bytes");
+                        let seq = u64::from_le_bytes(seq_bytes);
+                        let tag_bytes: [u8; TAG_LEN] = buf[SEQ_LEN..SEQ_LEN + TAG_LEN]
+                            .try_into()
+                            .expect("slice has TAG_LEN bytes");
+                        let mut plaintext = buf[HEADER_LEN_S2C..n].to_vec();
+                        let nonce_bytes = build_nonce(seq);
+                        let nonce = Nonce::from_slice(&nonce_bytes);
+                        let tag = Tag::from_slice(&tag_bytes);
+                        if cipher
+                            .decrypt_in_place_detached(
+                                nonce,
+                                &[VERSION_AUDIO_PCM],
+                                &mut plaintext,
+                                tag,
+                            )
+                            .is_err()
+                        {
+                            warn!("server audio AEAD verify failed, dropping");
+                            continue;
+                        }
+                        if seq <= server_last_seq {
+                            // Replay or stale reorder. Strict
+                            // monotonic; playback tolerates this as
+                            // ordinary loss.
+                            continue;
+                        }
+                        server_last_seq = seq;
+                        let samples = pcm_from_bytes(&plaintext);
                         push_playback(&playback, &samples);
                     }
                     Err(e) => {
@@ -691,35 +736,35 @@ async fn send_keepalive(
     Ok(())
 }
 
-/// Assemble an outbound UDP packet with the authenticated header
+/// Assemble an outbound UDP packet with the AEAD-encrypted header
 /// layout the server expects (see `toki_proto::wire` docs). Bumps
-/// the session's monotonic sequence atomically; the MAC covers
-/// `version || seq || payload` and uses the per-session BLAKE3
-/// keyed-hash key handed back at register time.
+/// the session's monotonic sequence atomically; the seq doubles as
+/// the ChaCha20-Poly1305 nonce, AAD is the single-byte version so
+/// an attacker can't repurpose a tag from one version onto another.
 fn build_authenticated_packet(
     token: &[u8],
     version: u8,
-    mac_key: &[u8; toki_proto::wire::MAC_KEY_LEN],
+    session_key: &[u8; toki_proto::wire::MAC_KEY_LEN],
     udp_seq: &Arc<AtomicU64>,
     payload: &[u8],
 ) -> Vec<u8> {
-    use toki_proto::wire::{MAC_LEN, SEQ_LEN};
     let seq = udp_seq.fetch_add(1, Ordering::Relaxed);
     let seq_bytes = seq.to_le_bytes();
 
-    let mut mac_input = Vec::with_capacity(1 + SEQ_LEN + payload.len());
-    mac_input.push(version);
-    mac_input.extend_from_slice(&seq_bytes);
-    mac_input.extend_from_slice(payload);
-    let mac = blake3::keyed_hash(mac_key, &mac_input);
-    let mac = &mac.as_bytes()[..MAC_LEN];
+    let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(session_key));
+    let nonce_bytes = build_nonce(seq);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let mut ciphertext = payload.to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, &[version], &mut ciphertext)
+        .expect("ChaCha20-Poly1305 encrypt never fails for in-memory plaintext");
 
-    let mut pkt = Vec::with_capacity(HEADER_LEN + payload.len());
+    let mut pkt = Vec::with_capacity(HEADER_LEN_C2S + ciphertext.len());
     pkt.extend_from_slice(token);
     pkt.push(version);
     pkt.extend_from_slice(&seq_bytes);
-    pkt.extend_from_slice(mac);
-    pkt.extend_from_slice(payload);
+    pkt.extend_from_slice(tag.as_slice());
+    pkt.extend_from_slice(&ciphertext);
     pkt
 }
 

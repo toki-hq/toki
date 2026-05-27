@@ -26,3 +26,4 @@ toml = "0.8"
 # leak live session credentials. ~1 GB/s on a single core — no
 # measurable cost on the audio hot path.
 blake3 = "1"
+chacha20poly1305 = { workspace = true }

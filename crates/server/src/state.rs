@@ -29,12 +29,18 @@ pub struct Client {
     /// outbound packet. Lives only in server memory + the client's
     /// runtime; never persisted.
     pub audio_mac_key: [u8; toki_proto::wire::MAC_KEY_LEN],
-    /// Highest sequence number we've accepted from this session.
-    /// Strict-monotonic replay protection: incoming packets must
-    /// carry `seq > audio_last_seq` to be forwarded. UDP reordering
-    /// will drop the occasional out-of-order frame, which the
-    /// playback path already tolerates as ordinary packet loss.
+    /// Highest sequence number we've accepted from this session
+    /// (client → server direction). Strict-monotonic replay
+    /// protection: incoming packets must carry `seq > audio_last_seq`
+    /// to be forwarded. UDP reordering will drop the occasional
+    /// out-of-order frame, which the playback path already tolerates
+    /// as ordinary packet loss.
     pub audio_last_seq: u64,
+    /// Monotonic seq we'll use for the *next* outbound packet sent
+    /// to this peer (server → peer direction). Independent of the
+    /// inbound counter — the AEAD nonce space is per-direction, and
+    /// the peer's playback-side replay check uses this directly.
+    pub audio_outbound_seq: u64,
     pub audio_addr: Option<SocketAddr>,
     pub events_tx: Option<mpsc::Sender<Event>>,
     /// The frequency room the client is currently in. `None` between

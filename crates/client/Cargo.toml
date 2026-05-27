@@ -68,6 +68,8 @@ dirs = "5"
 # startup. `default-features = false` strips ImageMagick-style format
 # plugins we don't need; `png` is the only encoder/decoder we use.
 image = { version = "0.25", default-features = false, features = ["png"] }
-# BLAKE3 keyed_hash for per-packet UDP MAC. Server uses the same
-# crate; sharing the choice keeps the wire format symmetric.
-blake3 = "1"
+# ChaCha20-Poly1305 AEAD for per-packet UDP audio confidentiality +
+# integrity. Server uses the same crate so the wire format stays
+# symmetric. Replaces the BLAKE3 keyed_hash MAC we previously had —
+# AEAD subsumes pure MAC.
+chacha20poly1305 = { workspace = true }

@@ -176,8 +176,13 @@ async fn handle_cmd(
                 }
                 Err(e) => {
                     let mut st = state.lock().unwrap();
-                    st.connection = ConnState::Failed(e.to_string());
-                    st.log(format!("connect failed: {e}"));
+                    // `{:#}` walks the full anyhow error chain so the
+                    // root cause lands in the on-screen log instead
+                    // of just the top-level "transport error" wrapper.
+                    let full = format!("{e:#}");
+                    st.connection = ConnState::Failed(full.clone());
+                    st.log(format!("connect failed: {full}"));
+                    tracing::error!(error = ?e, "connect attempt failed");
                 }
             }
         }
@@ -288,15 +293,42 @@ impl Session {
         // ourselves and hand it to `connect_with_connector` — see
         // `insecure_tls_config` for what the verifier does and why
         // it's safe in this threat model.
-        let server_url = normalise_to_https(server);
-        let endpoint = tonic::transport::Endpoint::from_shared(server_url.clone())
-            .with_context(|| format!("parse endpoint {server_url}"))?;
-        let mut signaling = SignalingClient::new(
-            endpoint
-                .connect_with_connector(custom_tls_connector())
-                .await
-                .with_context(|| format!("connect {server_url}"))?,
-        );
+        //
+        // Two URLs in play deliberately:
+        //   * `display_url` is `https://…` — what we log and what the
+        //     user sees; reflects reality.
+        //   * `endpoint_url` is `http://…` — what we hand to Tonic's
+        //     `Endpoint::from_shared`. Tonic 0.13's
+        //     `connect_with_connector` rejects `https://` URIs unless
+        //     the endpoint *also* has a `ClientTlsConfig` set, and
+        //     setting one would make Tonic try to wrap the stream
+        //     our connector returns in a *second* TLS handshake. By
+        //     passing `http://`, Tonic skips its own TLS layer
+        //     entirely; our connector still does the real handshake.
+        let display_url = normalise_to_https(server);
+        let endpoint_url = display_url.replace("https://", "http://");
+        info!(server = %display_url, "gRPC connect: starting");
+        let endpoint = tonic::transport::Endpoint::from_shared(endpoint_url.clone())
+            .with_context(|| format!("parse endpoint {display_url}"))?;
+        let channel = match endpoint
+            .connect_with_connector(custom_tls_connector())
+            .await
+        {
+            Ok(c) => {
+                info!(server = %display_url, "gRPC connect: channel established");
+                c
+            }
+            Err(e) => {
+                // Print the full anyhow / tonic chain so the actual
+                // root cause (DNS resolution failed, peer reset
+                // mid-handshake, TLS protocol error, …) reaches the
+                // operator's logs instead of just "transport error".
+                tracing::error!(server = %display_url, error = ?e, "gRPC connect failed");
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("connect {display_url}"));
+            }
+        };
+        let mut signaling = SignalingClient::new(channel);
 
         let reg = signaling
             .register(RegisterRequest {
@@ -319,7 +351,7 @@ impl Session {
                     toki_proto::wire::MAC_KEY_LEN,
                 )
             })?;
-        let audio_addr = resolve_audio_endpoint(&reg.audio_endpoint, &server_url)?;
+        let audio_addr = resolve_audio_endpoint(&reg.audio_endpoint, &display_url)?;
         // Session-local sequence counter. Starts at 1 because the
         // server's `audio_last_seq` initialises to 0 and we require
         // strict monotonicity (seq > last_seq) to accept the first
@@ -900,9 +932,15 @@ fn custom_tls_connector()
                 .ok_or_else(|| anyhow!("connect uri missing host"))?
                 .to_string();
             let port = uri.port_u16().unwrap_or(443);
-            let tcp = tokio::net::TcpStream::connect((host.as_str(), port))
-                .await
-                .with_context(|| format!("tcp connect {host}:{port}"))?;
+            tracing::debug!(%host, port, "tcp connect");
+            let tcp = match tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(%host, port, error = %e, "tcp connect failed");
+                    return Err(anyhow::Error::new(e))
+                        .with_context(|| format!("tcp connect {host}:{port}"));
+                }
+            };
             // ServerName here is what rustls will (would, if our
             // verifier weren't a no-op) compare against the SAN in
             // the server's cert. The verifier ignores it; we still
@@ -910,10 +948,18 @@ fn custom_tls_connector()
             // correctly, which some servers gate on.
             let server_name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.clone())
                 .with_context(|| format!("invalid TLS server name {host}"))?;
-            let tls_stream = tokio_rustls::TlsConnector::from(tls)
+            tracing::debug!(%host, port, "tls handshake");
+            let tls_stream = match tokio_rustls::TlsConnector::from(tls)
                 .connect(server_name, tcp)
                 .await
-                .with_context(|| format!("tls handshake {host}:{port}"))?;
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(%host, port, error = %e, "tls handshake failed");
+                    return Err(anyhow::Error::new(e))
+                        .with_context(|| format!("tls handshake {host}:{port}"));
+                }
+            };
             Ok(hyper_util::rt::TokioIo::new(tls_stream))
         })
             as std::pin::Pin<

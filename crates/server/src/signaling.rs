@@ -109,6 +109,11 @@ impl Signaling for SignalingSvc {
                 if let Some(ip) = peer_ip {
                     self.throttle.record_auth_failure(ip).await;
                 }
+                tracing::warn!(
+                    ?peer_ip,
+                    reason = %e.message(),
+                    "register rejected: invalid display_name"
+                );
                 return Err(e);
             }
         };
@@ -122,6 +127,7 @@ impl Signaling for SignalingSvc {
                     self.throttle.record_auth_failure(ip).await;
                 }
                 tracing::warn!(
+                    ?peer_ip,
                     name = %display_name,
                     "register rejected: bad password"
                 );

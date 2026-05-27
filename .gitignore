@@ -23,6 +23,11 @@ design/
 # points TOKI_CONFIG at one — it must not land in version control.
 /config.toml
 
+# Auto-generated self-signed TLS material the server drops next to
+# its CWD when no `[tls]` block is configured. The private key is the
+# whole point — never commit it.
+/tls/
+
 # Local working notes — security follow-ups, debugging scratch, etc.
 # Tracked locally so future-you keeps the context; not shipped because
 # they're often half-thoughts that would rot in public.

@@ -34,22 +34,48 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: install system deps (linux)
+      - name: install + cache system deps (linux)
         if: matrix.os == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            protobuf-compiler \
-            libasound2-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev
+        # `cache-apt-pkgs-action` resolves the requested packages,
+        # restores them from cache when the list hash matches, or
+        # downloads + installs + repopulates the cache when it
+        # doesn't. Saves ~30-60s on every run after the first.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          # Full set eframe + winit + cpal need on Linux. The X11
+          # libs (libx11, libxcursor, libxi, libxkbcommon, libxcb*)
+          # back the windowing + input plumbing; libgl1-mesa-dev
+          # gives egui_glow an OpenGL implementation to link
+          # against; libasound2-dev is cpal's ALSA backend.
+          packages: >-
+            protobuf-compiler
+            libasound2-dev
+            libgl1-mesa-dev
+            libx11-dev
+            libxcursor-dev
+            libxi-dev
+            libxkbcommon-dev libxkbcommon-x11-dev
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          version: 1.0
 
       - name: install protobuf (macos)
         if: matrix.os == 'macos-latest'
         run: brew install protobuf
 
       - name: cache cargo registry + build
+        # Rust-cache covers ~/.cargo/registry, ~/.cargo/git, and
+        # ./target. Apt deps are cached separately above.
         uses: Swatinem/rust-cache@v2
+
+      - name: cache cargo tool installs
+        # `~/.cargo/bin` isn't covered by rust-cache. Pinning it on
+        # the Cargo.lock hash lets cargo-llvm-cov + any future
+        # `cargo install` come back from cache instead of compiling.
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-bin-${{ runner.os }}-
 
       - name: fmt
         run: cargo fmt --all -- --check
@@ -77,18 +103,35 @@ jobs:
         with:
           components: llvm-tools-preview
 
-      - name: install system deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            protobuf-compiler \
-            libasound2-dev \
-            libxcb-shape0-dev libxcb-xfixes0-dev \
-            libxkbcommon-dev
+      - name: install + cache system deps
+        # Same package set + version key as the `test` job above so
+        # the apt cache is shared across both jobs in the same run.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: >-
+            protobuf-compiler
+            libasound2-dev
+            libgl1-mesa-dev
+            libx11-dev
+            libxcursor-dev
+            libxi-dev
+            libxkbcommon-dev libxkbcommon-x11-dev
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          version: 1.0
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: cache cargo tool installs
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-bin-${{ runner.os }}-
+
       - name: install cargo-llvm-cov
+        # `taiki-e/install-action` skips re-download when the binary
+        # is already present in ~/.cargo/bin (i.e. when the cache
+        # above restored it), so the cache + install pair is cheap.
         uses: taiki-e/install-action@cargo-llvm-cov
 
       - name: run coverage

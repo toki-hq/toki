@@ -391,9 +391,7 @@ fn run_poll_loop(
             // currently-held inputs.
             let max_progress = held
                 .values()
-                .map(|&start| {
-                    now.duration_since(start).as_secs_f32() / HOLD_DURATION.as_secs_f32()
-                })
+                .map(|&start| now.duration_since(start).as_secs_f32() / HOLD_DURATION.as_secs_f32())
                 .fold(0.0_f32, f32::max)
                 .clamp(0.0, 1.0);
             hold_progress.store(max_progress.to_bits(), Ordering::Relaxed);
@@ -425,7 +423,11 @@ fn run_poll_loop(
                 };
                 if now_pressed != ptt_down {
                     ptt_down = now_pressed;
-                    let cmd = if now_pressed { Cmd::PttDown } else { Cmd::PttUp };
+                    let cmd = if now_pressed {
+                        Cmd::PttDown
+                    } else {
+                        Cmd::PttUp
+                    };
                     if cmd_tx.send(cmd).is_err() {
                         // Runtime gone — app shutting down.
                         break;
@@ -446,20 +448,54 @@ fn run_poll_loop(
 fn device_to_code(k: Keycode) -> Option<Code> {
     use Keycode as K;
     Some(match k {
-        K::A => Code::KeyA, K::B => Code::KeyB, K::C => Code::KeyC, K::D => Code::KeyD,
-        K::E => Code::KeyE, K::F => Code::KeyF, K::G => Code::KeyG, K::H => Code::KeyH,
-        K::I => Code::KeyI, K::J => Code::KeyJ, K::K => Code::KeyK, K::L => Code::KeyL,
-        K::M => Code::KeyM, K::N => Code::KeyN, K::O => Code::KeyO, K::P => Code::KeyP,
-        K::Q => Code::KeyQ, K::R => Code::KeyR, K::S => Code::KeyS, K::T => Code::KeyT,
-        K::U => Code::KeyU, K::V => Code::KeyV, K::W => Code::KeyW, K::X => Code::KeyX,
-        K::Y => Code::KeyY, K::Z => Code::KeyZ,
-        K::Key0 => Code::Digit0, K::Key1 => Code::Digit1, K::Key2 => Code::Digit2,
-        K::Key3 => Code::Digit3, K::Key4 => Code::Digit4, K::Key5 => Code::Digit5,
-        K::Key6 => Code::Digit6, K::Key7 => Code::Digit7, K::Key8 => Code::Digit8,
+        K::A => Code::KeyA,
+        K::B => Code::KeyB,
+        K::C => Code::KeyC,
+        K::D => Code::KeyD,
+        K::E => Code::KeyE,
+        K::F => Code::KeyF,
+        K::G => Code::KeyG,
+        K::H => Code::KeyH,
+        K::I => Code::KeyI,
+        K::J => Code::KeyJ,
+        K::K => Code::KeyK,
+        K::L => Code::KeyL,
+        K::M => Code::KeyM,
+        K::N => Code::KeyN,
+        K::O => Code::KeyO,
+        K::P => Code::KeyP,
+        K::Q => Code::KeyQ,
+        K::R => Code::KeyR,
+        K::S => Code::KeyS,
+        K::T => Code::KeyT,
+        K::U => Code::KeyU,
+        K::V => Code::KeyV,
+        K::W => Code::KeyW,
+        K::X => Code::KeyX,
+        K::Y => Code::KeyY,
+        K::Z => Code::KeyZ,
+        K::Key0 => Code::Digit0,
+        K::Key1 => Code::Digit1,
+        K::Key2 => Code::Digit2,
+        K::Key3 => Code::Digit3,
+        K::Key4 => Code::Digit4,
+        K::Key5 => Code::Digit5,
+        K::Key6 => Code::Digit6,
+        K::Key7 => Code::Digit7,
+        K::Key8 => Code::Digit8,
         K::Key9 => Code::Digit9,
-        K::F1 => Code::F1, K::F2 => Code::F2, K::F3 => Code::F3, K::F4 => Code::F4,
-        K::F5 => Code::F5, K::F6 => Code::F6, K::F7 => Code::F7, K::F8 => Code::F8,
-        K::F9 => Code::F9, K::F10 => Code::F10, K::F11 => Code::F11, K::F12 => Code::F12,
+        K::F1 => Code::F1,
+        K::F2 => Code::F2,
+        K::F3 => Code::F3,
+        K::F4 => Code::F4,
+        K::F5 => Code::F5,
+        K::F6 => Code::F6,
+        K::F7 => Code::F7,
+        K::F8 => Code::F8,
+        K::F9 => Code::F9,
+        K::F10 => Code::F10,
+        K::F11 => Code::F11,
+        K::F12 => Code::F12,
         // Modifier keys are catalogued so the user CAN bind them as a
         // PTT trigger if they want (e.g. Right Ctrl is a classic PTT
         // choice). Unlike rdev, polling them is crash-safe.
@@ -534,10 +570,34 @@ fn format_code(c: Code) -> String {
         "ControlRight" => "RCtrl".into(),
         "ShiftLeft" => "LShift".into(),
         "ShiftRight" => "RShift".into(),
-        "AltLeft" => if cfg!(target_os = "macos") { "LOpt".into() } else { "LAlt".into() },
-        "AltRight" => if cfg!(target_os = "macos") { "ROpt".into() } else { "RAlt".into() },
-        "MetaLeft" => if cfg!(target_os = "macos") { "LCmd".into() } else { "LSuper".into() },
-        "MetaRight" => if cfg!(target_os = "macos") { "RCmd".into() } else { "RSuper".into() },
+        "AltLeft" => {
+            if cfg!(target_os = "macos") {
+                "LOpt".into()
+            } else {
+                "LAlt".into()
+            }
+        }
+        "AltRight" => {
+            if cfg!(target_os = "macos") {
+                "ROpt".into()
+            } else {
+                "RAlt".into()
+            }
+        }
+        "MetaLeft" => {
+            if cfg!(target_os = "macos") {
+                "LCmd".into()
+            } else {
+                "LSuper".into()
+            }
+        }
+        "MetaRight" => {
+            if cfg!(target_os = "macos") {
+                "RCmd".into()
+            } else {
+                "RSuper".into()
+            }
+        }
         _ => s,
     }
 }

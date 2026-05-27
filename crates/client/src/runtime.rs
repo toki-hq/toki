@@ -5,12 +5,12 @@
 //! render it.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -19,20 +19,20 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 use tracing::{info, warn};
 
-use toki_proto::v1::{
-    ChangeFrequencyRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
-    event::Event as Ev, signaling_client::SignalingClient,
-};
 use chacha20poly1305::{
+    aead::{generic_array::GenericArray, AeadInPlace},
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
-    aead::{AeadInPlace, generic_array::GenericArray},
+};
+use toki_proto::v1::{
+    event::Event as Ev, signaling_client::SignalingClient, ChangeFrequencyRequest, JoinRequest,
+    LeaveRequest, PttEvent, RegisterRequest,
 };
 use toki_proto::wire::{
-    HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN, VERSION_AUDIO_PCM,
-    VERSION_KEEPALIVE, build_nonce,
+    build_nonce, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN,
+    VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
 };
 
-use crate::audio::{self, BeepParams, PlaybackBuf, push_playback};
+use crate::audio::{self, push_playback, BeepParams, PlaybackBuf};
 use crate::state::{ConnState, SharedState};
 
 pub enum Cmd {
@@ -98,7 +98,10 @@ pub fn spawn(
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    state.lock().unwrap().log(format!("runtime init failed: {e}"));
+                    state
+                        .lock()
+                        .unwrap()
+                        .log(format!("runtime init failed: {e}"));
                     return;
                 }
             };
@@ -365,7 +368,8 @@ impl Session {
             st.frequency = Some(frequency.to_string());
             // Show ourselves in the roster immediately — the server doesn't
             // echo our own MemberJoined back to us.
-            st.members.insert(client_id.clone(), display_name.to_string());
+            st.members
+                .insert(client_id.clone(), display_name.to_string());
         }
 
         // ── UDP socket ────────────────────────────────────────────────
@@ -396,7 +400,8 @@ impl Session {
                     Ok(ce) => match ce.event {
                         Some(Ev::Joined(j)) => {
                             let mut st = state_for_events.lock().unwrap();
-                            st.members.insert(j.client_id.clone(), j.display_name.clone());
+                            st.members
+                                .insert(j.client_id.clone(), j.display_name.clone());
                             st.log(format!("→ {} joined", j.display_name));
                         }
                         Some(Ev::Left(l)) => {
@@ -420,8 +425,11 @@ impl Session {
                             let (acquired, released, talker_name) = {
                                 let mut st = state_for_events.lock().unwrap();
                                 let was_held = st.holder.is_some();
-                                let new_holder =
-                                    if p.pressed { Some(p.client_id.clone()) } else { None };
+                                let new_holder = if p.pressed {
+                                    Some(p.client_id.clone())
+                                } else {
+                                    None
+                                };
                                 st.holder = new_holder.clone();
                                 let acquired = !was_held && new_holder.is_some();
                                 let released = was_held && new_holder.is_none();
@@ -521,9 +529,8 @@ impl Session {
                             continue;
                         }
                         // S2C layout: seq (8) | tag (16) | ciphertext
-                        let seq_bytes: [u8; SEQ_LEN] = buf[..SEQ_LEN]
-                            .try_into()
-                            .expect("slice has SEQ_LEN bytes");
+                        let seq_bytes: [u8; SEQ_LEN] =
+                            buf[..SEQ_LEN].try_into().expect("slice has SEQ_LEN bytes");
                         let seq = u64::from_le_bytes(seq_bytes);
                         let tag_bytes: [u8; TAG_LEN] = buf[SEQ_LEN..SEQ_LEN + TAG_LEN]
                             .try_into()
@@ -691,10 +698,7 @@ impl Session {
             // No matching down? Nothing to release — orphan up.
             // Could come from a denied first press whose release
             // still hit the wire, or from a connection-drop reset.
-            if !self
-                .local_pressed
-                .swap(false, Ordering::Relaxed)
-            {
+            if !self.local_pressed.swap(false, Ordering::Relaxed) {
                 return;
             }
             // Open the cooldown gate now so the *next* fresh press
@@ -905,8 +909,7 @@ fn insecure_tls_config() -> rustls::ClientConfig {
 /// stream and future types explicitly; clippy's complexity warning
 /// is genuine but not actionable here.
 #[allow(clippy::type_complexity)]
-fn custom_tls_connector()
--> impl tower::Service<
+fn custom_tls_connector() -> impl tower::Service<
     http::Uri,
     Response = hyper_util::rt::TokioIo<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>,
     Error = anyhow::Error,
@@ -1014,17 +1017,26 @@ mod tests {
 
     #[test]
     fn normalise_to_https_adds_scheme_to_bare_hostport() {
-        assert_eq!(normalise_to_https("127.0.0.1:50051"), "https://127.0.0.1:50051");
+        assert_eq!(
+            normalise_to_https("127.0.0.1:50051"),
+            "https://127.0.0.1:50051"
+        );
     }
 
     #[test]
     fn normalise_to_https_upgrades_http() {
-        assert_eq!(normalise_to_https("http://server:1234"), "https://server:1234");
+        assert_eq!(
+            normalise_to_https("http://server:1234"),
+            "https://server:1234"
+        );
     }
 
     #[test]
     fn normalise_to_https_passes_through_https() {
-        assert_eq!(normalise_to_https("https://server:1234"), "https://server:1234");
+        assert_eq!(
+            normalise_to_https("https://server:1234"),
+            "https://server:1234"
+        );
     }
 
     #[test]
@@ -1033,10 +1045,7 @@ mod tests {
         // an endianness assumption ever slips, every audio session
         // turns to garbage. Lock the round-trip down.
         let samples: Vec<i16> = vec![0, 1, -1, i16::MAX, i16::MIN, 12345, -12345];
-        let bytes: Vec<u8> = samples
-            .iter()
-            .flat_map(|s| s.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         assert_eq!(pcm_from_bytes(&bytes), samples);
     }
 

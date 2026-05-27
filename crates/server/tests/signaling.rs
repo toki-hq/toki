@@ -8,12 +8,12 @@
 
 use std::time::Duration;
 
-use tonic::Code;
 use tonic::transport::{Channel, Endpoint, Server, Uri};
+use tonic::Code;
 
 use toki_proto::v1::{
-    ChangeFrequencyRequest, JoinRequest, LeaveRequest, RegisterRequest,
-    signaling_client::SignalingClient,
+    signaling_client::SignalingClient, ChangeFrequencyRequest, JoinRequest, LeaveRequest,
+    RegisterRequest,
 };
 use toki_server::{signaling::SignalingSvc, state};
 
@@ -38,9 +38,9 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
     tokio::spawn(async move {
         let _ = Server::builder()
             .add_service(svc)
-            .serve_with_incoming(tokio_stream::iter(vec![
-                Ok::<_, std::io::Error>(server_side),
-            ]))
+            .serve_with_incoming(tokio_stream::iter(vec![Ok::<_, std::io::Error>(
+                server_side,
+            )]))
             .await;
     });
 
@@ -64,10 +64,7 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
 
 /// Most tests don't care about exhaustively asserting every field
 /// — they just need a registered client to chain into a Join.
-async fn register_or_fail(
-    client: &mut SignalingClient<Channel>,
-    name: &str,
-) -> (String, Vec<u8>) {
+async fn register_or_fail(client: &mut SignalingClient<Channel>, name: &str) -> (String, Vec<u8>) {
     let resp = client
         .register(RegisterRequest {
             display_name: name.into(),

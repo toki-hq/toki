@@ -6,15 +6,15 @@ use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
 use chacha20poly1305::{
+    aead::{generic_array::GenericArray, AeadInPlace},
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
-    aead::{AeadInPlace, generic_array::GenericArray},
 };
 use toki_proto::wire::{
-    FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN, TOKEN_LEN,
-    VERSION_AUDIO_PCM, build_nonce,
+    build_nonce, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN,
+    TOKEN_LEN, VERSION_AUDIO_PCM,
 };
 
-use crate::state::{SharedRegistry, hash_token};
+use crate::state::{hash_token, SharedRegistry};
 
 /// Maximum audio frames per second the server will forward from any
 /// single token. The legitimate client sends one 10 ms frame at a
@@ -36,7 +36,6 @@ struct RateState {
     window_start: Instant,
     packets: u32,
 }
-
 
 pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(bind).await?;
@@ -77,8 +76,7 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             .try_into()
             .expect("slice has SEQ_LEN bytes");
         let seq = u64::from_le_bytes(seq_bytes);
-        let tag_bytes: [u8; TAG_LEN] = buf
-            [TOKEN_LEN + 1 + SEQ_LEN..HEADER_LEN_C2S]
+        let tag_bytes: [u8; TAG_LEN] = buf[TOKEN_LEN + 1 + SEQ_LEN..HEADER_LEN_C2S]
             .try_into()
             .expect("slice has TAG_LEN bytes");
         let ciphertext_in = &buf[HEADER_LEN_C2S..len];
@@ -263,7 +261,9 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             Some((plaintext, targets))
         };
 
-        let Some((plaintext, targets)) = dispatch else { continue };
+        let Some((plaintext, targets)) = dispatch else {
+            continue;
+        };
 
         // Re-encrypt for each peer with their own session key and
         // outbound seq, then send. The send loop runs *outside* the
@@ -274,17 +274,14 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             let nonce_bytes = build_nonce(target.seq);
             let nonce = Nonce::from_slice(&nonce_bytes);
             let mut buf_ct = plaintext.clone();
-            let tag = match cipher.encrypt_in_place_detached(
-                nonce,
-                &[VERSION_AUDIO_PCM],
-                &mut buf_ct,
-            ) {
-                Ok(t) => t,
-                Err(e) => {
-                    warn!(error = %e, "AEAD encrypt failed for outbound peer");
-                    continue;
-                }
-            };
+            let tag =
+                match cipher.encrypt_in_place_detached(nonce, &[VERSION_AUDIO_PCM], &mut buf_ct) {
+                    Ok(t) => t,
+                    Err(e) => {
+                        warn!(error = %e, "AEAD encrypt failed for outbound peer");
+                        continue;
+                    }
+                };
             // S2C layout: seq (8) | tag (16) | ciphertext
             let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
             pkt.extend_from_slice(&target.seq.to_le_bytes());

@@ -16,7 +16,7 @@ use eframe::egui::{
 
 use std::sync::Arc;
 
-use rustfft::{Fft, FftPlanner, num_complex::Complex};
+use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
 use crate::audio::{
     self, AudioControl, AudioDevices, AudioGains, AudioLevels, AudioSpectrum, BeepParams,
@@ -241,8 +241,8 @@ impl TokiApp {
 
         // Seed the channel index from the saved frequency. If the
         // string is bogus, fall back to the middle of the band.
-        let channel_idx = T::channel_of_label(&config.connection.frequency)
-            .unwrap_or(T::FREQ_CHANNEL_COUNT / 2);
+        let channel_idx =
+            T::channel_of_label(&config.connection.frequency).unwrap_or(T::FREQ_CHANNEL_COUNT / 2);
         // Normalize the saved frequency label in case it had drift,
         // so the wire string and the displayed value agree.
         let frequency = T::frequency_label(T::frequency_of(channel_idx));
@@ -372,9 +372,7 @@ impl TokiApp {
             // Hann window + load into the complex workspace.
             let n = T::SPECTRUM_FFT_LEN;
             for (i, &s) in self.spectrum_samples.iter().enumerate() {
-                let w = 0.5
-                    - 0.5
-                        * (i as f32 * std::f32::consts::TAU / (n as f32 - 1.0)).cos();
+                let w = 0.5 - 0.5 * (i as f32 * std::f32::consts::TAU / (n as f32 - 1.0)).cos();
                 self.fft_workspace[i] = Complex::new(s * w, 0.0);
             }
             self.fft.process(&mut self.fft_workspace);
@@ -462,10 +460,7 @@ impl TokiApp {
         // Only act on debounce when we're actually connected — if
         // we're disconnected, the next Connect will use the right
         // frequency from config and no leave/join is needed now.
-        let connected = matches!(
-            self.state.lock().unwrap().connection,
-            ConnState::Connected
-        );
+        let connected = matches!(self.state.lock().unwrap().connection, ConnState::Connected);
         if !connected {
             return;
         }
@@ -487,10 +482,7 @@ impl TokiApp {
             return;
         };
         // Bail out cleanly if we lost the session mid-tune.
-        if !matches!(
-            self.state.lock().unwrap().connection,
-            ConnState::Connected
-        ) {
+        if !matches!(self.state.lock().unwrap().connection, ConnState::Connected) {
             self.freq_change_deadline = None;
             return;
         }
@@ -564,7 +556,8 @@ fn offline_reason(snap: &StateSnapshot, is_offline: bool) -> String {
             let lower = e.to_ascii_lowercase();
             if lower.contains("auth") {
                 "AUTH FAILED".into()
-            } else if lower.contains("refused") || lower.contains("unreachable")
+            } else if lower.contains("refused")
+                || lower.contains("unreachable")
                 || lower.contains("connect")
             {
                 "SERVER UNREACHABLE".into()
@@ -611,10 +604,7 @@ fn paint_wifi_barred_icon(
         for i in 0..=segments {
             let t = i as f32 / segments as f32;
             let theta = arc_start + arc_span * t;
-            let p = Pos2::new(
-                center.x + theta.cos() * r,
-                base_y + theta.sin() * r * 0.62,
-            );
+            let p = Pos2::new(center.x + theta.cos() * r, base_y + theta.sin() * r * 0.62);
             if let Some(p0) = prev {
                 painter.line_segment([p0, p], stroke);
             }
@@ -649,12 +639,7 @@ fn paint_plug_icon(painter: &egui::Painter, center: Pos2, size: f32, color: Colo
         Pos2::new(center.x, center.y + size * 0.12),
         Vec2::new(body_w, body_h),
     );
-    painter.rect_stroke(
-        body,
-        CornerRadius::same(2),
-        stroke,
-        StrokeKind::Inside,
-    );
+    painter.rect_stroke(body, CornerRadius::same(2), stroke, StrokeKind::Inside);
 
     // Prongs: two thin filled rects rising from the body's top edge.
     let prong_h = size * 0.55;
@@ -688,17 +673,17 @@ fn paint_wifi_off_icon(painter: &egui::Painter, center: Pos2, size: f32, color: 
     let stroke = Stroke::new(1.8, color);
     // Three concentric arcs (the wifi "fan") above the center dot.
     let base_y = center.y + size * 0.40;
-    for (i, scale) in [(2.0_f32, 0.95_f32), (1.4, 0.65), (0.8, 0.35)].iter().enumerate() {
+    for (i, scale) in [(2.0_f32, 0.95_f32), (1.4, 0.65), (0.8, 0.35)]
+        .iter()
+        .enumerate()
+    {
         let r = size * scale.1;
         let pts = 14;
         let mut prev = None;
         for k in 0..=pts {
             let t = k as f32 / pts as f32;
             let theta = std::f32::consts::PI + t * std::f32::consts::PI; // bottom half
-            let p = Pos2::new(
-                center.x + theta.cos() * r,
-                base_y + theta.sin() * r * 0.55,
-            );
+            let p = Pos2::new(center.x + theta.cos() * r, base_y + theta.sin() * r * 0.55);
             if let Some(p0) = prev {
                 painter.line_segment([p0, p], stroke);
             }
@@ -736,7 +721,10 @@ fn paint_refresh_icon(
     for i in 0..=segments {
         let t = i as f32 / segments as f32;
         let theta = start + total * t;
-        let p = Pos2::new(center.x + theta.cos() * radius, center.y + theta.sin() * radius);
+        let p = Pos2::new(
+            center.x + theta.cos() * radius,
+            center.y + theta.sin() * radius,
+        );
         if let Some(p0) = prev {
             painter.line_segment([p0, p], stroke);
         }
@@ -807,7 +795,10 @@ fn settings_row(ui: &mut egui::Ui, label: &str, content: impl FnOnce(&mut egui::
             Pos2::new(ui.min_rect().left(), y),
             Pos2::new(ui.min_rect().right(), y),
         ],
-        Stroke::new(1.0, Color32::from_rgba_premultiplied(0x06, 0x06, 0x06, 0x0a)),
+        Stroke::new(
+            1.0,
+            Color32::from_rgba_premultiplied(0x06, 0x06, 0x06, 0x0a),
+        ),
     );
     ui.add_space(2.0);
 }
@@ -970,7 +961,10 @@ fn paint_panel(
     if let Some(hl) = top_highlight {
         let y = rect.top() + 0.5;
         painter.line_segment(
-            [Pos2::new(rect.left() + radius, y), Pos2::new(rect.right() - radius, y)],
+            [
+                Pos2::new(rect.left() + radius, y),
+                Pos2::new(rect.right() - radius, y),
+            ],
             Stroke::new(1.0, hl),
         );
     }
@@ -987,7 +981,10 @@ fn paint_scanlines(painter: &egui::Painter, rect: Rect, radius: f32) {
     let mut y = rect.top() + 2.0;
     while y < rect.bottom() {
         painter.line_segment(
-            [Pos2::new(rect.left() + 2.0, y), Pos2::new(rect.right() - 2.0, y)],
+            [
+                Pos2::new(rect.left() + 2.0, y),
+                Pos2::new(rect.right() - 2.0, y),
+            ],
             Stroke::new(1.0, color),
         );
         y += 3.0;
@@ -1090,9 +1087,8 @@ impl eframe::App for TokiApp {
             self.tx_start = None;
         }
 
-        let central = egui::CentralPanel::default().frame(
-            egui::Frame::NONE.fill(Color32::TRANSPARENT),
-        );
+        let central =
+            egui::CentralPanel::default().frame(egui::Frame::NONE.fill(Color32::TRANSPARENT));
         central.show(ctx, |ui| {
             self.paint_strip(ui, &snap, st);
         });
@@ -1180,11 +1176,7 @@ impl TokiApp {
             &painter,
             rect,
             corners,
-            &[
-                (0.0, T::SHELL_TOP),
-                (0.5, T::SHELL),
-                (1.0, T::SHELL_BOTTOM),
-            ],
+            &[(0.0, T::SHELL_TOP), (0.5, T::SHELL), (1.0, T::SHELL_BOTTOM)],
         );
         painter.rect_stroke(
             rect,
@@ -1209,10 +1201,7 @@ impl TokiApp {
         );
 
         // ── Row layout: topbar, main, bottom ───────────────────────
-        let topbar_rect = Rect::from_min_size(
-            inner.min,
-            Vec2::new(inner.width(), T::TOPBAR_H),
-        );
+        let topbar_rect = Rect::from_min_size(inner.min, Vec2::new(inner.width(), T::TOPBAR_H));
         let bottom_rect = Rect::from_min_size(
             Pos2::new(inner.left(), inner.bottom() - T::BOTTOM_H),
             Vec2::new(inner.width(), T::BOTTOM_H),
@@ -1255,7 +1244,10 @@ impl TokiApp {
         let brand_w = 42.0;
         let divider_x = rect.left() + 2.0 + brand_w + 10.0;
         painter.line_segment(
-            [Pos2::new(divider_x, y_mid - 7.0), Pos2::new(divider_x, y_mid + 7.0)],
+            [
+                Pos2::new(divider_x, y_mid - 7.0),
+                Pos2::new(divider_x, y_mid + 7.0),
+            ],
             Stroke::new(1.0, T::DIVIDER),
         );
 
@@ -1319,10 +1311,8 @@ impl TokiApp {
         // (debouncing channel switch); then radio activity. Per the
         // spec, the "reconnecting" dot blinks (1.1 s ease) and its
         // chip text is `CONN…` rather than the full word.
-        let blink_alpha = 0.4 + 0.6
-            * (0.5
-                + 0.5
-                    * (self.elapsed_secs() * std::f32::consts::TAU / 1.1).sin());
+        let blink_alpha =
+            0.4 + 0.6 * (0.5 + 0.5 * (self.elapsed_secs() * std::f32::consts::TAU / 1.1).sin());
         let (chip_color, chip_label, chip_glow, label_color) = match st {
             // Offline dot was reading as "alarming" at intensity 1.0;
             // toned to 0.5 so it still stands out against IDLE/RX
@@ -1330,7 +1320,8 @@ impl TokiApp {
             RadioState::Offline => (T::WARN, "OFFLINE", 0.5, T::WARN),
             RadioState::Reconnecting => {
                 let alpha = (blink_alpha * 255.0) as u8;
-                let pulsing = Color32::from_rgba_unmultiplied(T::TX.r(), T::TX.g(), T::TX.b(), alpha);
+                let pulsing =
+                    Color32::from_rgba_unmultiplied(T::TX.r(), T::TX.g(), T::TX.b(), alpha);
                 (pulsing, "CONN…", 1.0, T::INK_DIM)
             }
             _ if self.is_tuning() => (T::TX, "TUNING", 1.0, T::INK_DIM),
@@ -1445,7 +1436,11 @@ impl TokiApp {
             Align2::RIGHT_CENTER,
             "ACT",
             font_mono(7.0),
-            if activity { T::PRIMARY_DIM } else { T::INK_MUTE },
+            if activity {
+                T::PRIMARY_DIM
+            } else {
+                T::INK_MUTE
+            },
         );
 
         // ── Frequency readout ──────────────────────────────────────
@@ -1492,29 +1487,19 @@ impl TokiApp {
         // 38 px fits the 200-px-wide regular OLED comfortably.
         let mut font_size = 38.0_f32;
         let unit_font = font_mono(12.0);
-        let unit_galley = painter.layout_no_wrap(
-            "MHz".to_string(),
-            unit_font.clone(),
-            T::PRIMARY_DIM,
-        );
+        let unit_galley =
+            painter.layout_no_wrap("MHz".to_string(), unit_font.clone(), T::PRIMARY_DIM);
         let unit_advance = unit_galley.size().x + 6.0; // gap to digits
         loop {
-            let g = painter.layout_no_wrap(
-                freq_text.clone(),
-                font_mono(font_size),
-                active_color,
-            );
+            let g = painter.layout_no_wrap(freq_text.clone(), font_mono(font_size), active_color);
             if g.size().x + unit_advance <= available_w || font_size <= 22.0 {
                 break;
             }
             font_size -= 1.0;
         }
         let freq_font = font_mono(font_size);
-        let freq_galley = painter.layout_no_wrap(
-            freq_text.clone(),
-            freq_font.clone(),
-            active_color,
-        );
+        let freq_galley =
+            painter.layout_no_wrap(freq_text.clone(), freq_font.clone(), active_color);
         let block_w = freq_galley.size().x + unit_advance;
         // Vertically center between the top edge (after activity-dot
         // row) and the chevron row (≈ bottom edge minus 18 px).
@@ -1614,13 +1599,7 @@ impl TokiApp {
         );
     }
 
-    fn chevron(
-        &self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        glyph: &str,
-    ) -> bool {
+    fn chevron(&self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, glyph: &str) -> bool {
         let resp = ui.allocate_rect(rect, Sense::click());
         painter.rect(
             rect,
@@ -1733,9 +1712,7 @@ impl TokiApp {
                 );
                 let remaining = self
                     .tx_start
-                    .map(|s| {
-                        T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32()
-                    })
+                    .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
                     .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
                     .max(0.0);
                 painter.text(
@@ -1813,10 +1790,7 @@ impl TokiApp {
             Pos2::new(inner.right(), inner.bottom() - footer_h - 4.0),
         );
         let icon_d = 38.0;
-        let icon_center = Pos2::new(
-            hero_rect.left() + icon_d / 2.0 + 2.0,
-            hero_rect.center().y,
-        );
+        let icon_center = Pos2::new(hero_rect.left() + icon_d / 2.0 + 2.0, hero_rect.center().y);
 
         // Icon background — only offline gets the soft red wash; the
         // reconnecting icon spins on a transparent backdrop.
@@ -1825,9 +1799,7 @@ impl TokiApp {
             // Halved from the original 8% to 4% — red surfaces stack
             // visually faster than amber, so even the previous tiny
             // value was reading as a hot wash.
-            let pulse = 0.5
-                + 0.5
-                    * (self.elapsed_secs() * std::f32::consts::TAU / 1.6).sin();
+            let pulse = 0.5 + 0.5 * (self.elapsed_secs() * std::f32::consts::TAU / 1.6).sin();
             let alpha = (0.04 * 255.0 * pulse) as u8;
             let wash = Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), alpha);
             painter.circle_filled(icon_center, icon_d / 2.0, wash);
@@ -1862,7 +1834,11 @@ impl TokiApp {
 
         // Text column to the right of the icon.
         let text_x = icon_center.x + icon_d / 2.0 + 14.0;
-        let title = if is_offline { "NO SIGNAL" } else { "CONNECTING…" };
+        let title = if is_offline {
+            "NO SIGNAL"
+        } else {
+            "CONNECTING…"
+        };
         let reason = offline_reason(snap, is_offline);
         // Title (mono 13, primary-glow style). Red gets a smaller
         // glow multiplier than amber — at parity the red bleeds.
@@ -1919,7 +1895,11 @@ impl TokiApp {
             font_mono(10.0),
             T::INK,
         );
-        let right_label = if is_offline { "TRANSMISSION DISABLED" } else { "PLEASE WAIT" };
+        let right_label = if is_offline {
+            "TRANSMISSION DISABLED"
+        } else {
+            "PLEASE WAIT"
+        };
         painter.text(
             Pos2::new(inner.right(), footer_y + 2.0),
             Align2::RIGHT_CENTER,
@@ -2087,7 +2067,11 @@ impl TokiApp {
             )
         };
 
-        let sense = if is_offline { Sense::click() } else { Sense::hover() };
+        let sense = if is_offline {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
         let resp = ui.allocate_rect(rect, sense);
         if is_offline && resp.clicked() {
             // Re-dispatch a fresh Connect with the saved config. The
@@ -2173,14 +2157,10 @@ impl TokiApp {
         // Connection. The subtext under Quick Connect ("server@call")
         // needs the extra width to render at a readable size.
         let split = (rect.width() - gap) * 0.6;
-        let quick_rect = Rect::from_min_max(
-            rect.min,
-            Pos2::new(rect.left() + split, rect.bottom()),
-        );
-        let new_rect = Rect::from_min_max(
-            Pos2::new(quick_rect.right() + gap, rect.top()),
-            rect.max,
-        );
+        let quick_rect =
+            Rect::from_min_max(rect.min, Pos2::new(rect.left() + split, rect.bottom()));
+        let new_rect =
+            Rect::from_min_max(Pos2::new(quick_rect.right() + gap, rect.top()), rect.max);
 
         self.paint_quick_connect_button(ui, painter, quick_rect);
         self.paint_new_connection_button(ui, painter, new_rect);
@@ -2201,7 +2181,11 @@ impl TokiApp {
         let enabled = !host.is_empty() && !display_name.is_empty();
         let endpoint = self.config.connection.endpoint();
 
-        let sense = if enabled { Sense::click() } else { Sense::hover() };
+        let sense = if enabled {
+            Sense::click()
+        } else {
+            Sense::hover()
+        };
         let resp = ui.allocate_rect(rect, sense);
         if enabled && resp.clicked() {
             let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
@@ -2304,7 +2288,12 @@ impl TokiApp {
             corners,
             &[(0.0, T::PTT_IDLE_TOP), (1.0, T::PTT_IDLE_BOTTOM)],
         );
-        painter.rect_stroke(rect, corners, Stroke::new(1.0, T::SHELL_EDGE), StrokeKind::Inside);
+        painter.rect_stroke(
+            rect,
+            corners,
+            Stroke::new(1.0, T::SHELL_EDGE),
+            StrokeKind::Inside,
+        );
 
         // Plus glyph + label centered vertically.
         let label_y = rect.center().y;
@@ -2404,7 +2393,11 @@ impl TokiApp {
 
         // Outer disc.
         painter.circle_filled(rect.center(), T::KNOB_D / 2.0, T::SHELL_EDGE);
-        painter.circle_stroke(rect.center(), T::KNOB_D / 2.0, Stroke::new(1.0, T::SHELL_BOTTOM));
+        painter.circle_stroke(
+            rect.center(),
+            T::KNOB_D / 2.0,
+            Stroke::new(1.0, T::SHELL_BOTTOM),
+        );
         // Inner disc.
         painter.circle_filled(rect.center(), T::KNOB_D / 2.0 - 4.0, T::SHELL_TOP);
 
@@ -2428,12 +2421,7 @@ impl TokiApp {
             [p_out, p_in],
             Stroke::new(
                 3.5,
-                Color32::from_rgba_unmultiplied(
-                    ind_color.r(),
-                    ind_color.g(),
-                    ind_color.b(),
-                    70,
-                ),
+                Color32::from_rgba_unmultiplied(ind_color.r(), ind_color.g(), ind_color.b(), 70),
             ),
         );
         painter.line_segment([p_out, p_in], Stroke::new(2.0, ind_color));
@@ -2441,9 +2429,19 @@ impl TokiApp {
         // cleanly and avoids the "what do these dots mean?" question.
     }
 
-    fn paint_ptt(&mut self, ui: &mut egui::Ui, painter: &egui::Painter, rect: Rect, st: RadioState) {
+    fn paint_ptt(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        st: RadioState,
+    ) {
         let connected = matches!(self.snapshot().connection, ConnState::Connected);
-        let sense = if connected { Sense::click_and_drag() } else { Sense::hover() };
+        let sense = if connected {
+            Sense::click_and_drag()
+        } else {
+            Sense::hover()
+        };
         let resp = ui.allocate_rect(rect, sense);
 
         // Click-and-hold semantics: we send PttDown/Up on edge
@@ -2539,7 +2537,13 @@ impl TokiApp {
         // Left cluster: glowing dot + label.
         let label_x = rect.left() + 18.0;
         let label_y = rect.center().y;
-        glow_dot(painter, Pos2::new(label_x, label_y), 4.5, dot_color, glow_intensity);
+        glow_dot(
+            painter,
+            Pos2::new(label_x, label_y),
+            4.5,
+            dot_color,
+            glow_intensity,
+        );
         let text_x = label_x + 18.0;
         if matches!(st, RadioState::Tx) {
             glow_text(
@@ -2682,8 +2686,7 @@ impl TokiApp {
                     self.config.connection.display_name = username.clone();
                     self.config.connection.password = password.clone();
                     self.config.save();
-                    let frequency =
-                        T::frequency_label(T::frequency_of(self.channel_idx));
+                    let frequency = T::frequency_label(T::frequency_of(self.channel_idx));
                     let _ = self.cmd_tx.send(Cmd::Connect {
                         server: format!("{host}:{port}"),
                         display_name: username,
@@ -2775,7 +2778,8 @@ impl TokiApp {
                     }
                 });
             if prev != self.config.audio.input_device {
-                self.audio_control.set_input(self.config.audio.input_device.clone());
+                self.audio_control
+                    .set_input(self.config.audio.input_device.clone());
                 self.config.save();
             }
         });
@@ -2805,7 +2809,8 @@ impl TokiApp {
                     }
                 });
             if prev != self.config.audio.output_device {
-                self.audio_control.set_output(self.config.audio.output_device.clone());
+                self.audio_control
+                    .set_output(self.config.audio.output_device.clone());
                 self.config.save();
             }
         });
@@ -2888,7 +2893,6 @@ impl TokiApp {
             }
         });
     }
-
 
     fn toggle_mute(&mut self) {
         if self.muted {

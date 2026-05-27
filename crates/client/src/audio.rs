@@ -37,10 +37,10 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tracing::{info, warn};
 
 use toki_proto::wire::{FRAME_SAMPLES, SAMPLE_RATE_HZ};
@@ -204,16 +204,31 @@ impl BeepPreset {
             label: "Default",
             acquire: BeepPattern {
                 steps: &[
-                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 50 },
-                    BeepStep::Tone { freq_hz: 523.25, duration_ms: 50 },
-                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 50 },
+                    BeepStep::Tone {
+                        freq_hz: 659.25,
+                        duration_ms: 50,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: 523.25,
+                        duration_ms: 50,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: 783.99,
+                        duration_ms: 50,
+                    },
                     BeepStep::Rest { duration_ms: 350 },
                 ],
             },
             release: BeepPattern {
                 steps: &[
-                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 100 },
-                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 100 },
+                    BeepStep::Tone {
+                        freq_hz: 783.99,
+                        duration_ms: 100,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: 659.25,
+                        duration_ms: 100,
+                    },
                     BeepStep::Rest { duration_ms: 250 },
                 ],
             },
@@ -223,16 +238,27 @@ impl BeepPreset {
             label: "Default with Noise",
             acquire: BeepPattern {
                 steps: &[
-                    BeepStep::Tone { freq_hz: 659.25, duration_ms: 50 },
-                    BeepStep::Tone { freq_hz: 523.25, duration_ms: 50 },
-                    BeepStep::Tone { freq_hz: 783.99, duration_ms: 50 },
+                    BeepStep::Tone {
+                        freq_hz: 659.25,
+                        duration_ms: 50,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: 523.25,
+                        duration_ms: 50,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: 783.99,
+                        duration_ms: 50,
+                    },
                     BeepStep::Rest { duration_ms: 350 },
                 ],
             },
             release: BeepPattern {
-                steps: &[
-                    BeepStep::Noise { center_hz: 1000.0, bandwidth_hz: 2000.0, duration_ms: 150 },
-                ],
+                steps: &[BeepStep::Noise {
+                    center_hz: 1000.0,
+                    bandwidth_hz: 2000.0,
+                    duration_ms: 150,
+                }],
             },
         },
         // CB12 — five-step "Morse-ish" cues at 50 ms per step.
@@ -247,19 +273,43 @@ impl BeepPreset {
             label: "CB12",
             acquire: BeepPattern {
                 steps: &[
-                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: C5, duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: C5, duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: G5, duration_ms: 120 },
+                    BeepStep::Tone {
+                        freq_hz: G5,
+                        duration_ms: 120,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: C5,
+                        duration_ms: 120,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: G5,
+                        duration_ms: 120,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: C5,
+                        duration_ms: 120,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: G5,
+                        duration_ms: 120,
+                    },
                 ],
             },
             release: BeepPattern {
                 steps: &[
-                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
+                    BeepStep::Tone {
+                        freq_hz: C6,
+                        duration_ms: 120,
+                    },
                     BeepStep::Rest { duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
-                    BeepStep::Tone { freq_hz: C6, duration_ms: 120 },
+                    BeepStep::Tone {
+                        freq_hz: C6,
+                        duration_ms: 120,
+                    },
+                    BeepStep::Tone {
+                        freq_hz: C6,
+                        duration_ms: 120,
+                    },
                     BeepStep::Rest { duration_ms: 120 },
                 ],
             },
@@ -280,10 +330,7 @@ impl BeepPreset {
     /// the atomic-index live-lookup used by [`BeepParams`]. Unknown
     /// ids land on index 0 (Default).
     pub fn index_of(id: &str) -> usize {
-        Self::ALL
-            .iter()
-            .position(|p| p.id == id)
-            .unwrap_or(0)
+        Self::ALL.iter().position(|p| p.id == id).unwrap_or(0)
     }
 }
 
@@ -625,7 +672,10 @@ fn enumerate(host: &cpal::Host) -> AudioDevices {
 fn pick_input(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     if let Some(want) = name {
         if let Ok(iter) = host.input_devices() {
-            if let Some(d) = iter.into_iter().find(|d| d.name().ok().as_deref() == Some(want)) {
+            if let Some(d) = iter
+                .into_iter()
+                .find(|d| d.name().ok().as_deref() == Some(want))
+            {
                 return Some(d);
             }
         }
@@ -637,7 +687,10 @@ fn pick_input(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
 fn pick_output(host: &cpal::Host, name: Option<&str>) -> Option<cpal::Device> {
     if let Some(want) = name {
         if let Ok(iter) = host.output_devices() {
-            if let Some(d) = iter.into_iter().find(|d| d.name().ok().as_deref() == Some(want)) {
+            if let Some(d) = iter
+                .into_iter()
+                .find(|d| d.name().ok().as_deref() == Some(want))
+            {
                 return Some(d);
             }
         }
@@ -1005,7 +1058,8 @@ where
     let mut resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
     let mut wire_chunk: Vec<i16> = Vec::with_capacity(512);
     let mut resampled: Vec<i16> = Vec::with_capacity(1024);
-    let mut ready: std::collections::VecDeque<i16> = std::collections::VecDeque::with_capacity(4096);
+    let mut ready: std::collections::VecDeque<i16> =
+        std::collections::VecDeque::with_capacity(4096);
     // Hoisted so we don't reallocate inside the audio-thread callback
     // every ~10 ms. Same trick the input builder uses.
     let mut spec_samples: Vec<f32> = Vec::with_capacity(2048);
@@ -1134,8 +1188,7 @@ pub fn beep_pattern(steps: &[BeepStep], amplitude: f32) -> Vec<i16> {
                 out.extend((0..len).map(|i| {
                     let t = i as f32 / rate as f32;
                     let env = envelope(i);
-                    let sample =
-                        (2.0 * std::f32::consts::PI * freq_hz * t).sin() * amp * env;
+                    let sample = (2.0 * std::f32::consts::PI * freq_hz * t).sin() * amp * env;
                     sample as i16
                 }));
             }
@@ -1181,8 +1234,8 @@ pub fn beep_pattern(steps: &[BeepStep], amplitude: f32) -> Vec<i16> {
                     y2 = y1;
                     y1 = y;
                     let env = envelope(i);
-                    let sample = (y * post_filter_gain * amp * env)
-                        .clamp(i16::MIN as f32, i16::MAX as f32);
+                    let sample =
+                        (y * post_filter_gain * amp * env).clamp(i16::MIN as f32, i16::MAX as f32);
                     sample as i16
                 }));
             }
@@ -1231,7 +1284,10 @@ mod beep_tests {
     fn beep_pattern_lengths_match_durations() {
         // 100 ms at 48 kHz = 4800 samples per step.
         let steps = vec![
-            BeepStep::Tone { freq_hz: 1000.0, duration_ms: 100 },
+            BeepStep::Tone {
+                freq_hz: 1000.0,
+                duration_ms: 100,
+            },
             BeepStep::Rest { duration_ms: 100 },
         ];
         let pcm = beep_pattern(&steps, 0.5);
@@ -1246,9 +1302,15 @@ mod beep_tests {
     #[test]
     fn beep_pattern_total_duration_matches_helper() {
         let steps = &[
-            BeepStep::Tone { freq_hz: 440.0, duration_ms: 50 },
+            BeepStep::Tone {
+                freq_hz: 440.0,
+                duration_ms: 50,
+            },
             BeepStep::Rest { duration_ms: 200 },
-            BeepStep::Tone { freq_hz: 880.0, duration_ms: 50 },
+            BeepStep::Tone {
+                freq_hz: 880.0,
+                duration_ms: 50,
+            },
         ];
         let pattern = BeepPattern { steps };
         assert_eq!(pattern.total_duration_ms(), 300);
@@ -1256,7 +1318,10 @@ mod beep_tests {
 
     #[test]
     fn beep_pattern_zero_amplitude_is_silent() {
-        let steps = vec![BeepStep::Tone { freq_hz: 1000.0, duration_ms: 50 }];
+        let steps = vec![BeepStep::Tone {
+            freq_hz: 1000.0,
+            duration_ms: 50,
+        }];
         let pcm = beep_pattern(&steps, 0.0);
         assert!(pcm.iter().all(|&s| s == 0));
     }
@@ -1283,7 +1348,10 @@ mod beep_tests {
         // A 1 ms step is shorter than the 5 ms target fade. The
         // renderer clamps fade to len/4 — verify it doesn't
         // crash and still produces samples.
-        let steps = vec![BeepStep::Tone { freq_hz: 1000.0, duration_ms: 1 }];
+        let steps = vec![BeepStep::Tone {
+            freq_hz: 1000.0,
+            duration_ms: 1,
+        }];
         let pcm = beep_pattern(&steps, 0.5);
         let expected_samples = SAMPLE_RATE_HZ as usize / 1000;
         assert_eq!(pcm.len(), expected_samples);

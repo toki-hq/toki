@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::info;
 
-use toki_proto::v1::{Event, MemberLeft, PttEvent, event};
+use toki_proto::v1::{event, Event, MemberLeft, PttEvent};
 
 use crate::state::SharedRegistry;
 

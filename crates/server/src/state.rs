@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 
 use toki_proto::v1::Event;
 
@@ -112,7 +112,10 @@ mod tests {
 
     #[test]
     fn hash_token_distinguishes_different_inputs() {
-        assert_ne!(hash_token(b"alpha-tok-input!"), hash_token(b"bravo-tok-input!"));
+        assert_ne!(
+            hash_token(b"alpha-tok-input!"),
+            hash_token(b"bravo-tok-input!")
+        );
     }
 
     #[test]

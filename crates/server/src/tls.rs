@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY, TlsFiles};
+use crate::config::{TlsFiles, DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY};
 
 /// PEM-encoded certificate + private key pair ready to feed into
 /// Tonic's `ServerTlsConfig::identity`. Always owned `Vec<u8>` so
@@ -53,10 +53,9 @@ impl TlsMaterial {
 }
 
 fn load_from_paths(cert: &Path, key: &Path) -> Result<TlsMaterial> {
-    let cert_pem = std::fs::read(cert)
-        .with_context(|| format!("read TLS cert {}", cert.display()))?;
-    let key_pem = std::fs::read(key)
-        .with_context(|| format!("read TLS key {}", key.display()))?;
+    let cert_pem =
+        std::fs::read(cert).with_context(|| format!("read TLS cert {}", cert.display()))?;
+    let key_pem = std::fs::read(key).with_context(|| format!("read TLS key {}", key.display()))?;
     Ok(TlsMaterial {
         cert_pem,
         key_pem,

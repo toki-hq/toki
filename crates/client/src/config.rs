@@ -76,8 +76,7 @@ impl Default for BeepConfig {
 /// written by previous versions are migrated on load by
 /// [`ConnectionConfigDe::into_canonical`] — they keep working without
 /// the user having to retype their server address.
-#[derive(Serialize, Clone, Debug)]
-#[derive(serde::Deserialize)]
+#[derive(Serialize, Clone, Debug, serde::Deserialize)]
 #[serde(from = "ConnectionConfigDe")]
 pub struct ConnectionConfig {
     pub host: String,
@@ -169,8 +168,7 @@ impl From<ConnectionConfigDe> for ConnectionConfig {
         let (host, port) = if let Some(host) = d.host {
             (host, d.port.unwrap_or_else(default_port))
         } else if let Some(server) = d.server.as_deref() {
-            parse_legacy_server(server)
-                .unwrap_or_else(|| (default_host(), default_port()))
+            parse_legacy_server(server).unwrap_or_else(|| (default_host(), default_port()))
         } else {
             (default_host(), default_port())
         };

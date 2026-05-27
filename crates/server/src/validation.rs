@@ -86,9 +86,9 @@ pub fn frequency(raw: &str) -> Result<String, Status> {
     if trimmed.len() > MAX_FREQUENCY_LEN {
         return Err(Status::invalid_argument("frequency string too long"));
     }
-    let f: f32 = trimmed.parse().map_err(|_| {
-        Status::invalid_argument(format!("frequency {trimmed:?} is not a number"))
-    })?;
+    let f: f32 = trimmed
+        .parse()
+        .map_err(|_| Status::invalid_argument(format!("frequency {trimmed:?} is not a number")))?;
     if !f.is_finite() {
         return Err(Status::invalid_argument("frequency must be finite"));
     }

@@ -48,8 +48,10 @@ async fn main() -> anyhow::Result<()> {
         source = %tls_material.source.display(),
         "TLS ARMED — gRPC channel will serve HTTPS/2"
     );
-    let tls_config = ServerTlsConfig::new()
-        .identity(Identity::from_pem(&tls_material.cert_pem, &tls_material.key_pem));
+    let tls_config = ServerTlsConfig::new().identity(Identity::from_pem(
+        &tls_material.cert_pem,
+        &tls_material.key_pem,
+    ));
 
     let grpc_addr: SocketAddr = std::env::var("TOKI_GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".into())
@@ -57,8 +59,8 @@ async fn main() -> anyhow::Result<()> {
     let audio_bind: SocketAddr = std::env::var("TOKI_AUDIO_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50052".into())
         .parse()?;
-    let advertised_audio = std::env::var("TOKI_AUDIO_PUBLIC")
-        .unwrap_or_else(|_| audio_bind.to_string());
+    let advertised_audio =
+        std::env::var("TOKI_AUDIO_PUBLIC").unwrap_or_else(|_| audio_bind.to_string());
 
     let registry = state::shared();
 

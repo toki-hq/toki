@@ -1,19 +1,20 @@
 use std::pin::Pin;
 
 use tokio::sync::mpsc;
-use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::info;
 use uuid::Uuid;
 
 use toki_proto::v1::{
+    event,
+    signaling_server::{Signaling, SignalingServer},
     ChangeFrequencyRequest, ChangeFrequencyResponse, Event, FrequencyChanged, JoinRequest,
     LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest,
-    RegisterResponse, event,
-    signaling_server::{Signaling, SignalingServer},
+    RegisterResponse,
 };
 
-use crate::state::{Client, Registry, SharedRegistry, hash_token};
+use crate::state::{hash_token, Client, Registry, SharedRegistry};
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
@@ -626,7 +627,13 @@ fn remove_from_room(
     registry: &mut Registry,
     client_id: &str,
     frequency: &str,
-) -> (Vec<mpsc::Sender<Event>>, Event, Option<Event>, String, usize) {
+) -> (
+    Vec<mpsc::Sender<Event>>,
+    Event,
+    Option<Event>,
+    String,
+    usize,
+) {
     let was_holder = if let Some(room) = registry.rooms.get_mut(frequency) {
         room.members.retain(|id| id != client_id);
         if room.holder.as_deref() == Some(client_id) {
@@ -687,6 +694,11 @@ fn remove_from_room(
         None
     };
 
-    (recipients, left_event, release_event, display_name, remaining)
+    (
+        recipients,
+        left_event,
+        release_event,
+        display_name,
+        remaining,
+    )
 }
-

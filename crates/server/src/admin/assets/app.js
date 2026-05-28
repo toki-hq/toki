@@ -3,7 +3,7 @@
 // Wire contract (must stay in sync with crates/server/src/admin/dto.rs):
 //   Snapshot         { rooms, lobby, generation, serverUptimeSecs }
 //   RoomDto          { frequency, holder, members: MemberDto[] }
-//   MemberDto        { id, displayName, lastSeenSecs }
+//   MemberDto        { id, displayName, connectedSecs }
 //   ServerInfo       { version, adminBind, startedAtUnix }
 //
 // Architecture: a single `state` object holds the latest snapshot +
@@ -81,6 +81,25 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  /** Format a non-negative integer number of seconds as a short
+   *  human-readable duration. Examples:
+   *    9       → "9s"
+   *    65      → "1m 5s"
+   *    3700    → "1h 1m"
+   *    90061   → "1d 1h"
+   *  Truncates to two units so the value stays compact in the
+   *  member-row cell (~6 chars max). */
+  function formatDuration(secs) {
+    secs = Math.max(0, Math.floor(Number(secs) || 0));
+    if (secs < 60) return `${secs}s`;
+    const m = Math.floor(secs / 60);
+    if (m < 60) return `${m}m ${secs % 60}s`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h ${m % 60}m`;
+    const d = Math.floor(h / 24);
+    return `${d}d ${h % 24}h`;
   }
 
   // ════════════════════════════════════════════════════════════════
@@ -409,7 +428,7 @@
                   <li class="busy-row">
                     <span class="freq" style="width: auto;">${esc(m.displayName)}</span>
                     <div class="busy-track"></div>
-                    <span class="count" style="color: var(--ink-mute);">${m.lastSeenSecs}s</span>
+                    <span class="count" style="color: var(--ink-mute);">${formatDuration(m.connectedSecs)}</span>
                   </li>`).join("")}</ul>`}
           </div>
         </div>
@@ -502,7 +521,7 @@
           <span class="state-dot ${stateClass}"></span>
           <span class="callsign">${esc(m.displayName)}</span>
           <span class="state-label ${stateClass}">${stateLabel}</span>
-          <span class="seen">${m.lastSeenSecs}s ago</span>
+          <span class="seen" title="Time since this client registered">${formatDuration(m.connectedSecs)}</span>
           <span class="id">${esc(m.id)}</span>
           <button class="row-menu-btn" data-menu="${esc(m.id)}" title="Member actions">…</button>
         </li>`;
@@ -571,7 +590,7 @@
                   <span style="width: 8px;"></span>
                   <span style="flex: 2;">CALLSIGN</span>
                   <span style="flex: 1;">STATE</span>
-                  <span style="flex: 1;">LAST SEEN</span>
+                  <span style="flex: 1;">CONNECTED</span>
                   <span style="flex: 2;">CLIENT ID</span>
                   <span style="width: 36px;"></span>
                 </div>

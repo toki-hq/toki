@@ -219,6 +219,11 @@ impl Signaling for SignalingSvc {
             // refresh this within ~100 ms via its initial UDP keepalive,
             // and every 3 s thereafter.
             last_seen: std::time::Instant::now(),
+            // Frozen "session start" instant — never updated, so the
+            // admin panel's "connected for X" stat grows at 1 s/s
+            // instead of resetting on every keepalive like `last_seen`
+            // does.
+            connected_at: std::time::Instant::now(),
             // Bind this session to the IP the gRPC handshake came
             // from. The audio relay rejects UDP packets bearing this
             // token from any other IP — closes the captured-token /

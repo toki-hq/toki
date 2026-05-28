@@ -22,6 +22,15 @@ RUN  chmod +x /usr/bin/toki-server
 COPY ./scripts/server.entrypoint.sh ./entrypoint.sh
 RUN  chmod +x ./entrypoint.sh
 
-EXPOSE 50051 50052
+RUN groupadd -r toki && useradd -r -g toki toki
+
+RUN mkdir -p /data
+RUN chown -R toki:toki /data
+
+ENV TOKI_CONFIG=/data/config.toml
+
+USER toki
+
+EXPOSE 50051 50052 8000
 
 ENTRYPOINT ["./entrypoint.sh"]

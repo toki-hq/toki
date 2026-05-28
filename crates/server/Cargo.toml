@@ -10,7 +10,10 @@ path = "src/bin/main.rs"
 [dependencies]
 toki-proto = { workspace = true }
 tokio = { workspace = true }
-tokio-stream = "0.1"
+# `sync` feature gives us `BroadcastStream` so the admin SSE endpoint
+# can pump a `tokio::sync::broadcast::Receiver<Snapshot>` straight
+# into axum's `Sse::new(stream)`.
+tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = { workspace = true }
 prost = { workspace = true }
 bytes = { workspace = true }
@@ -37,6 +40,41 @@ rcgen = "0.13"
 # startup. Dep is explicit so the feature flags can't drift even
 # if tonic's transitives change.
 rustls = { version = "0.23", features = ["ring"] }
+
+# --- Admin web panel ---
+#
+# axum 0.8 shares hyper 1.x with tonic 0.13, so the two coexist in the
+# same process without pulling two hyper majors into the tree. We use
+# axum for the admin HTTP listener on a separate port; it never
+# interacts with the gRPC service except through the shared registry.
+axum = "0.8"
+# axum's own `serve` only does plain HTTP. `axum-server` is the
+# canonical rustls bridge — same hyper 1.x backbone, accepts a
+# RustlsConfig built from the PEM bytes we already feed Tonic for
+# the gRPC channel. Two layered protections fall out of this:
+#   * cookies + login payload are no longer in cleartext over LAN
+#   * the cookie's `Secure` flag is now meaningful
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# Async SSE bodies come from axum's `Sse` response, which expects a
+# Stream of Event. tokio-stream's `BroadcastStream` is the adapter we
+# use to pump the admin event broadcast channel into that stream.
+serde_json = "1"
+# SQLite for the admin user table + sessions. `bundled` builds sqlite
+# into the binary so we don't depend on the runtime image shipping
+# libsqlite3 — matches the rest of Toki's "self-contained binary"
+# posture. One table, one connection, no pool: admin traffic is tiny.
+rusqlite = { version = "0.32", features = ["bundled"] }
+# argon2id for the admin password hash. Pure-Rust, no C deps, ~10ms
+# per verify which is fine on a login endpoint and stops cheap GPU
+# bruteforce against a stolen `admin.db`.
+argon2 = "0.5"
+# CSPRNG for the seeded admin password + session tokens. `rand` is
+# already a transitive of several deps; pulled in explicitly here so
+# version pins don't drift if the transitives change.
+rand = "0.8"
+# Hex encoding for session token cookies. Keeps the cookie value
+# ASCII-safe without dragging in base64.
+hex = "0.4"
 
 [dev-dependencies]
 # Used to serialise individual tests that mutate process-global

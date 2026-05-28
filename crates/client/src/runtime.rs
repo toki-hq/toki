@@ -46,6 +46,15 @@ pub enum Cmd {
         password: String,
     },
     Disconnect,
+    /// Graceful-shutdown variant of [`Cmd::Disconnect`]. Same effect
+    /// (sends `Leave` and aborts session tasks), but signals
+    /// completion back to the caller through an `mpsc::Sender` so
+    /// the GUI thread's `on_exit` hook can block until the Leave
+    /// RPC has actually landed before tearing the process down.
+    /// Without this, closing the app while connected leaves the
+    /// server's reaper to time us out ~10s later — peers see a
+    /// silent ghost instead of an immediate `MemberLeft`.
+    Shutdown(std::sync::mpsc::Sender<()>),
     /// Leave the current frequency room *without* dropping the session.
     /// Used as the first half of a debounced frequency change — the
     /// UI fires this on the user's first chevron click so they "go off
@@ -124,7 +133,13 @@ async fn run(
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
-                handle_cmd(cmd, &mut session, &state, &playback, &beeps).await;
+                // handle_cmd returns false on a clean shutdown command
+                // (e.g. Cmd::Shutdown). We break out of the select loop
+                // then so the runtime thread can exit promptly rather
+                // than sit waiting on a dead UI.
+                if !handle_cmd(cmd, &mut session, &state, &playback, &beeps).await {
+                    break;
+                }
             }
             frame = mic_rx.recv() => {
                 let Some(frame) = frame else { break; };
@@ -138,13 +153,17 @@ async fn run(
     }
 }
 
+/// Dispatch a single command. Returns `true` to keep the runtime
+/// loop going, `false` to terminate it cleanly (used by
+/// [`Cmd::Shutdown`] so the egui thread can guarantee a graceful
+/// goodbye before the process exits).
 async fn handle_cmd(
     cmd: Cmd,
     session: &mut Option<Session>,
     state: &SharedState,
     playback: &PlaybackBuf,
     beeps: &BeepParams,
-) {
+) -> bool {
     match cmd {
         Cmd::Connect {
             server,
@@ -154,7 +173,9 @@ async fn handle_cmd(
         } => {
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
-                return;
+                // Already-connected is a soft no-op, not a shutdown
+                // signal — keep the runtime loop running.
+                return true;
             }
             state.lock().unwrap().connection = ConnState::Connecting;
             match Session::open(
@@ -201,6 +222,23 @@ async fn handle_cmd(
                 st.log("disconnected");
             }
         }
+        Cmd::Shutdown(ack) => {
+            // App is quitting. Close the session (sends Leave +
+            // aborts tasks) if there is one, then signal the egui
+            // thread so it knows the Leave RPC has landed and the
+            // process can tear down. We don't touch `state` here
+            // because the UI thread is already on its way out — any
+            // log line we'd append would never get rendered.
+            if let Some(s) = session.take() {
+                s.close().await;
+            }
+            let _ = ack.send(());
+            // Returning `false` tells run()'s loop to exit. Any
+            // further commands queued behind Shutdown are by
+            // definition post-quit garbage; processing them would
+            // just delay the runtime thread's teardown.
+            return false;
+        }
         Cmd::LeaveRoom => {
             if let Some(s) = session {
                 s.leave_room(state).await;
@@ -235,6 +273,8 @@ async fn handle_cmd(
             push_playback(playback, &tone);
         }
     }
+    // Default: every command except Shutdown leaves the runtime running.
+    true
 }
 
 /// How long we ignore a fresh `PttDown` after the previous `PttUp`.
@@ -489,6 +529,33 @@ impl Session {
                             st.frequency = Some(fc.frequency.clone());
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
+                        Some(Ev::DisplayNameChanged(dnc)) => {
+                            // Either someone in our room was renamed
+                            // (peer case) or *we* were renamed (subject
+                            // case). In both, we rebind the roster
+                            // entry; in the subject case we also
+                            // refresh our own `display_name` so the
+                            // topbar callsign re-renders this frame.
+                            let mut st = state_for_events.lock().unwrap();
+                            let is_self = st.self_id.as_deref() == Some(dnc.client_id.as_str());
+                            // Only update the roster entry if the
+                            // client is actually in our current room
+                            // (we may receive a self-rename while in
+                            // the lobby, with no roster to update).
+                            if st.members.contains_key(&dnc.client_id) {
+                                st.members
+                                    .insert(dnc.client_id.clone(), dnc.display_name.clone());
+                            }
+                            if is_self {
+                                let old = std::mem::replace(
+                                    &mut st.display_name,
+                                    dnc.display_name.clone(),
+                                );
+                                st.log(format!("✏️ renamed: {old} → {}", dnc.display_name));
+                            } else {
+                                st.log(format!("✏️ peer renamed to {}", dnc.display_name));
+                            }
+                        }
                         None => {}
                     },
                     Err(e) => {
@@ -497,7 +564,24 @@ impl Session {
                     }
                 }
             }
-            info!("event stream closed");
+            // Stream closed cleanly — either the server shut down or
+            // an admin kicked us. Either way, the events_tx on the
+            // server side is gone and no further events will arrive.
+            // Surface this to the GUI: flip the connection state back
+            // to Disconnected, drop the roster, and log a friendly
+            // line so the operator sees the cause rather than just
+            // a silently-stuck "Connected" status bar.
+            //
+            // We can't tell server-shutdown apart from admin-kick
+            // here — both look like a graceful EOF — so the log
+            // message is deliberately generic.
+            info!("event stream closed; transitioning to Disconnected");
+            let mut st = state_for_events.lock().unwrap();
+            st.connection = crate::state::ConnState::Disconnected;
+            st.members.clear();
+            st.holder = None;
+            st.frequency = None;
+            st.log("⚠ disconnected by server");
         });
 
         // ── PTT outbound stream (us → server) ─────────────────────────

@@ -1,9 +1,16 @@
 use std::net::SocketAddr;
 
+use anyhow::Context as _;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
-use toki_server::{audio, config::Config, reaper, signaling::SignalingSvc, state, tls};
+use toki_server::{
+    admin, audio,
+    config::{self, Config},
+    reaper, server_config,
+    signaling::SignalingSvc,
+    state, tls,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,11 +46,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("password gate DISARMED — server is in open mode");
     }
 
+    // Resolve the runtime data root (`$TOKI_DATA_DIR`, defaults to
+    // `.`). Auto-generated TLS certs land under `{data_dir}/tls/`,
+    // and any relative `[admin] db_path` resolves against it too —
+    // so Docker images can pin everything stateful to `/data` with
+    // a single env var while leaving absolute operator paths
+    // (e.g. `/etc/letsencrypt/...`) untouched.
+    let data_dir = config::data_dir();
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    tracing::info!(data_dir = %data_dir.display(), "data dir resolved");
+
     // TLS is mandatory. Either the operator supplied cert + key
     // paths in [tls], or we auto-generate a self-signed pair to
-    // `tls/{cert,key}.pem` on first run and reuse it thereafter.
-    // Either way, gRPC is always HTTPS — there is no plaintext mode.
-    let tls_material = tls::TlsMaterial::resolve(config.tls.as_ref())?;
+    // `{data_dir}/tls/{cert,key}.pem` on first run and reuse it
+    // thereafter. Either way, gRPC is always HTTPS — there is no
+    // plaintext mode.
+    let tls_material = tls::TlsMaterial::resolve(config.tls.as_ref(), &data_dir)?;
     tracing::info!(
         source = %tls_material.source.display(),
         "TLS ARMED — gRPC channel will serve HTTPS/2"
@@ -64,12 +83,53 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = state::shared();
 
+    // Runtime-mutable server settings. Starts at hardcoded defaults
+    // (same values the code shipped before this lived in the db);
+    // the admin task, if enabled, will overwrite from sqlite right
+    // after it opens. Headless deployments without `[admin]` just
+    // keep these defaults for the lifetime of the process.
+    let server_config = server_config::shared_default();
+
     // Reaper runs forever in the background; we don't .await it in the
     // select! below — if it panics, tracing surfaces it but the server
     // keeps serving (just without stale-client cleanup).
-    tokio::spawn(reaper::run(registry.clone()));
+    tokio::spawn(reaper::run(registry.clone(), server_config.clone()));
 
     let audio_task = tokio::spawn(audio::run(audio_bind, registry.clone()));
+
+    // Admin panel is always exposed. When `[admin]` is omitted from
+    // config.toml the defaults take over (bind = 127.0.0.1, port = 8000,
+    // db_path = admin.db). The admin task lives alongside grpc + audio
+    // in the select! below; any error there brings the process down so
+    // the operator can see the failure in journalctl. We hand the
+    // admin task its own clone of `tls_material` so it can stand up an
+    // HTTPS listener with the same identity as the gRPC channel —
+    // operators only have one cert fingerprint to pin. The shared
+    // `server_config` handle gets cloned in so the admin task can
+    // load + mutate it; reads from gRPC + reaper see the updates
+    // without restart. The TOML password (if any) takes precedence
+    // over the runtime db; capture that as a boolean so the admin UI
+    // can lock its server-password input accordingly.
+    let toml_password_override = password.is_some();
+    let mut admin_cfg = config.admin;
+    // Anchor a relative `db_path` under `TOKI_DATA_DIR`. Absolute
+    // operator paths (e.g. `/var/lib/toki/admin.db`) are honoured
+    // verbatim — same posture as `[tls]` operator paths.
+    admin_cfg.db_path = config::resolve_under(&data_dir, &admin_cfg.db_path);
+    tracing::info!(
+        bind = %admin_cfg.bind,
+        port = admin_cfg.port,
+        db_path = %admin_cfg.db_path.display(),
+        toml_password_override,
+        "admin panel starting",
+    );
+    let admin_task = tokio::spawn(admin::run(
+        admin_cfg,
+        registry.clone(),
+        tls_material.clone(),
+        server_config.clone(),
+        toml_password_override,
+    ));
 
     tracing::info!(
         ?grpc_addr,
@@ -87,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     let grpc = Server::builder()
         .tls_config(tls_config)?
         .add_service(
-            SignalingSvc::new(registry, advertised_audio, password)
+            SignalingSvc::new(registry, advertised_audio, password, server_config.clone())
                 .max_decoding_message_size(8 * 1024),
         )
         .serve(grpc_addr);
@@ -95,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         res = grpc => res?,
         res = audio_task => res??,
+        res = admin_task => res??,
     }
 
     Ok(())

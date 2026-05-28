@@ -11,13 +11,16 @@
 //! rather refuse to boot than silently ignore a typo in the password
 //! line and accidentally serve in open mode.
 //!
-//! Today the only configurable knob is the access password. Network
-//! addresses still come from `TOKI_GRPC_ADDR` / `TOKI_AUDIO_ADDR` /
-//! `TOKI_AUDIO_PUBLIC` environment variables so existing systemd unit
-//! files and Docker compose files keep working without a config file.
+//! Network addresses for the gRPC + UDP audio listeners come from
+//! `TOKI_GRPC_ADDR` / `TOKI_AUDIO_ADDR` / `TOKI_AUDIO_PUBLIC` env
+//! variables so existing systemd unit files and Docker compose files
+//! keep working without a config file. The admin dashboard is
+//! always-on; its bind / port / db path live in the `[admin]` block
+//! with defaults that fire when the block is absent.
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::Deserialize;
 
 /// Top-level server config. Missing fields fall back to `Default`.
@@ -45,6 +48,172 @@ pub struct Config {
     /// always TLS — there's no plaintext mode.
     #[serde(default)]
     pub tls: Option<TlsFiles>,
+
+    /// Admin web panel settings. The dashboard is always exposed —
+    /// the `[admin]` block exists only to override the defaults
+    /// (`bind = "127.0.0.1"`, `port = 8000`, etc). On first boot,
+    /// if the sqlite store at `db_path` has no admin users, one is
+    /// seeded with a random password and logged once at WARN level.
+    /// Operators who don't want the panel reachable from the LAN
+    /// keep the default `bind = "127.0.0.1"` and rely on the
+    /// loopback to keep it private.
+    #[serde(default)]
+    pub admin: AdminConfig,
+}
+
+/// Admin web panel settings. All fields have defaults; an empty
+/// `[admin]` block in TOML is equivalent to "enable with defaults".
+#[derive(Debug, Deserialize)]
+pub struct AdminConfig {
+    /// Interface to bind the admin HTTP listener to. Defaults to
+    /// `127.0.0.1` so the admin surface stays loopback-only unless
+    /// the operator explicitly opens it to the LAN — the panel is
+    /// HTTP-only (no TLS) in v1, so exposing it publicly is a
+    /// deliberate choice.
+    #[serde(default = "default_admin_bind")]
+    pub bind: String,
+    /// Port for the admin HTTP listener. Default `8000` to match
+    /// the spec; freely changeable without touching the gRPC port.
+    #[serde(default = "default_admin_port")]
+    pub port: u16,
+    /// SQLite path for the admin user + session store. Relative
+    /// paths are resolved against the process CWD, the same way
+    /// `tls/cert.pem` is.
+    #[serde(default = "default_admin_db_path")]
+    pub db_path: PathBuf,
+    /// Session TTL in hours. Cookies issued by `/api/login` are
+    /// valid for this long; on expiry the next API call returns
+    /// 401 and the JS shell re-prompts for credentials.
+    #[serde(default = "default_admin_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+    /// Optional plain-HTTP listener that 308-redirects every request
+    /// to the HTTPS counterpart on `port`. The admin panel is TLS-only
+    /// (gRPC and admin share the same cert), so a browser that lands
+    /// on `http://host:8000` would otherwise see a raw TLS-handshake
+    /// error. When this is `Some(n)`, the admin task binds a second
+    /// listener on `bind:n` that responds to every request with a
+    /// 308 Permanent Redirect to `https://<Host>:port<path>`. Default
+    /// `None` — operators who don't want a second port keep their
+    /// single-port setup. Common value: `8080`.
+    #[serde(default)]
+    pub http_redirect_port: Option<u16>,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_admin_bind(),
+            port: default_admin_port(),
+            db_path: default_admin_db_path(),
+            session_ttl_hours: default_admin_session_ttl_hours(),
+            http_redirect_port: None,
+        }
+    }
+}
+
+/// Environment-variable names for the `[admin]` overrides. Kept as
+/// `const`s so the tests + docs reference them by symbol instead of
+/// repeating string literals.
+pub const ENV_ADMIN_BIND: &str = "TOKI_ADMIN_BIND";
+pub const ENV_ADMIN_PORT: &str = "TOKI_ADMIN_PORT";
+pub const ENV_ADMIN_DB_PATH: &str = "TOKI_ADMIN_DB_PATH";
+pub const ENV_ADMIN_SESSION_TTL_HOURS: &str = "TOKI_ADMIN_SESSION_TTL_HOURS";
+pub const ENV_ADMIN_HTTP_REDIRECT_PORT: &str = "TOKI_ADMIN_HTTP_REDIRECT_PORT";
+
+/// Root directory for runtime-managed state (auto-generated TLS
+/// certs, admin sqlite, anything else we write at boot or upgrade
+/// time). Defaults to the process CWD (`.`) so a `cargo run` from a
+/// fresh checkout keeps writing into the repo root, but Docker
+/// images can pin it to `/data` and operators can move state under
+/// `/var/lib/toki` without touching every individual path.
+pub const ENV_DATA_DIR: &str = "TOKI_DATA_DIR";
+
+/// Resolve the data-root directory: `$TOKI_DATA_DIR` if set,
+/// otherwise `.`. Relative paths are kept relative; the resolver
+/// just hands back whatever the env says (the caller is responsible
+/// for `create_dir_all` / canonicalisation if it cares).
+pub fn data_dir() -> PathBuf {
+    std::env::var(ENV_DATA_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Join `base` and `path`, treating an absolute `path` as a hard
+/// override (so operators who set `db_path = "/var/lib/toki/admin.db"`
+/// keep that path verbatim regardless of `TOKI_DATA_DIR`). Relative
+/// paths get the data-dir prefix so the auto-generated defaults land
+/// under the data root.
+pub fn resolve_under(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+impl AdminConfig {
+    /// Apply `TOKI_ADMIN_*` env vars on top of the TOML-loaded
+    /// values. Each var, when set, replaces the corresponding field
+    /// — env beats TOML beats hard-coded defaults, matching the
+    /// twelve-factor pattern used elsewhere in the binary (e.g.
+    /// `TOKI_GRPC_ADDR`).
+    ///
+    /// A malformed value (non-numeric port, etc.) returns an error
+    /// so the operator gets a clear startup failure rather than a
+    /// silent fallback to the TOML value — same posture as the
+    /// other `.parse()?` calls in `main.rs`.
+    ///
+    /// Recognised vars:
+    /// * `TOKI_ADMIN_BIND` — interface, e.g. `0.0.0.0`
+    /// * `TOKI_ADMIN_PORT` — TCP port, e.g. `8000`
+    /// * `TOKI_ADMIN_DB_PATH` — sqlite path
+    /// * `TOKI_ADMIN_SESSION_TTL_HOURS` — positive integer
+    /// * `TOKI_ADMIN_HTTP_REDIRECT_PORT` — TCP port for the plain-HTTP
+    ///   redirect listener; empty string disables it
+    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(v) = std::env::var(ENV_ADMIN_BIND) {
+            self.bind = v;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_PORT) {
+            self.port = v.parse().with_context(|| {
+                format!("{ENV_ADMIN_PORT}={v:?}: expected a TCP port (0..=65535)")
+            })?;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_DB_PATH) {
+            self.db_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_SESSION_TTL_HOURS) {
+            self.session_ttl_hours = v.parse().with_context(|| {
+                format!("{ENV_ADMIN_SESSION_TTL_HOURS}={v:?}: expected a positive integer")
+            })?;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_HTTP_REDIRECT_PORT) {
+            // Empty string disables the redirect listener — handy in
+            // Docker / systemd where unsetting an inherited env var
+            // isn't always possible.
+            self.http_redirect_port = if v.trim().is_empty() {
+                None
+            } else {
+                Some(v.parse().with_context(|| {
+                    format!("{ENV_ADMIN_HTTP_REDIRECT_PORT}={v:?}: expected a TCP port (0..=65535)")
+                })?)
+            };
+        }
+        Ok(())
+    }
+}
+
+fn default_admin_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_admin_port() -> u16 {
+    8000
+}
+fn default_admin_db_path() -> PathBuf {
+    PathBuf::from("admin.db")
+}
+fn default_admin_session_ttl_hours() -> u64 {
+    12
 }
 
 /// PEM-encoded certificate + private-key paths for the gRPC TLS
@@ -74,14 +243,23 @@ impl Config {
     /// A file that exists but parses badly returns `Err` so the
     /// caller can refuse to boot — we'd rather fail loudly than
     /// silently disarm the password gate because of a TOML typo.
+    ///
+    /// `TOKI_ADMIN_*` env vars are applied as the final overlay
+    /// (env > TOML > defaults), so any deployment can tweak the
+    /// admin panel's bind / port / db path without touching the
+    /// TOML.
     pub fn load() -> anyhow::Result<(Self, Option<PathBuf>)> {
-        let Some(path) = locate() else {
-            return Ok((Self::default(), None));
+        let (mut cfg, path) = match locate() {
+            Some(path) => (Self::from_path(&path)?, Some(path)),
+            None => (Self::default(), None),
         };
-        let cfg = Self::from_path(&path)?;
-        Ok((cfg, Some(path)))
+        cfg.admin.apply_env_overrides()?;
+        Ok((cfg, path))
     }
 
+    /// Parse a config file at `path`. Does *not* apply env-var
+    /// overrides — that's `load`'s job. Tests use this directly to
+    /// keep the env-var application out of their critical path.
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
@@ -168,6 +346,193 @@ mod tests {
         let cfg = Config::from_path(Path::new("/nonexistent/toki-test.toml")).unwrap();
         assert!(cfg.normalised_password().is_none());
         assert!(cfg.tls.is_none());
+    }
+
+    #[test]
+    fn admin_block_round_trips_with_overrides() {
+        let raw = r#"
+            [admin]
+            bind = "0.0.0.0"
+            port = 9000
+            db_path = "/var/lib/toki/admin.db"
+            session_ttl_hours = 24
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.admin.bind, "0.0.0.0");
+        assert_eq!(cfg.admin.port, 9000);
+        assert_eq!(
+            cfg.admin.db_path.to_string_lossy(),
+            "/var/lib/toki/admin.db"
+        );
+        assert_eq!(cfg.admin.session_ttl_hours, 24);
+    }
+
+    #[test]
+    fn admin_block_fills_defaults_when_empty() {
+        // An empty `[admin]` block parses cleanly and inherits every
+        // default, identical to omitting the block.
+        let cfg: Config = toml::from_str("[admin]\n").unwrap();
+        assert_eq!(cfg.admin.bind, "127.0.0.1");
+        assert_eq!(cfg.admin.port, 8000);
+        assert_eq!(cfg.admin.db_path.to_string_lossy(), "admin.db");
+        assert_eq!(cfg.admin.session_ttl_hours, 12);
+    }
+
+    #[test]
+    fn admin_defaults_apply_when_block_absent() {
+        // The admin dashboard is always exposed. A config.toml that
+        // doesn't mention `[admin]` still produces the default
+        // bind/port/db_path/ttl — same as an empty `[admin]` block.
+        let cfg: Config = toml::from_str("password = \"hunter2\"").unwrap();
+        assert_eq!(cfg.admin.bind, "127.0.0.1");
+        assert_eq!(cfg.admin.port, 8000);
+        assert_eq!(cfg.admin.db_path.to_string_lossy(), "admin.db");
+        assert_eq!(cfg.admin.session_ttl_hours, 12);
+    }
+
+    /// RAII guard that clears an env var on drop. Tests that set
+    /// `TOKI_ADMIN_*` use this so a failure mid-test (panic before
+    /// the explicit clear) doesn't leak state into the next case.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+    fn set_env(key: &'static str, val: &str) -> EnvGuard {
+        std::env::set_var(key, val);
+        EnvGuard(key)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_overrides_each_admin_field() {
+        // All four TOKI_ADMIN_* vars set at once → every field
+        // overridden, regardless of what TOML said (here: nothing).
+        let _b = set_env(ENV_ADMIN_BIND, "0.0.0.0");
+        let _p = set_env(ENV_ADMIN_PORT, "9090");
+        let _d = set_env(ENV_ADMIN_DB_PATH, "/tmp/test-admin.db");
+        let _t = set_env(ENV_ADMIN_SESSION_TTL_HOURS, "24");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.bind, "0.0.0.0");
+        assert_eq!(admin.port, 9090);
+        assert_eq!(admin.db_path.to_string_lossy(), "/tmp/test-admin.db");
+        assert_eq!(admin.session_ttl_hours, 24);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_leaves_unset_fields_alone() {
+        // Only port is set in env; bind / db_path / ttl come from
+        // the in-memory config (here, the TOML-loaded values).
+        let _p = set_env(ENV_ADMIN_PORT, "9091");
+        let mut admin = AdminConfig {
+            bind: "1.2.3.4".into(),
+            port: 8000,
+            db_path: PathBuf::from("custom.db"),
+            session_ttl_hours: 6,
+            http_redirect_port: None,
+        };
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.bind, "1.2.3.4");
+        assert_eq!(admin.port, 9091);
+        assert_eq!(admin.db_path.to_string_lossy(), "custom.db");
+        assert_eq!(admin.session_ttl_hours, 6);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_overrides_win_over_toml() {
+        // Simulate the full `Config::load` flow: parse TOML, then
+        // apply env. The env value must replace the TOML one.
+        let _g = set_env(ENV_ADMIN_PORT, "7777");
+        let raw = "[admin]\nport = 9000\n";
+        let mut cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.admin.port, 9000); // pre-override
+        cfg.admin.apply_env_overrides().unwrap();
+        assert_eq!(cfg.admin.port, 7777); // env wins
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_port_is_fatal() {
+        let _g = set_env(ENV_ADMIN_PORT, "definitely-not-a-number");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TOKI_ADMIN_PORT"), "msg = {msg}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_sets_http_redirect_port_and_empty_clears() {
+        // Setting the env var arms the redirect listener.
+        let _g = set_env(ENV_ADMIN_HTTP_REDIRECT_PORT, "8080");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.http_redirect_port, Some(8080));
+
+        // Empty string explicitly disables it — useful in Docker /
+        // systemd where unsetting an inherited env var is awkward.
+        std::env::set_var(ENV_ADMIN_HTTP_REDIRECT_PORT, "");
+        let mut admin = AdminConfig {
+            http_redirect_port: Some(8080),
+            ..AdminConfig::default()
+        };
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.http_redirect_port, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_http_redirect_port_is_fatal() {
+        let _g = set_env(ENV_ADMIN_HTTP_REDIRECT_PORT, "not-a-port");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        assert!(format!("{err:#}").contains("TOKI_ADMIN_HTTP_REDIRECT_PORT"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_ttl_is_fatal() {
+        let _g = set_env(ENV_ADMIN_SESSION_TTL_HOURS, "-5");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        assert!(format!("{err:#}").contains("TOKI_ADMIN_SESSION_TTL_HOURS"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn data_dir_defaults_to_dot_when_env_unset() {
+        std::env::remove_var(ENV_DATA_DIR);
+        assert_eq!(data_dir(), PathBuf::from("."));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn data_dir_honours_env_override() {
+        let _g = set_env(ENV_DATA_DIR, "/var/lib/toki");
+        assert_eq!(data_dir(), PathBuf::from("/var/lib/toki"));
+    }
+
+    #[test]
+    fn resolve_under_keeps_absolute_paths() {
+        // Absolute paths from the operator stay untouched — the
+        // data-dir prefix is for relative defaults only, so a TLS
+        // cert pointed at `/etc/letsencrypt/...` doesn't accidentally
+        // get rewritten to `./etc/letsencrypt/...`.
+        let abs = Path::new("/etc/letsencrypt/cert.pem");
+        assert_eq!(resolve_under(Path::new("/var/lib/toki"), abs), abs);
+    }
+
+    #[test]
+    fn resolve_under_prefixes_relative_paths() {
+        let rel = Path::new("admin.db");
+        assert_eq!(
+            resolve_under(Path::new("/var/lib/toki"), rel),
+            PathBuf::from("/var/lib/toki/admin.db")
+        );
     }
 
     #[test]

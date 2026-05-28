@@ -22,28 +22,32 @@ use tracing::info;
 
 use toki_proto::v1::{event, Event, MemberLeft, PttEvent};
 
+use crate::server_config::SharedServerConfig;
 use crate::state::SharedRegistry;
 
-/// How long a client may go without sending a UDP packet before we evict
-/// them. The client's keepalive runs every 3 s, so 10 s tolerates two
-/// missed keepalives plus jitter.
-pub const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// How often the reaper scans. Should be well below `TIMEOUT` so eviction
-/// happens promptly after the deadline passes.
+/// How often the reaper scans. Should be well below the eviction
+/// timeout so eviction happens promptly after the deadline passes.
+/// We keep this hardcoded — adjusting tick frequency from the admin
+/// UI would muddy "how often" with "how aggressive", and operators
+/// almost never want anything other than ~2 s.
 pub const INTERVAL: Duration = Duration::from_secs(2);
 
-pub async fn run(registry: SharedRegistry) {
-    info!(timeout = ?TIMEOUT, interval = ?INTERVAL, "heartbeat reaper running");
+pub async fn run(registry: SharedRegistry, server_config: SharedServerConfig) {
+    info!(interval = ?INTERVAL, "heartbeat reaper running");
     let mut ticker = tokio::time::interval(INTERVAL);
     ticker.tick().await; // consume the immediate first tick
     loop {
         ticker.tick().await;
-        reap_once(&registry).await;
+        // Read the operator-configured idle threshold *per tick* so a
+        // live update via the admin UI takes effect on the next scan
+        // — at the cost of one extra RwLock read every 2 s, which is
+        // unmeasurable.
+        let timeout = Duration::from_secs(server_config.read().await.idle_kick_secs as u64);
+        reap_once(&registry, timeout).await;
     }
 }
 
-async fn reap_once(registry: &SharedRegistry) {
+async fn reap_once(registry: &SharedRegistry, timeout: Duration) {
     // Do all the registry mutation in a single critical section, and
     // collect the broadcast work to do once the lock is released. tx.send
     // on an mpsc channel can in principle .await on a full buffer, which
@@ -55,7 +59,7 @@ async fn reap_once(registry: &SharedRegistry) {
         let stale_ids: Vec<String> = r
             .clients
             .iter()
-            .filter(|(_, c)| now.duration_since(c.last_seen) > TIMEOUT)
+            .filter(|(_, c)| now.duration_since(c.last_seen) > timeout)
             .map(|(id, _)| id.clone())
             .collect();
 

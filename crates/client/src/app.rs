@@ -22,7 +22,7 @@ use crate::audio::{
     self, AudioControl, AudioDevices, AudioGains, AudioLevels, AudioSpectrum, BeepParams,
     BeepPreset,
 };
-use crate::config::{self, HotkeyConfig};
+use crate::config::{self, HotkeyBinding};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -105,6 +105,9 @@ pub struct TokiApp {
     config: config::Config,
     hotkey: InstalledHotkey,
     recording: bool,
+    /// Which binding the in-progress recording will write to when the
+    /// poller captures a key. Meaningful only while `recording`.
+    recording_target: RecordTarget,
 
     audio_devices: AudioDevices,
     audio_control: AudioControl,
@@ -191,6 +194,50 @@ pub struct TokiApp {
     /// each effect's period. Cheaper than maintaining N parallel phase
     /// accumulators and avoids float-drift over long sessions.
     start_time: Instant,
+    /// Press/hold tracking for the four M1–M4 memory buttons, indexed
+    /// 0..4. Latched so a single-frame flicker of egui's hit-test
+    /// (see the PTT button's note) doesn't reset an in-progress hold.
+    mem_press: [MemPress; 4],
+}
+
+/// In-flight press gesture on a single memory button. A short left
+/// release recalls/saves; a held left press (≥ [`MEM_HOLD`]) overwrites;
+/// a held right press frees. Each side latches on press-start and only
+/// resolves when its global mouse button goes up, so it survives the
+/// transient `is_pointer_button_down_on()` flicker documented on the
+/// PTT handler.
+#[derive(Default, Clone, Copy)]
+struct MemPress {
+    /// When the left button went down on this widget, if it's down.
+    primary_since: Option<Instant>,
+    /// Whether the long-press overwrite already fired this gesture, so
+    /// the subsequent release doesn't *also* fire the short-click recall.
+    primary_fired: bool,
+    /// When the right button went down on this widget, if it's down.
+    secondary_since: Option<Instant>,
+    /// Whether the long-press free already fired this gesture.
+    secondary_fired: bool,
+}
+
+/// How long either mouse button must be held on a memory button before
+/// the hold gesture (overwrite on left, free on right) fires. Short
+/// enough to feel responsive, long enough that an ordinary click never
+/// trips it.
+const MEM_HOLD: Duration = Duration::from_millis(450);
+
+/// Which binding an in-progress key-capture session will write to.
+/// The poller is target-agnostic (it just captures the next held
+/// input); the app decides where the captured value lands.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecordTarget {
+    /// The push-to-talk trigger.
+    Ptt,
+    /// Memory-recall hotkey for preset slot `0..4`.
+    Memory(usize),
+    /// Tune one channel up.
+    FreqUp,
+    /// Tune one channel down.
+    FreqDown,
 }
 
 impl TokiApp {
@@ -237,7 +284,12 @@ impl TokiApp {
             );
             Some(hotkey::Input::Key(hotkey::DEFAULT_KEY))
         });
-        let installed = hotkey::install(cmd_tx.clone(), initial);
+        let installed = hotkey::install(
+            cmd_tx.clone(),
+            initial,
+            config.hotkey.memory_inputs(),
+            config.hotkey.freq_inputs(),
+        );
 
         // Seed the channel index from the saved frequency. If the
         // string is bogus, fall back to the middle of the band.
@@ -267,6 +319,7 @@ impl TokiApp {
             config,
             hotkey: installed,
             recording: false,
+            recording_target: RecordTarget::Ptt,
             audio_devices: devices,
             audio_control: control,
             audio_gains: gains,
@@ -291,6 +344,7 @@ impl TokiApp {
             last_tick: Instant::now(),
             wave_phase: 0.0,
             start_time: Instant::now(),
+            mem_press: [MemPress::default(); 4],
         }
     }
 
@@ -1114,17 +1168,53 @@ impl eframe::App for TokiApp {
         // pending moves back into the local state mid-debounce.
         self.sync_tuner_to_server(&snap);
 
-        // ── Recording: poll the rdev/device_query listener ──────────
+        // ── Recording: poll the device_query listener for a capture ──
         if self.recording {
             if let Some(input) = self.hotkey.take_recorded() {
-                if let Err(e) = self.hotkey.rebind(input) {
-                    tracing::warn!(error = %e, "rebind failed");
-                } else {
-                    self.config.hotkey = HotkeyConfig::from_input(input);
-                    self.config.save();
+                match self.recording_target {
+                    RecordTarget::Ptt => {
+                        if let Err(e) = self.hotkey.rebind(input) {
+                            tracing::warn!(error = %e, "PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_ptt(input);
+                            self.config.save();
+                        }
+                    }
+                    RecordTarget::Memory(i) => {
+                        self.hotkey.rebind_memory(i, Some(input));
+                        self.config
+                            .hotkey
+                            .set_memory(i, HotkeyBinding::from_input(input));
+                        self.config.save();
+                    }
+                    RecordTarget::FreqUp => {
+                        self.hotkey.rebind_freq(true, Some(input));
+                        self.config.hotkey.freq_up = HotkeyBinding::from_input(input);
+                        self.config.save();
+                    }
+                    RecordTarget::FreqDown => {
+                        self.hotkey.rebind_freq(false, Some(input));
+                        self.config.hotkey.freq_down = HotkeyBinding::from_input(input);
+                        self.config.save();
+                    }
                 }
                 self.recording = false;
             }
+        }
+
+        // ── Action hotkeys: apply edges the poller queued ───────────
+        // Gated like the chevrons / on-screen M-buttons: only act when
+        // connected and not mid-transmission. We still drain the queues
+        // when gated so events don't pile up.
+        let recalls = self.hotkey.take_recalls();
+        let freq_delta = self.hotkey.take_freq_delta();
+        let can_switch =
+            matches!(snap.connection, ConnState::Connected) && !matches!(st, RadioState::Tx);
+        if can_switch {
+            for i in recalls {
+                self.recall_memory(i);
+            }
+            self.step_frequency(freq_delta);
         }
 
         // ── TX timer ────────────────────────────────────────────────
@@ -1175,7 +1265,18 @@ impl eframe::App for TokiApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::NONE.fill(T::SHELL).inner_margin(16.0))
                     .show(child_ctx, |ui| {
-                        self.paint_settings_window(ui);
+                        // Wrap the settings tree in a vertical scroll
+                        // area so the (now fairly tall) PTT + memory +
+                        // tuning + audio + beeps sections stay reachable
+                        // even when the window is shorter than the
+                        // content. `auto_shrink([false; 2])` lets the
+                        // area fill the panel width so rows don't reflow
+                        // narrower than the window.
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false; 2])
+                            .show(ui, |ui| {
+                                self.paint_settings_window(ui);
+                            });
                     });
                 // Honor the OS close button (red dot / X / window menu).
                 if child_ctx.input(|i| i.viewport().close_requested()) {
@@ -1596,10 +1697,18 @@ impl TokiApp {
         let freq_galley =
             painter.layout_no_wrap(freq_text.clone(), freq_font.clone(), active_color);
         let block_w = freq_galley.size().x + unit_advance;
-        // Vertically center between the top edge (after activity-dot
-        // row) and the chevron row (≈ bottom edge minus 18 px).
+        // Bottom of the panel now stacks two rows: the chevron row,
+        // and below it the M1–M4 memory row hugging the bottom edge.
+        // Compute their geometry up front so the frequency readout can
+        // center itself in whatever vertical band is left above them.
+        let mem_h = 18.0;
+        let mem_top = rect.bottom() - pad_y - mem_h;
+        let chev_h = 24.0;
+        let chev_cy = mem_top - 6.0 - chev_h / 2.0;
+        // Vertically center the readout between the top edge (after the
+        // activity-dot row) and the chevron row.
         let band_top = rect.top() + pad_y + 14.0;
-        let band_bot = rect.bottom() - pad_y - 22.0;
+        let band_bot = chev_cy - chev_h / 2.0 - 6.0;
         let center_y = (band_top + band_bot) * 0.5;
         let freq_left = rect.left() + (rect.width() - block_w) * 0.5;
         glow_text(
@@ -1633,15 +1742,13 @@ impl TokiApp {
         let _ = baseline_y;
 
         // ── Chevron row (no label between them) ────────────────────
-        let bottom_y = rect.bottom() - pad_y - 16.0;
         let chev_w = 56.0;
-        let chev_h = 28.0;
         let left_chev = Rect::from_min_size(
-            Pos2::new(rect.left() + pad_x, bottom_y - chev_h / 2.0),
+            Pos2::new(rect.left() + pad_x, chev_cy - chev_h / 2.0),
             Vec2::new(chev_w, chev_h),
         );
         let right_chev = Rect::from_min_size(
-            Pos2::new(rect.right() - pad_x - chev_w, bottom_y - chev_h / 2.0),
+            Pos2::new(rect.right() - pad_x - chev_w, chev_cy - chev_h / 2.0),
             Vec2::new(chev_w, chev_h),
         );
 
@@ -1672,6 +1779,234 @@ impl TokiApp {
         if prev_idx != self.channel_idx {
             self.schedule_frequency_change();
         }
+
+        // ── Memory row (M1–M4 quick-recall presets) ────────────────
+        let usable_l = rect.left() + pad_x;
+        let usable_r = rect.right() - pad_x;
+        let gap = 6.0;
+        let btn_w = (usable_r - usable_l - 3.0 * gap) / 4.0;
+        for i in 0..4 {
+            let bx = usable_l + i as f32 * (btn_w + gap);
+            let brect = Rect::from_min_size(Pos2::new(bx, mem_top), Vec2::new(btn_w, mem_h));
+            self.memory_button(ui, painter, brect, i, can_switch);
+        }
+    }
+
+    /// Switch the tuner to memory preset `i`'s saved frequency, if the
+    /// slot holds a valid one. Shared by the on-screen M-button recall
+    /// and the M1–M4 hotkeys. Callers are responsible for gating on
+    /// "can switch" (connected, not transmitting) — this just moves the
+    /// dial and schedules the debounced `ChangeFrequency`.
+    fn recall_memory(&mut self, i: usize) {
+        if let Some(label) = self.config.memory.slots().get(i).and_then(|s| s.clone()) {
+            if let Some(idx) = T::channel_of_label(&label) {
+                if idx != self.channel_idx {
+                    self.channel_idx = idx;
+                    self.schedule_frequency_change();
+                }
+            }
+        }
+    }
+
+    /// Step the tuner by `delta` channels (positive = up), wrapping at
+    /// the band edges exactly like the ◀ ▶ chevrons. Used by the tune
+    /// up/down hotkeys. A zero delta is a no-op.
+    fn step_frequency(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+        let n = T::FREQ_CHANNEL_COUNT as i32;
+        let next = (((self.channel_idx as i32 + delta) % n) + n) % n;
+        let next = next as usize;
+        if next != self.channel_idx {
+            self.channel_idx = next;
+            self.schedule_frequency_change();
+        }
+    }
+
+    /// Paint and handle one M1–M4 memory button.
+    ///
+    /// Gestures (all latched in `self.mem_press[i]` so an egui hit-test
+    /// flicker mid-hold doesn't reset them):
+    ///   * **Left click** — empty slot saves the current frequency;
+    ///     a filled slot recalls it (switches the tuner). Recall is
+    ///     gated on `can_switch`, exactly like the chevrons.
+    ///   * **Left hold** (≥ `MEM_HOLD`) — overwrite the slot with the
+    ///     current frequency, even if it was already set.
+    ///   * **Right hold** (≥ `MEM_HOLD`) — free the slot.
+    ///
+    /// A filled slot pulses in the amber memory color so it's instantly
+    /// distinguishable from an empty (dim, static) one.
+    fn memory_button(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        i: usize,
+        can_switch: bool,
+    ) {
+        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
+        let now = Instant::now();
+        let (primary_down, secondary_down) =
+            ui.input(|inp| (inp.pointer.primary_down(), inp.pointer.secondary_down()));
+        let started_here = resp.is_pointer_button_down_on();
+
+        let saved = self.config.memory.slots()[i].clone();
+        let current_label = T::frequency_label(T::frequency_of(self.channel_idx));
+
+        // What the gesture resolves to this frame; applied after the
+        // borrow of `self.mem_press[i]` ends.
+        enum Act {
+            None,
+            Save,   // write current_label into slot i
+            Recall, // switch the tuner to the saved frequency
+            Free,   // clear slot i
+        }
+        let mut act = Act::None;
+
+        {
+            let mp = &mut self.mem_press[i];
+
+            // ── Left (primary): click = save/recall, hold = overwrite.
+            if mp.primary_since.is_some() {
+                if primary_down {
+                    let held = now.duration_since(mp.primary_since.unwrap());
+                    if !mp.primary_fired && held >= MEM_HOLD {
+                        mp.primary_fired = true;
+                        act = Act::Save; // overwrite
+                    }
+                } else {
+                    // Released. A clean (non-hold) release is the
+                    // short-click: save when empty, recall when filled.
+                    if !mp.primary_fired {
+                        act = if saved.is_some() {
+                            Act::Recall
+                        } else {
+                            Act::Save
+                        };
+                    }
+                    mp.primary_since = None;
+                    mp.primary_fired = false;
+                }
+            } else if started_here && primary_down && !secondary_down {
+                mp.primary_since = Some(now);
+                mp.primary_fired = false;
+            }
+
+            // ── Right (secondary): hold = free. Plain right-click does
+            // nothing (freeing is destructive, so we require the hold).
+            if mp.secondary_since.is_some() {
+                if secondary_down {
+                    let held = now.duration_since(mp.secondary_since.unwrap());
+                    if !mp.secondary_fired && held >= MEM_HOLD {
+                        mp.secondary_fired = true;
+                        act = Act::Free;
+                    }
+                } else {
+                    mp.secondary_since = None;
+                    mp.secondary_fired = false;
+                }
+            } else if started_here && secondary_down && !primary_down {
+                mp.secondary_since = Some(now);
+                mp.secondary_fired = false;
+            }
+        }
+
+        match act {
+            Act::Save => {
+                self.config.memory.set(i, Some(current_label.clone()));
+                self.config.save();
+            }
+            Act::Free => {
+                self.config.memory.set(i, None);
+                self.config.save();
+            }
+            Act::Recall => {
+                if can_switch {
+                    self.recall_memory(i);
+                }
+            }
+            Act::None => {}
+        }
+
+        // ── Paint ───────────────────────────────────────────────────
+        // State priority (highest first):
+        //   * erase-hold  → grey & dark (you're about to free it)
+        //   * save-hold   → strong amber (you're about to write it)
+        //   * on this freq→ green (the tuner is sitting on this preset)
+        //   * saved       → gentle amber pulse
+        //   * empty       → dim, static
+        let filled = saved.is_some();
+        let on_this = filled && saved.as_deref() == Some(current_label.as_str());
+        let (primary_holding, secondary_holding) = {
+            let mp = &self.mem_press[i];
+            (mp.primary_since.is_some(), mp.secondary_since.is_some())
+        };
+
+        let t = ui.input(|inp| inp.time) as f32;
+        let pulse = 0.5 + 0.5 * (t * 3.6).sin();
+        let radius = CornerRadius::same(T::RADIUS_CHEVRON as u8);
+
+        let (border, text_col) = if secondary_holding {
+            // Erasing: shift dark + grey while the right button is held.
+            painter.rect_filled(
+                rect,
+                radius,
+                Color32::from_rgba_unmultiplied(0x00, 0x00, 0x00, 150),
+            );
+            (T::INK_DIM, T::INK_DIM)
+        } else if primary_holding {
+            // Saving/overwriting: a strong, breathing amber wash.
+            let a = (110.0 + 60.0 * pulse) as u8;
+            painter.rect_filled(
+                rect,
+                radius,
+                Color32::from_rgba_unmultiplied(0xff, 0xba, 0x4d, a),
+            );
+            (T::TX, T::TX)
+        } else if on_this {
+            // The tuner is currently parked on this preset → green.
+            let a = (26.0 + 46.0 * pulse) as u8;
+            painter.rect_filled(
+                rect,
+                radius,
+                Color32::from_rgba_unmultiplied(0x7f, 0xff, 0x90, a),
+            );
+            (T::PRIMARY, T::PRIMARY)
+        } else if filled {
+            // Saved but not the current channel → amber pulse.
+            let a = (26.0 + 46.0 * pulse) as u8;
+            painter.rect_filled(
+                rect,
+                radius,
+                Color32::from_rgba_unmultiplied(0xff, 0xba, 0x4d, a),
+            );
+            (T::TX, T::TX)
+        } else {
+            // Empty.
+            (T::INK_MUTE, T::INK_DIM)
+        };
+
+        painter.rect(
+            rect,
+            radius,
+            Color32::TRANSPARENT,
+            Stroke::new(1.0, border),
+            StrokeKind::Inside,
+        );
+        let label = match i {
+            0 => "M1",
+            1 => "M2",
+            2 => "M3",
+            _ => "M4",
+        };
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            label,
+            font_mono(10.0),
+            text_col,
+        );
     }
 
     /// Greyed-out chevron when the user can't change frequency (TX
@@ -2809,17 +3144,25 @@ impl TokiApp {
     //
     // Server URL / callsign / connect / disconnect live on the strip
     // and in the dedicated Connect dialog, not here.
-    fn paint_settings_window(&mut self, ui: &mut egui::Ui) {
-        ui.style_mut().visuals.override_text_color = Some(T::INK);
+    /// One key-binding row in Settings, shared by the PTT trigger and
+    /// the four memory-recall hotkeys. While recording *this* target it
+    /// shows the hold-progress bar + CANCEL; otherwise it shows the
+    /// current binding plus BIND (and, for memory slots, CLEAR to
+    /// unbind). Only one recording can be in flight at a time — pressing
+    /// BIND on a different row cancels the previous capture.
+    fn bind_row(&mut self, ui: &mut egui::Ui, label: &str, target: RecordTarget) {
+        let current = match target {
+            RecordTarget::Ptt => self.config.hotkey.to_input(),
+            RecordTarget::Memory(i) => self.config.hotkey.memory(i).to_input(),
+            RecordTarget::FreqUp => self.config.hotkey.freq_up.to_input(),
+            RecordTarget::FreqDown => self.config.hotkey.freq_down.to_input(),
+        }
+        .map(hotkey::format);
 
-        section_header(ui, "CUSTOMIZATION");
-
-        settings_row(ui, "PTT", |ui| {
-            if self.recording {
+        settings_row(ui, label, |ui| {
+            if self.recording && self.recording_target == target {
                 let progress = self.hotkey.hold_progress();
                 ui.colored_label(T::TX, "hold a key for 1s…");
-                // Slim progress bar — fills as the user holds. Resets
-                // to 0 the moment they release before the 1 s threshold.
                 ui.add(
                     egui::ProgressBar::new(progress)
                         .desired_width(80.0)
@@ -2831,18 +3174,69 @@ impl TokiApp {
                     self.hotkey.cancel_recording();
                 }
             } else {
-                let label = self
-                    .config
-                    .hotkey
-                    .to_input()
-                    .map(hotkey::format)
-                    .unwrap_or_else(|| "(none)".into());
-                ui.monospace(label);
-                if ui.button("BIND").clicked() && self.hotkey.start_recording() {
-                    self.recording = true;
+                ui.monospace(current.clone().unwrap_or_else(|| "(none)".into()));
+                if ui.button("BIND").clicked() {
+                    // Cancel any capture already in flight on another row
+                    // so two rows can't both think they're recording.
+                    if self.recording {
+                        self.hotkey.cancel_recording();
+                    }
+                    if self.hotkey.start_recording() {
+                        self.recording = true;
+                        self.recording_target = target;
+                    }
+                }
+                // The action hotkeys are optional, so offer an explicit
+                // unbind. (PTT has no CLEAR — there's always meant to be
+                // a transmit trigger.)
+                if !matches!(target, RecordTarget::Ptt)
+                    && current.is_some()
+                    && ui.button("CLEAR").clicked()
+                {
+                    match target {
+                        RecordTarget::Memory(i) => {
+                            self.hotkey.rebind_memory(i, None);
+                            self.config.hotkey.set_memory(i, HotkeyBinding::default());
+                        }
+                        RecordTarget::FreqUp => {
+                            self.hotkey.rebind_freq(true, None);
+                            self.config.hotkey.freq_up = HotkeyBinding::default();
+                        }
+                        RecordTarget::FreqDown => {
+                            self.hotkey.rebind_freq(false, None);
+                            self.config.hotkey.freq_down = HotkeyBinding::default();
+                        }
+                        RecordTarget::Ptt => {}
+                    }
+                    self.config.save();
                 }
             }
         });
+    }
+
+    fn paint_settings_window(&mut self, ui: &mut egui::Ui) {
+        ui.style_mut().visuals.override_text_color = Some(T::INK);
+
+        section_header(ui, "CUSTOMIZATION");
+
+        self.bind_row(ui, "PTT", RecordTarget::Ptt);
+
+        ui.add_space(14.0);
+        section_header(ui, "MEMORY HOTKEYS");
+        for i in 0..4 {
+            let label = match i {
+                0 => "RECALL M1",
+                1 => "RECALL M2",
+                2 => "RECALL M3",
+                _ => "RECALL M4",
+            };
+            self.bind_row(ui, label, RecordTarget::Memory(i));
+        }
+
+        ui.add_space(14.0);
+        section_header(ui, "TUNING HOTKEYS");
+        self.bind_row(ui, "FREQ UP", RecordTarget::FreqUp);
+        self.bind_row(ui, "FREQ DOWN", RecordTarget::FreqDown);
 
         ui.add_space(14.0);
         section_header(ui, "AUDIO");

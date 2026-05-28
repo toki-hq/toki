@@ -23,6 +23,54 @@ pub struct Config {
     pub connection: ConnectionConfig,
     #[serde(default)]
     pub beeps: BeepConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+/// Four quick-recall frequency presets (M1–M4), persisted across
+/// restarts like a real radio's memory channels. Each slot holds a
+/// canonical frequency label (e.g. `"446.05"`) or is absent when the
+/// slot is free.
+///
+/// Stored as four individually-optional keys rather than an array
+/// because TOML can't represent a null array element — an empty slot
+/// is simply an omitted key, and `skip_serializing_if` keeps the
+/// written file clean (no `m3 = ""` noise for unused presets).
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct MemoryConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m1: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m2: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m3: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m4: Option<String>,
+}
+
+impl MemoryConfig {
+    /// The four slots as a positional array of clones, for indexed
+    /// access in the UI (`slots()[i]`).
+    pub fn slots(&self) -> [Option<String>; 4] {
+        [
+            self.m1.clone(),
+            self.m2.clone(),
+            self.m3.clone(),
+            self.m4.clone(),
+        ]
+    }
+
+    /// Set slot `i` (0-based) to `value`. Out-of-range indices are a
+    /// no-op — callers only ever pass 0..4.
+    pub fn set(&mut self, i: usize, value: Option<String>) {
+        match i {
+            0 => self.m1 = value,
+            1 => self.m2 = value,
+            2 => self.m3 = value,
+            3 => self.m4 = value,
+            _ => {}
+        }
+    }
 }
 
 /// Customizable "roger beeps" — the short tones the radio plays
@@ -208,6 +256,96 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_slots_round_trip_through_toml() {
+        // Two slots set, two empty. Empty slots must be omitted from
+        // the serialized form (TOML can't hold nulls), and a reparse
+        // must recover the same positional layout.
+        let mut m = MemoryConfig::default();
+        m.set(0, Some("446.05".into()));
+        m.set(2, Some("447.50".into()));
+
+        let toml_str = toml::to_string(&m).unwrap();
+        assert!(toml_str.contains("m1 = \"446.05\""));
+        assert!(toml_str.contains("m3 = \"447.50\""));
+        // Empty slots omitted entirely.
+        assert!(!toml_str.contains("m2"));
+        assert!(!toml_str.contains("m4"));
+
+        let back: MemoryConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(
+            back.slots(),
+            [
+                Some("446.05".to_string()),
+                None,
+                Some("447.50".to_string()),
+                None
+            ]
+        );
+    }
+
+    #[test]
+    fn memory_defaults_to_all_empty() {
+        let m = MemoryConfig::default();
+        assert_eq!(m.slots(), [None, None, None, None]);
+        // A config with no [memory] table still parses.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.memory.slots(), [None, None, None, None]);
+    }
+
+    #[test]
+    fn memory_hotkeys_round_trip_and_default_unbound() {
+        use crate::hotkey::{Input, MouseButton};
+        let mut hk = HotkeyConfig::default();
+        // Bind M1 to a key, M3 to a mouse button; leave M2/M4 unbound.
+        hk.set_memory(0, HotkeyBinding::from_input(Input::Key(Code::F1)));
+        hk.set_memory(
+            2,
+            HotkeyBinding::from_input(Input::Mouse(MouseButton::Middle)),
+        );
+
+        let inputs = hk.memory_inputs();
+        assert_eq!(inputs[0], Some(Input::Key(Code::F1)));
+        assert_eq!(inputs[1], None);
+        assert_eq!(inputs[2], Some(Input::Mouse(MouseButton::Middle)));
+        assert_eq!(inputs[3], None);
+
+        // Survives a serialize → parse round-trip.
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.memory_inputs(), inputs);
+    }
+
+    #[test]
+    fn freq_hotkeys_round_trip() {
+        use crate::hotkey::Input;
+        let mut hk = HotkeyConfig::default();
+        // Unbound by default.
+        assert_eq!(hk.freq_inputs(), [None, None]);
+
+        hk.freq_up = HotkeyBinding::from_input(Input::Key(Code::Equal));
+        hk.freq_down = HotkeyBinding::from_input(Input::Key(Code::Minus));
+        assert_eq!(
+            hk.freq_inputs(),
+            [Some(Input::Key(Code::Equal)), Some(Input::Key(Code::Minus))]
+        );
+
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.freq_inputs(), hk.freq_inputs());
+    }
+
+    #[test]
+    fn set_ptt_preserves_memory_bindings() {
+        use crate::hotkey::Input;
+        let mut hk = HotkeyConfig::default();
+        hk.set_memory(1, HotkeyBinding::from_input(Input::Key(Code::F2)));
+        // Rebinding PTT must not clobber the M2 hotkey.
+        hk.set_ptt(Input::Key(Code::KeyT));
+        assert_eq!(hk.key.as_deref(), Some("KeyT"));
+        assert_eq!(hk.memory_inputs()[1], Some(Input::Key(Code::F2)));
+    }
+
+    #[test]
     fn parse_legacy_server_accepts_bare_host_port() {
         assert_eq!(
             parse_legacy_server("127.0.0.1:50051"),
@@ -321,6 +459,63 @@ pub struct HotkeyConfig {
     /// `"Mouse4"`, …). `None` when the bound input is a keyboard key.
     #[serde(default)]
     pub mouse_button: Option<String>,
+    /// Optional global hotkeys that recall memory presets M1–M4. Each
+    /// is an independent [`HotkeyBinding`]; an unbound slot is an empty
+    /// (omitted) table. Pressing the bound key/button switches the
+    /// tuner to that preset's saved frequency, exactly as a left-click
+    /// on the on-screen M-button would.
+    #[serde(default)]
+    pub m1: HotkeyBinding,
+    #[serde(default)]
+    pub m2: HotkeyBinding,
+    #[serde(default)]
+    pub m3: HotkeyBinding,
+    #[serde(default)]
+    pub m4: HotkeyBinding,
+    /// Optional global hotkeys that step the tuner one channel up /
+    /// down — the keyboard equivalent of the ◀ ▶ chevrons. Unbound by
+    /// default.
+    #[serde(default)]
+    pub freq_up: HotkeyBinding,
+    #[serde(default)]
+    pub freq_down: HotkeyBinding,
+}
+
+/// One key/mouse binding, in the same on-disk shape as the PTT binding
+/// (`key` xor `mouse_button`). Used for the four memory-recall hotkeys.
+/// Both fields `None` = unbound.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct HotkeyBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mouse_button: Option<String>,
+}
+
+impl HotkeyBinding {
+    /// Parse into an [`Input`], mouse-then-key like [`HotkeyConfig`].
+    /// `None` when unbound or unparseable.
+    pub fn to_input(&self) -> Option<crate::hotkey::Input> {
+        if let Some(label) = self.mouse_button.as_deref() {
+            return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
+        }
+        let code = Code::from_str(self.key.as_deref()?).ok()?;
+        Some(crate::hotkey::Input::Key(code))
+    }
+
+    /// Build from a captured [`Input`].
+    pub fn from_input(input: crate::hotkey::Input) -> Self {
+        match input {
+            crate::hotkey::Input::Key(code) => Self {
+                key: Some(code.to_string()),
+                mouse_button: None,
+            },
+            crate::hotkey::Input::Mouse(b) => Self {
+                key: None,
+                mouse_button: Some(b.label()),
+            },
+        }
+    }
 }
 
 fn default_key() -> Option<String> {
@@ -332,6 +527,12 @@ impl Default for HotkeyConfig {
         Self {
             key: Some("Backquote".into()),
             mouse_button: None,
+            m1: HotkeyBinding::default(),
+            m2: HotkeyBinding::default(),
+            m3: HotkeyBinding::default(),
+            m4: HotkeyBinding::default(),
+            freq_up: HotkeyBinding::default(),
+            freq_down: HotkeyBinding::default(),
         }
     }
 }
@@ -349,18 +550,57 @@ impl HotkeyConfig {
         Some(crate::hotkey::Input::Key(code))
     }
 
-    /// Serialize a single [`Input`] back into the on-disk form.
-    pub fn from_input(input: crate::hotkey::Input) -> Self {
+    /// Update the PTT binding in place, leaving the memory bindings
+    /// untouched.
+    pub fn set_ptt(&mut self, input: crate::hotkey::Input) {
         match input {
-            crate::hotkey::Input::Key(code) => Self {
-                key: Some(code.to_string()),
-                mouse_button: None,
-            },
-            crate::hotkey::Input::Mouse(b) => Self {
-                key: None,
-                mouse_button: Some(b.label()),
-            },
+            crate::hotkey::Input::Key(code) => {
+                self.key = Some(code.to_string());
+                self.mouse_button = None;
+            }
+            crate::hotkey::Input::Mouse(b) => {
+                self.key = None;
+                self.mouse_button = Some(b.label());
+            }
         }
+    }
+
+    /// Borrow the memory-recall binding for slot `i` (0..4).
+    pub fn memory(&self, i: usize) -> &HotkeyBinding {
+        match i {
+            0 => &self.m1,
+            1 => &self.m2,
+            2 => &self.m3,
+            _ => &self.m4,
+        }
+    }
+
+    /// Replace the memory-recall binding for slot `i` (0..4).
+    pub fn set_memory(&mut self, i: usize, b: HotkeyBinding) {
+        match i {
+            0 => self.m1 = b,
+            1 => self.m2 = b,
+            2 => self.m3 = b,
+            3 => self.m4 = b,
+            _ => {}
+        }
+    }
+
+    /// The four memory-recall bindings parsed into `Input`s, for
+    /// seeding the input poller at startup.
+    pub fn memory_inputs(&self) -> [Option<crate::hotkey::Input>; 4] {
+        [
+            self.m1.to_input(),
+            self.m2.to_input(),
+            self.m3.to_input(),
+            self.m4.to_input(),
+        ]
+    }
+
+    /// The tune up/down bindings parsed into `Input`s (`[up, down]`),
+    /// for seeding the poller at startup.
+    pub fn freq_inputs(&self) -> [Option<crate::hotkey::Input>; 2] {
+        [self.freq_up.to_input(), self.freq_down.to_input()]
     }
 }
 

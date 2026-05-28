@@ -169,6 +169,23 @@ pub struct InstalledHotkey {
     /// recording ends.
     hold_progress: Arc<AtomicU32>,
 
+    /// The four memory-recall bindings (M1–M4), `None` per slot when
+    /// unbound. The polling thread watches these for press edges and
+    /// pushes the slot index into `recalls`.
+    memory: Arc<Mutex<[Option<Input>; 4]>>,
+    /// Press-edge events for memory recalls, drained each frame by the
+    /// UI via [`InstalledHotkey::take_recalls`]. A queue rather than a
+    /// single slot so two quick presses can't be lost.
+    recalls: Arc<Mutex<Vec<usize>>>,
+
+    /// Tune up / down bindings (`[up, down]`), `None` per slot when
+    /// unbound. Watched for press edges like the memory hotkeys.
+    freq: Arc<Mutex<[Option<Input>; 2]>>,
+    /// Net pending tune steps: each up-press adds 1, each down-press
+    /// subtracts 1. The UI drains it via [`InstalledHotkey::take_freq_delta`]
+    /// and applies the net offset to the channel index in one go.
+    freq_delta: Arc<Mutex<i32>>,
+
     /// `true` once the polling thread has spawned. If it never starts,
     /// global PTT is unavailable on this system.
     available: bool,
@@ -183,6 +200,34 @@ impl InstalledHotkey {
         *self.current.lock().unwrap() = Some(input);
         info!(?input, "global PTT rebound");
         Ok(())
+    }
+
+    /// Set (or clear, with `None`) the memory-recall binding for slot
+    /// `i` (0..4). A no-op for out-of-range indices.
+    pub fn rebind_memory(&mut self, i: usize, input: Option<Input>) {
+        if i < 4 {
+            self.memory.lock().unwrap()[i] = input;
+            info!(slot = i, ?input, "memory hotkey rebound");
+        }
+    }
+
+    /// Drain any pending memory-recall events (slot indices) captured
+    /// since the last call. The UI applies each as a preset switch.
+    pub fn take_recalls(&self) -> Vec<usize> {
+        std::mem::take(&mut *self.recalls.lock().unwrap())
+    }
+
+    /// Set (or clear, with `None`) the tune-up (`up = true`) or
+    /// tune-down binding.
+    pub fn rebind_freq(&mut self, up: bool, input: Option<Input>) {
+        self.freq.lock().unwrap()[if up { 0 } else { 1 }] = input;
+        info!(up, ?input, "freq hotkey rebound");
+    }
+
+    /// Drain the net pending tune steps (positive = up). The UI steps
+    /// the channel index by this amount, with wraparound.
+    pub fn take_freq_delta(&self) -> i32 {
+        std::mem::take(&mut *self.freq_delta.lock().unwrap())
     }
 
     /// Begin recording the next press. The recorded press is captured
@@ -231,7 +276,12 @@ impl InstalledHotkey {
 /// Install PTT state and (unconditionally) spawn the polling thread.
 /// Unlike rdev, device_query polling is benign — it just queries OS
 /// state every 10 ms — so we don't need the lazy-spawn dance.
-pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> InstalledHotkey {
+pub fn install(
+    cmd_tx: UnboundedSender<Cmd>,
+    initial: Option<Input>,
+    initial_memory: [Option<Input>; 4],
+    initial_freq: [Option<Input>; 2],
+) -> InstalledHotkey {
     // Belt-and-braces: a hand-edited config could point at Space /
     // Enter / Escape even though the bind UI refuses to record them.
     // Drop the value silently — the user can rebind from the
@@ -243,10 +293,17 @@ pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> Installe
         }
         ok
     });
+    // Same restriction guard for the memory + freq hotkeys.
+    let initial_memory = initial_memory.map(|i| i.filter(|i| !is_restricted(*i)));
+    let initial_freq = initial_freq.map(|i| i.filter(|i| !is_restricted(*i)));
     let current = Arc::new(Mutex::new(initial));
     let recorded = Arc::new(Mutex::new(None));
     let recording = Arc::new(AtomicBool::new(false));
     let hold_progress = Arc::new(AtomicU32::new(0));
+    let memory = Arc::new(Mutex::new(initial_memory));
+    let recalls = Arc::new(Mutex::new(Vec::new()));
+    let freq = Arc::new(Mutex::new(initial_freq));
+    let freq_delta = Arc::new(Mutex::new(0));
 
     let available = spawn_poller(
         cmd_tx,
@@ -254,6 +311,10 @@ pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> Installe
         recorded.clone(),
         recording.clone(),
         hold_progress.clone(),
+        memory.clone(),
+        recalls.clone(),
+        freq.clone(),
+        freq_delta.clone(),
     );
 
     InstalledHotkey {
@@ -261,6 +322,10 @@ pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> Installe
         recorded,
         recording,
         hold_progress,
+        memory,
+        recalls,
+        freq,
+        freq_delta,
         available,
     }
 }
@@ -270,12 +335,17 @@ pub fn install(cmd_tx: UnboundedSender<Cmd>, initial: Option<Input>) -> Installe
 /// thread (rare, but seen on some Linux setups without X11) we catch
 /// it and log — the thread exits cleanly and `available` stays true
 /// at the API level, but no events will fire.
+#[allow(clippy::too_many_arguments)]
 fn spawn_poller(
     cmd_tx: UnboundedSender<Cmd>,
     current: Arc<Mutex<Option<Input>>>,
     recorded: Arc<Mutex<Option<Input>>>,
     recording: Arc<AtomicBool>,
     hold_progress: Arc<AtomicU32>,
+    memory: Arc<Mutex<[Option<Input>; 4]>>,
+    recalls: Arc<Mutex<Vec<usize>>>,
+    freq: Arc<Mutex<[Option<Input>; 2]>>,
+    freq_delta: Arc<Mutex<i32>>,
 ) -> bool {
     let build = thread::Builder::new().name("toki-input".into());
     let result = build.spawn(move || {
@@ -289,7 +359,18 @@ fn spawn_poller(
                 return;
             }
         };
-        run_poll_loop(ds, cmd_tx, current, recorded, recording, hold_progress);
+        run_poll_loop(
+            ds,
+            cmd_tx,
+            current,
+            recorded,
+            recording,
+            hold_progress,
+            memory,
+            recalls,
+            freq,
+            freq_delta,
+        );
     });
     match result {
         Ok(_) => {
@@ -303,6 +384,7 @@ fn spawn_poller(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_poll_loop(
     ds: DeviceState,
     cmd_tx: UnboundedSender<Cmd>,
@@ -310,10 +392,19 @@ fn run_poll_loop(
     recorded: Arc<Mutex<Option<Input>>>,
     recording: Arc<AtomicBool>,
     hold_progress: Arc<AtomicU32>,
+    memory: Arc<Mutex<[Option<Input>; 4]>>,
+    recalls: Arc<Mutex<Vec<usize>>>,
+    freq: Arc<Mutex<[Option<Input>; 2]>>,
+    freq_delta: Arc<Mutex<i32>>,
 ) {
     let mut prev_keys: HashSet<Keycode> = HashSet::new();
     let mut ptt_down = false;
     let mut was_recording = false;
+    // Previous-frame pressed state of each bound memory hotkey, for
+    // press-edge detection (we recall on the down edge only).
+    let mut mem_prev = [false; 4];
+    // Same, for the tune up/down hotkeys (`[up, down]`).
+    let mut freq_prev = [false; 2];
     // While recording, tracks the earliest-press timestamp for every
     // currently-held input. Cleared on entry into recording mode so
     // anything pressed *before* "Bind" doesn't get pre-credited.
@@ -433,6 +524,45 @@ fn run_poll_loop(
                         break;
                     }
                 }
+            }
+
+            // ── Action hotkeys: fire on the press edge ────────────
+            // `just_exited` primes the prev-state arrays on the first
+            // frame after a bind so the key the user was holding to
+            // bind doesn't immediately fire its own action.
+            let just_exited = was_recording;
+            let pressed_of = |slot: &Option<Input>| -> bool {
+                match slot {
+                    Some(Input::Key(code)) => {
+                        keys.iter().any(|kc| device_to_code(*kc) == Some(*code))
+                    }
+                    Some(Input::Mouse(b)) => mouse
+                        .button_pressed
+                        .get(b.to_index())
+                        .copied()
+                        .unwrap_or(false),
+                    None => false,
+                }
+            };
+
+            // Memory recalls.
+            let mem = *memory.lock().unwrap();
+            for (i, slot) in mem.iter().enumerate() {
+                let pressed = pressed_of(slot);
+                if pressed && !mem_prev[i] && !just_exited {
+                    recalls.lock().unwrap().push(i);
+                }
+                mem_prev[i] = pressed;
+            }
+
+            // Tune up/down: accumulate a net step delta (+up / -down).
+            let fr = *freq.lock().unwrap();
+            for (i, (slot, step)) in fr.iter().zip([1i32, -1i32]).enumerate() {
+                let pressed = pressed_of(slot);
+                if pressed && !freq_prev[i] && !just_exited {
+                    *freq_delta.lock().unwrap() += step;
+                }
+                freq_prev[i] = pressed;
             }
         }
 

@@ -110,10 +110,14 @@ pub struct RoomDto {
 pub struct MemberDto {
     pub id: String,
     pub display_name: String,
-    /// Seconds since the client's last UDP packet. The UI surfaces
-    /// this as "10s ago" so the operator can spot a near-zombie
-    /// before the reaper catches it.
-    pub last_seen_secs: u64,
+    /// Seconds since the client's gRPC `Register` call — i.e. how
+    /// long this session has been connected. Monotonic for the life
+    /// of the session; the UI renders it as `7s` / `2m 13s` / `1h 4m`
+    /// so operators see session age at a glance. We deliberately do
+    /// *not* surface `last_seen` here — that resets on every
+    /// keepalive (~1-2 s) and shows up in the UI as a confusing
+    /// flicker rather than a useful "idle for" indicator.
+    pub connected_secs: u64,
 }
 
 /// Body of `POST /api/login`.

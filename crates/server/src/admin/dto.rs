@@ -118,6 +118,13 @@ pub struct MemberDto {
     /// keepalive (~1-2 s) and shows up in the UI as a confusing
     /// flicker rather than a useful "idle for" indicator.
     pub connected_secs: u64,
+    /// `true` when this session is an elected *priority* speaker on
+    /// the room it's listed under (i.e. `client.priority_freq` equals
+    /// that room's frequency). The UI renders a badge and flips the
+    /// member action between "Promote to priority" and "Revoke
+    /// priority". Always `false` for lobby members — priority is
+    /// per-channel and a lobby member is on no channel.
+    pub priority: bool,
 }
 
 /// Body of `POST /api/login`.
@@ -138,6 +145,15 @@ pub struct MoveRequest {
 #[serde(rename_all = "camelCase")]
 pub struct RenameRequest {
     pub display_name: String,
+}
+
+/// Body of `POST /api/clients/:id/priority`.
+///
+/// `grant = true` elects the client as a priority speaker on their
+/// *current* channel (400 if they're not on one); `false` revokes.
+#[derive(Debug, Deserialize)]
+pub struct PriorityRequest {
+    pub grant: bool,
 }
 
 /// Body of `POST /api/account/password`.

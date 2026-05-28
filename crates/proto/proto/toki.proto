@@ -114,6 +114,15 @@ message PttEvent {
   string client_id = 1;
   bool pressed = 2;
   uint64 sequence = 3;
+  // True when the floor is being granted to a *priority* speaker on
+  // this channel — either because a priority member keyed up on an
+  // idle channel, or because they preempted a non-priority holder.
+  // Clients use this to play the distinctive two-tone priority roger
+  // instead of the normal acquire beep. Always false on release
+  // (pressed = false) and on ordinary non-priority grants. Defaults
+  // to false, so older clients simply treat priority traffic as a
+  // normal take-floor.
+  bool priority = 4;
 }
 
 message PttAck {}

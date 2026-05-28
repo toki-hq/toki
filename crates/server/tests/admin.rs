@@ -75,6 +75,7 @@ fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         current_frequency: freq.map(str::to_string),
         last_seen: Instant::now(),
         connected_at: Instant::now(),
+        priority_freq: None,
         expected_ip: None,
     }
 }
@@ -96,6 +97,28 @@ fn extract_session_cookie(set_cookie: &str) -> Option<String> {
     let first = set_cookie.split(';').next()?;
     let (k, v) = first.split_once('=')?;
     (k.trim() == "toki_admin_session").then(|| format!("toki_admin_session={}", v.trim()))
+}
+
+/// Log in as `admin` with `pw` and return the session cookie header
+/// value. Folds the repeated login boilerplate the priority tests
+/// would otherwise duplicate.
+async fn login_cookie(app: &axum::Router, pw: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": "admin", "password": pw}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    extract_session_cookie(res.headers()["set-cookie"].to_str().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -830,6 +853,113 @@ async fn move_validates_frequency() {
                 .body(Body::from(
                     serde_json::json!({"frequency": "999.99"}).to_string(),
                 ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn priority_grant_then_revoke_reflected_in_snapshot() {
+    // Grant priority to a channel member, confirm the snapshot flips
+    // `priority` to true on the room they're in, then revoke and
+    // confirm it flips back.
+    let registry = shared_registry_with(
+        vec![mk_client("c1", "Alice", Some("446.05"))],
+        vec![(
+            "446.05",
+            Room {
+                members: vec!["c1".into()],
+                holder: None,
+            },
+        )],
+    );
+    let (app, pw) = boot(registry.clone()).await;
+    let cookie = login_cookie(&app, pw).await;
+
+    // Helper: fetch the snapshot's first-room first-member `priority`.
+    async fn first_member_priority(app: &axum::Router, cookie: &str) -> bool {
+        let res = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/state")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let snap: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        snap["rooms"][0]["members"][0]["priority"]
+            .as_bool()
+            .unwrap()
+    }
+
+    // Baseline: ordinary member.
+    assert!(!first_member_priority(&app, &cookie).await);
+
+    // Grant.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/clients/c1/priority")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"grant": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(first_member_priority(&app, &cookie).await);
+    // Registry now anchors the priority frequency.
+    assert_eq!(
+        registry.lock().await.clients["c1"].priority_freq.as_deref(),
+        Some("446.05")
+    );
+
+    // Revoke.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/clients/c1/priority")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"grant": false}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert!(!first_member_priority(&app, &cookie).await);
+    assert!(registry.lock().await.clients["c1"].priority_freq.is_none());
+}
+
+#[tokio::test]
+async fn priority_grant_on_lobby_member_is_400() {
+    // Priority is per-channel; a member sitting in the lobby (no
+    // current_frequency) can't be promoted.
+    let registry = shared_registry_with(vec![mk_client("c1", "Alice", None)], vec![]);
+    let (app, pw) = boot(registry).await;
+    let cookie = login_cookie(&app, pw).await;
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/clients/c1/priority")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"grant": true}).to_string()))
                 .unwrap(),
         )
         .await

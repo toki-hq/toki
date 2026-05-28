@@ -132,6 +132,7 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration) {
                 client_id: b.client_id.clone(),
                 pressed: false,
                 sequence: 0,
+                priority: false,
             })),
         });
         for tx in &b.recipients {

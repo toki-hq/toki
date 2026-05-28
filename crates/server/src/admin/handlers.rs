@@ -41,8 +41,8 @@ use super::auth::{
 };
 use super::db::{self as admin_db, now_unix};
 use super::dto::{
-    ApiError, ChangePasswordRequest, LoginRequest, MoveRequest, RenameRequest, ServerInfo,
-    Snapshot, UpdateServerConfigRequest, UpdateServerPasswordRequest,
+    ApiError, ChangePasswordRequest, LoginRequest, MoveRequest, PriorityRequest, RenameRequest,
+    ServerInfo, Snapshot, UpdateServerConfigRequest, UpdateServerPasswordRequest,
 };
 use super::sse::{build_sse_stream, snapshot_now};
 use super::AppState;
@@ -648,6 +648,7 @@ pub async fn kick(
             client_id: plan.client_id.clone(),
             pressed: false,
             sequence: 0,
+            priority: false,
         })),
     });
     for tx in plan.recipients {
@@ -793,6 +794,9 @@ pub async fn move_client(
                             client_id: holder_id.clone(),
                             pressed: true,
                             sequence: 0,
+                            // Move-to-frequency roster backfill: state
+                            // sync for the new room, not a priority grant.
+                            priority: false,
                         })),
                     })
                     .await;
@@ -897,6 +901,67 @@ pub async fn rename(
     for tx in plan.peer_recipients {
         let _ = tx.send(rename_evt.clone()).await;
     }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /api/clients/:id/priority`. Elects (or revokes) a client as
+/// a priority speaker on their *current* channel. Body:
+/// `{"grant": true|false}`.
+///
+/// Priority is per-channel + per-session (see `Client.priority_freq`):
+/// granting binds the elected frequency to whatever room the client is
+/// on *right now*, so a member must be on a channel to be promoted
+/// (400 otherwise). Revoking is idempotent and works regardless of
+/// where they are. No event is broadcast — connected clients learn a
+/// member's priority only at preemption time (via `PttEvent.priority`),
+/// and the admin UI reflects the change through the next SSE snapshot.
+pub async fn set_priority(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Extension(admin): Extension<AdminUser>,
+    Json(body): Json<PriorityRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let bound_freq = {
+        let mut registry = state.registry.lock().await;
+        let Some(client) = registry.clients.get_mut(&id) else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiError::new("client not found")),
+            ));
+        };
+
+        if body.grant {
+            // Bind priority to the room the client is on right now.
+            let Some(freq) = client.current_frequency.clone() else {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiError::new(
+                        "client is not on a channel; priority is per-channel",
+                    )),
+                ));
+            };
+            client.priority_freq = Some(freq.clone());
+            Some(freq)
+        } else {
+            client.priority_freq = None;
+            None
+        }
+    };
+
+    match &bound_freq {
+        Some(freq) => info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            frequency = %freq,
+            "admin granted priority",
+        ),
+        None => info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            "admin revoked priority",
+        ),
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 

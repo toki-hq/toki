@@ -91,6 +91,10 @@ pub async fn snapshot_now(
                     id: c.id.clone(),
                     display_name: c.display_name.clone(),
                     connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                    // Priority is per-channel: this member is a priority
+                    // speaker only if their elected frequency is the very
+                    // room we're listing them under.
+                    priority: c.priority_freq.as_deref() == Some(freq.as_str()),
                 })
                 .collect();
             RoomDto {
@@ -112,6 +116,9 @@ pub async fn snapshot_now(
             id: c.id.clone(),
             display_name: c.display_name.clone(),
             connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+            // Lobby members are on no channel, so priority (which is
+            // per-channel) is never effective here.
+            priority: false,
         })
         .collect();
 
@@ -165,6 +172,7 @@ mod tests {
             current_frequency: freq.map(str::to_string),
             last_seen: Instant::now(),
             connected_at: Instant::now(),
+            priority_freq: None,
             expected_ip: None,
         }
     }

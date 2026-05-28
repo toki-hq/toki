@@ -215,6 +215,9 @@ impl Signaling for SignalingSvc {
             audio_addr: None,
             events_tx: None,
             current_frequency: None,
+            // Ordinary member until an admin elects them via the
+            // panel's "promote to priority" action.
+            priority_freq: None,
             // Start the heartbeat clock at registration. The client will
             // refresh this within ~100 ms via its initial UDP keepalive,
             // and every 3 s thereafter.
@@ -331,6 +334,11 @@ impl Signaling for SignalingSvc {
                         client_id: holder_id,
                         pressed: true,
                         sequence: 0,
+                        // Roster backfill is state sync, not a live
+                        // takeover — never trigger the priority roger
+                        // on join even if the holder is a priority
+                        // speaker.
+                        priority: false,
                     })),
                 };
                 let _ = tx.send(backfill).await;
@@ -561,6 +569,8 @@ impl Signaling for SignalingSvc {
                                 client_id: holder_id,
                                 pressed: true,
                                 sequence: 0,
+                                // State-sync backfill — not a live grant.
+                                priority: false,
                             })),
                         })
                         .await;
@@ -601,7 +611,7 @@ impl Signaling for SignalingSvc {
         while let Some(evt) = stream.next().await {
             let evt = evt?;
 
-            let broadcast: Option<(bool, Vec<mpsc::Sender<Event>>)> = {
+            let broadcast: Option<(bool, bool, Vec<mpsc::Sender<Event>>)> = {
                 let mut registry = self.registry.lock().await;
 
                 let frequency = match registry
@@ -613,22 +623,43 @@ impl Signaling for SignalingSvc {
                     None => continue, // sender isn't in any room
                 };
 
-                let action = {
+                // Compute priority standing *before* the mutable room
+                // borrow so the borrow checker stays happy: a member is
+                // priority on this channel iff their `priority_freq`
+                // matches the room they're transmitting on.
+                let current_holder = registry
+                    .rooms
+                    .get(&frequency)
+                    .and_then(|r| r.holder.clone());
+                let sender_is_priority = registry
+                    .clients
+                    .get(&evt.client_id)
+                    .map(|c| c.priority_freq.as_deref() == Some(frequency.as_str()))
+                    .unwrap_or(false);
+                let holder_is_priority = current_holder
+                    .as_ref()
+                    .and_then(|h| registry.clients.get(h))
+                    .map(|c| c.priority_freq.as_deref() == Some(frequency.as_str()))
+                    .unwrap_or(false);
+
+                // `action` is `(pressed, priority)` — the second flag
+                // tells recipients to play the two-tone priority roger.
+                let action: Option<(bool, bool)> = {
                     let room = registry.rooms.entry(frequency.clone()).or_default();
-                    match (room.holder.as_deref(), evt.pressed) {
-                        (None, true) => {
-                            room.holder = Some(evt.client_id.clone());
-                            Some(true)
-                        }
-                        (Some(h), false) if h == evt.client_id => {
-                            room.holder = None;
-                            Some(false)
-                        }
-                        _ => None,
+                    let decision = ptt_decision(
+                        room.holder.as_deref(),
+                        holder_is_priority,
+                        &evt.client_id,
+                        evt.pressed,
+                        sender_is_priority,
+                    );
+                    if let Some(d) = &decision {
+                        room.holder = d.new_holder.clone();
                     }
+                    decision.map(|d| (d.pressed, d.priority))
                 };
 
-                action.map(|pressed| {
+                action.map(|(pressed, priority)| {
                     let member_ids: Vec<String> = registry
                         .rooms
                         .get(&frequency)
@@ -639,11 +670,11 @@ impl Signaling for SignalingSvc {
                         .filter_map(|id| registry.clients.get(id))
                         .filter_map(|c| c.events_tx.clone())
                         .collect();
-                    (pressed, recipients)
+                    (pressed, priority, recipients)
                 })
             };
 
-            let Some((pressed, recipients)) = broadcast else {
+            let Some((pressed, priority, recipients)) = broadcast else {
                 continue;
             };
 
@@ -652,6 +683,7 @@ impl Signaling for SignalingSvc {
                     client_id: evt.client_id.clone(),
                     pressed,
                     sequence: evt.sequence,
+                    priority,
                 })),
             };
 
@@ -660,6 +692,67 @@ impl Signaling for SignalingSvc {
             }
         }
         Ok(Response::new(PttAck {}))
+    }
+}
+
+/// Outcome of a single PTT arbitration step.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PttDecision {
+    /// The room's holder *after* applying this decision.
+    pub new_holder: Option<String>,
+    /// The `pressed` flag to broadcast (true = floor taken).
+    pub pressed: bool,
+    /// Whether to flag the broadcast as a priority grant (two-tone
+    /// roger on the clients).
+    pub priority: bool,
+}
+
+/// Pure walkie-talkie floor-arbitration decision. Extracted from
+/// [`SignalingSvc::push_to_talk`] so the (otherwise lock-bound)
+/// state machine is unit-testable in isolation.
+///
+/// Inputs are the *current* room holder, whether that holder is a
+/// priority speaker on this channel, and the incoming press from
+/// `sender` (with `sender_is_priority` likewise scoped to this
+/// channel). Returns `None` when the press changes nothing and should
+/// be ignored (denied grab, stray release, etc.).
+///
+/// Rules:
+///   * Idle channel + press → grant; flagged priority iff the sender
+///     is a priority speaker (so the channel hears the roger even on
+///     an uncontested take).
+///   * Holder releases their own floor → clear.
+///   * A *priority* sender pressing against a *non-priority* holder →
+///     **preempt**: seize the floor, flagged priority.
+///   * Everything else (non-priority grab of a held floor,
+///     priority-vs-priority — first-come wins, release by a
+///     non-holder) → ignored.
+pub(crate) fn ptt_decision(
+    holder: Option<&str>,
+    holder_is_priority: bool,
+    sender: &str,
+    pressed: bool,
+    sender_is_priority: bool,
+) -> Option<PttDecision> {
+    match (holder, pressed) {
+        (None, true) => Some(PttDecision {
+            new_holder: Some(sender.to_string()),
+            pressed: true,
+            priority: sender_is_priority,
+        }),
+        (Some(h), false) if h == sender => Some(PttDecision {
+            new_holder: None,
+            pressed: false,
+            priority: false,
+        }),
+        (Some(h), true) if h != sender && sender_is_priority && !holder_is_priority => {
+            Some(PttDecision {
+                new_holder: Some(sender.to_string()),
+                pressed: true,
+                priority: true,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -743,6 +836,7 @@ pub(crate) fn remove_from_room(
                 client_id: client_id.to_string(),
                 pressed: false,
                 sequence: 0,
+                priority: false,
             })),
         })
     } else {
@@ -756,4 +850,86 @@ pub(crate) fn remove_from_room(
         display_name,
         remaining,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ptt_decision, PttDecision};
+
+    fn grant(holder: &str, priority: bool) -> Option<PttDecision> {
+        Some(PttDecision {
+            new_holder: Some(holder.to_string()),
+            pressed: true,
+            priority,
+        })
+    }
+
+    #[test]
+    fn idle_press_grants_floor_non_priority() {
+        // Empty channel, ordinary member keys up → plain grant.
+        assert_eq!(
+            ptt_decision(None, false, "alice", true, false),
+            grant("alice", false)
+        );
+    }
+
+    #[test]
+    fn idle_press_by_priority_member_flags_priority() {
+        // Even on an uncontested take, a priority speaker's grant is
+        // flagged so the channel hears the priority roger.
+        assert_eq!(
+            ptt_decision(None, false, "alice", true, true),
+            grant("alice", true)
+        );
+    }
+
+    #[test]
+    fn holder_releases_own_floor() {
+        assert_eq!(
+            ptt_decision(Some("alice"), false, "alice", false, false),
+            Some(PttDecision {
+                new_holder: None,
+                pressed: false,
+                priority: false,
+            })
+        );
+    }
+
+    #[test]
+    fn non_priority_cannot_grab_held_floor() {
+        // Bob (ordinary) presses while Alice holds → denied.
+        assert_eq!(ptt_decision(Some("alice"), false, "bob", true, false), None);
+    }
+
+    #[test]
+    fn priority_preempts_non_priority_holder() {
+        // Bob is priority on this channel, Alice (holding) is not →
+        // Bob seizes the floor, flagged priority.
+        assert_eq!(
+            ptt_decision(Some("alice"), false, "bob", true, true),
+            grant("bob", true)
+        );
+    }
+
+    #[test]
+    fn priority_cannot_preempt_priority_holder_first_come_wins() {
+        // Both priority on this channel; Alice got there first, so
+        // Bob's press is denied — no cutting each other off.
+        assert_eq!(ptt_decision(Some("alice"), true, "bob", true, true), None);
+    }
+
+    #[test]
+    fn release_by_non_holder_is_ignored() {
+        // Bob releasing while Alice holds is a stray event → ignore.
+        assert_eq!(
+            ptt_decision(Some("alice"), false, "bob", false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn priority_holder_re_press_is_noop() {
+        // Alice (priority) already holds and presses again → no change.
+        assert_eq!(ptt_decision(Some("alice"), true, "alice", true, true), None);
+    }
 }

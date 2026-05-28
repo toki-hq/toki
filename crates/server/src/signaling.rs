@@ -14,6 +14,7 @@ use toki_proto::v1::{
     RegisterResponse,
 };
 
+use crate::server_config::SharedServerConfig;
 use crate::state::{hash_token, Client, Registry, SharedRegistry};
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
@@ -21,27 +22,37 @@ use crate::validation;
 pub struct SignalingSvc {
     registry: SharedRegistry,
     audio_endpoint: String,
-    /// `Some` if the server requires a shared-secret password.
-    /// Compared in constant time against the caller's
-    /// `RegisterRequest.password`. `None` means open mode — no auth.
-    password: Option<String>,
+    /// Bootstrap password from `config.toml`. When `Some`, it takes
+    /// precedence over the DB-stored `server_config.grpc_password`
+    /// — operators who set it in TOML have explicitly opted out of
+    /// runtime rotation via the admin panel. The admin UI knows
+    /// this via `ServerInfo.toml_password_override` and disables
+    /// its input accordingly.
+    toml_password: Option<String>,
     /// Per-source-IP rate cap and auth-failure backoff. Gates the
     /// `register` RPC; other RPCs are protected indirectly because
     /// they require a `client_id` minted by a successful register.
     throttle: IpThrottle,
+    /// Live handle on the runtime-mutable server settings. Read on
+    /// every Register call to honor the operator's current
+    /// `max_peers` ceiling and `grpc_password` (when no TOML
+    /// override) without requiring a restart on change.
+    server_config: SharedServerConfig,
 }
 
 impl SignalingSvc {
     pub fn new(
         registry: SharedRegistry,
         audio_endpoint: String,
-        password: Option<String>,
+        toml_password: Option<String>,
+        server_config: SharedServerConfig,
     ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
             registry,
             audio_endpoint,
-            password,
+            toml_password,
             throttle: IpThrottle::new(),
+            server_config,
         })
     }
 }
@@ -121,8 +132,22 @@ impl Signaling for SignalingSvc {
 
         // Password gate — checked before we mint a session or allocate
         // any registry state. Open-mode servers (no configured
-        // password) skip the check entirely.
-        if let Some(required) = &self.password {
+        // password from either source) skip the check entirely.
+        //
+        // Resolution order: TOML override > DB grpc_password > open.
+        // The DB read happens on every Register so an admin-UI
+        // rotation takes effect on the very next client connect
+        // without a restart. TOML acts as a "lock" — when present,
+        // the admin UI disables its grpc_password input via the
+        // `ServerInfo.toml_password_override` flag and the DB value
+        // is ignored regardless of what it contains.
+        let effective_password: Option<String> = if let Some(p) = &self.toml_password {
+            Some(p.clone())
+        } else {
+            let p = self.server_config.read().await.grpc_password.clone();
+            (!p.is_empty()).then_some(p)
+        };
+        if let Some(required) = effective_password {
             if !ct_eq(required.as_bytes(), req.password.as_bytes()) {
                 if let Some(ip) = peer_ip {
                     self.throttle.record_auth_failure(ip).await;
@@ -138,6 +163,27 @@ impl Signaling for SignalingSvc {
         // Clear any in-flight backoff now that we've authenticated.
         if let Some(ip) = peer_ip {
             self.throttle.record_auth_success(ip).await;
+        }
+
+        // Capacity gate: refuse new registrations once the registry
+        // has reached the operator-configured ceiling. Checked after
+        // the password + throttle gates so a flooder can't burn this
+        // capacity check at line rate, and so the rejection message
+        // doesn't leak ceiling information to unauthenticated callers.
+        // We read max_peers fresh each call — admin UI edits take
+        // effect on the very next register.
+        let max_peers = self.server_config.read().await.max_peers as usize;
+        {
+            let n = self.registry.lock().await.clients.len();
+            if n >= max_peers {
+                tracing::warn!(
+                    ?peer_ip,
+                    current = n,
+                    cap = max_peers,
+                    "register rejected: max_peers reached"
+                );
+                return Err(Status::resource_exhausted("server at peer capacity"));
+            }
         }
 
         let id = Uuid::new_v4().to_string();

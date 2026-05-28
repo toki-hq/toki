@@ -46,6 +46,15 @@ pub enum Cmd {
         password: String,
     },
     Disconnect,
+    /// Graceful-shutdown variant of [`Cmd::Disconnect`]. Same effect
+    /// (sends `Leave` and aborts session tasks), but signals
+    /// completion back to the caller through an `mpsc::Sender` so
+    /// the GUI thread's `on_exit` hook can block until the Leave
+    /// RPC has actually landed before tearing the process down.
+    /// Without this, closing the app while connected leaves the
+    /// server's reaper to time us out ~10s later — peers see a
+    /// silent ghost instead of an immediate `MemberLeft`.
+    Shutdown(std::sync::mpsc::Sender<()>),
     /// Leave the current frequency room *without* dropping the session.
     /// Used as the first half of a debounced frequency change — the
     /// UI fires this on the user's first chevron click so they "go off
@@ -124,7 +133,13 @@ async fn run(
         tokio::select! {
             cmd = cmd_rx.recv() => {
                 let Some(cmd) = cmd else { break; };
-                handle_cmd(cmd, &mut session, &state, &playback, &beeps).await;
+                // handle_cmd returns false on a clean shutdown command
+                // (e.g. Cmd::Shutdown). We break out of the select loop
+                // then so the runtime thread can exit promptly rather
+                // than sit waiting on a dead UI.
+                if !handle_cmd(cmd, &mut session, &state, &playback, &beeps).await {
+                    break;
+                }
             }
             frame = mic_rx.recv() => {
                 let Some(frame) = frame else { break; };
@@ -138,13 +153,17 @@ async fn run(
     }
 }
 
+/// Dispatch a single command. Returns `true` to keep the runtime
+/// loop going, `false` to terminate it cleanly (used by
+/// [`Cmd::Shutdown`] so the egui thread can guarantee a graceful
+/// goodbye before the process exits).
 async fn handle_cmd(
     cmd: Cmd,
     session: &mut Option<Session>,
     state: &SharedState,
     playback: &PlaybackBuf,
     beeps: &BeepParams,
-) {
+) -> bool {
     match cmd {
         Cmd::Connect {
             server,
@@ -154,7 +173,9 @@ async fn handle_cmd(
         } => {
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
-                return;
+                // Already-connected is a soft no-op, not a shutdown
+                // signal — keep the runtime loop running.
+                return true;
             }
             state.lock().unwrap().connection = ConnState::Connecting;
             match Session::open(
@@ -201,6 +222,23 @@ async fn handle_cmd(
                 st.log("disconnected");
             }
         }
+        Cmd::Shutdown(ack) => {
+            // App is quitting. Close the session (sends Leave +
+            // aborts tasks) if there is one, then signal the egui
+            // thread so it knows the Leave RPC has landed and the
+            // process can tear down. We don't touch `state` here
+            // because the UI thread is already on its way out — any
+            // log line we'd append would never get rendered.
+            if let Some(s) = session.take() {
+                s.close().await;
+            }
+            let _ = ack.send(());
+            // Returning `false` tells run()'s loop to exit. Any
+            // further commands queued behind Shutdown are by
+            // definition post-quit garbage; processing them would
+            // just delay the runtime thread's teardown.
+            return false;
+        }
         Cmd::LeaveRoom => {
             if let Some(s) = session {
                 s.leave_room(state).await;
@@ -235,6 +273,8 @@ async fn handle_cmd(
             push_playback(playback, &tone);
         }
     }
+    // Default: every command except Shutdown leaves the runtime running.
+    true
 }
 
 /// How long we ignore a fresh `PttDown` after the previous `PttUp`.

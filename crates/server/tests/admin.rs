@@ -14,6 +14,7 @@
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+// (Re-import via the use line above for clarity in tests.)
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -21,7 +22,9 @@ use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use toki_server::admin::{self, auth, db::AdminDb, AppState};
+use toki_server::server_config;
 use toki_server::state::{Client, Registry, Room, SharedRegistry, TOKEN_HASH_LEN};
+use toki_server::throttle::IpThrottle;
 
 /// Build a fully-stitched admin Router + AppState backed by an
 /// in-memory sqlite, a pre-seeded `admin` user with a known
@@ -39,6 +42,20 @@ async fn boot(registry: SharedRegistry) -> (axum::Router, &'static str) {
         db,
         broadcaster: tx,
         session_ttl: Duration::from_secs(3600),
+        started_at: Instant::now(),
+        admin_bind: "127.0.0.1:0".to_string(),
+        // Fresh throttle per test so failure backoffs from one case
+        // don't bleed into the next. Tests reach the router via
+        // `oneshot` which doesn't carry ConnectInfo, so the throttle
+        // gate skips them — but the field must still be present.
+        login_throttle: Arc::new(IpThrottle::new()),
+        // Default ServerConfig; individual cases that test config
+        // mutation get a fresh handle they can poke at.
+        server_config: server_config::shared_default(),
+        // Default: TOML didn't pin a password, so the runtime
+        // db is the source of truth. A dedicated test toggles this
+        // on to exercise the 409 response from PUT /api/server-password.
+        toml_password_override: false,
     };
     (admin::routes::build(state), "hunter2")
 }
@@ -322,6 +339,454 @@ async fn rename_validates_display_name() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn server_config_get_put_round_trip() {
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": "admin", "password": pw}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = extract_session_cookie(login.headers()["set-cookie"].to_str().unwrap()).unwrap();
+
+    // GET: defaults out of the box.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/server-config")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cfg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(cfg["maxPeers"], 256);
+    assert_eq!(cfg["idleKickSecs"], 10);
+
+    // PUT: valid update lands.
+    let put = serde_json::json!({
+        "serverName": "Test Box",
+        "maxPeers": 512,
+        "idleKickSecs": 20,
+    })
+    .to_string();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/server-config")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(put))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // GET reflects the new values.
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/server-config")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let cfg: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(cfg["serverName"], "Test Box");
+    assert_eq!(cfg["maxPeers"], 512);
+    assert_eq!(cfg["idleKickSecs"], 20);
+}
+
+#[tokio::test]
+async fn server_config_put_validates_bounds() {
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": "admin", "password": pw}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let cookie = extract_session_cookie(login.headers()["set-cookie"].to_str().unwrap()).unwrap();
+
+    // max_peers = 0 must 400.
+    let bad = serde_json::json!({
+        "serverName": "",
+        "maxPeers": 0,
+        "idleKickSecs": 10,
+    })
+    .to_string();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/server-config")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(bad))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn server_password_put_sets_and_clears() {
+    // Round-trip: set a value, GET reflects it, clear with "",
+    // GET reflects the disarmed state.
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let cookie = login_and_cookie(&app, pw).await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/server-password")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"password": "hunter2"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let cfg = fetch_server_config(&app, &cookie).await;
+    assert_eq!(cfg["grpcPassword"], "hunter2");
+
+    // Clear.
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/server-password")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::json!({"password": ""}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    let cfg = fetch_server_config(&app, &cookie).await;
+    assert_eq!(cfg["grpcPassword"], "");
+}
+
+#[tokio::test]
+async fn server_password_put_blocked_by_toml_override() {
+    // Build an AppState explicitly with toml_password_override = true.
+    // The PUT must 409 and the db value must stay untouched.
+    let registry = shared_registry_with(vec![], vec![]);
+    let db = AdminDb::open_in_memory().unwrap();
+    db.migrate().await.unwrap();
+    let pw_hash = auth::hash_password("hunter2").unwrap();
+    db.insert_user("admin", &pw_hash).await.unwrap();
+    let (tx, _) = tokio::sync::broadcast::channel(8);
+    let state = AppState {
+        registry,
+        db: db.clone(),
+        broadcaster: tx,
+        session_ttl: Duration::from_secs(3600),
+        started_at: Instant::now(),
+        admin_bind: "127.0.0.1:0".to_string(),
+        login_throttle: Arc::new(IpThrottle::new()),
+        server_config: server_config::shared_default(),
+        toml_password_override: true,
+    };
+    let app = admin::routes::build(state);
+    let cookie = login_and_cookie(&app, "hunter2").await;
+
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/api/server-password")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"password": "from-ui"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let row = db.load_server_config().await.unwrap();
+    assert_eq!(row.grpc_password, "");
+}
+
+#[tokio::test]
+async fn server_info_surfaces_toml_password_override_false_by_default() {
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let cookie = login_and_cookie(&app, pw).await;
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/server-info")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(info["tomlPasswordOverride"], false);
+}
+
+/// Test helper: POST /api/login + return the `Cookie:` header value.
+async fn login_and_cookie(app: &axum::Router, password: &str) -> String {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/login")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"username": "admin", "password": password}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    extract_session_cookie(res.headers()["set-cookie"].to_str().unwrap()).unwrap()
+}
+
+/// Test helper: GET /api/server-config and parse as JSON.
+async fn fetch_server_config(app: &axum::Router, cookie: &str) -> serde_json::Value {
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/server-config")
+                .header("cookie", cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn change_password_happy_path_keeps_current_session() {
+    // Log in, change password, then verify:
+    //   * old password no longer authenticates a fresh login
+    //   * new password authenticates
+    //   * the cookie we changed password with still works (the
+    //     handler is supposed to delete OTHER sessions, not ours)
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+
+    let login = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    let cookie = extract_session_cookie(login.headers()["set-cookie"].to_str().unwrap()).unwrap();
+
+    // Change password
+    let body = serde_json::json!({"current": pw, "new": "n3w-passw0rd-here"}).to_string();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/account/password")
+                .header("cookie", &cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Current session cookie still works.
+    let state = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/state")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(state.status(), StatusCode::OK);
+
+    // Fresh login with OLD password fails.
+    let stale = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::UNAUTHORIZED);
+
+    // Fresh login with NEW password succeeds.
+    let fresh = app
+        .oneshot(login_req("admin", "n3w-passw0rd-here"))
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn change_password_rejects_wrong_current() {
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let login = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    let cookie = extract_session_cookie(login.headers()["set-cookie"].to_str().unwrap()).unwrap();
+
+    let body = serde_json::json!({"current": "WRONG", "new": "n3w-passw0rd-here"}).to_string();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/account/password")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn change_password_rejects_short_new() {
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+    let login = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    let cookie = extract_session_cookie(login.headers()["set-cookie"].to_str().unwrap()).unwrap();
+
+    let body = serde_json::json!({"current": pw, "new": "short"}).to_string();
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/account/password")
+                .header("cookie", cookie)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn change_password_invalidates_other_sessions() {
+    // Two concurrent sessions ("two browsers" pattern). After
+    // changing the password from session A, session B's cookie
+    // must stop working.
+    let registry = shared_registry_with(vec![], vec![]);
+    let (app, pw) = boot(registry).await;
+
+    let a = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    let cookie_a = extract_session_cookie(a.headers()["set-cookie"].to_str().unwrap()).unwrap();
+    let b = app.clone().oneshot(login_req("admin", pw)).await.unwrap();
+    let cookie_b = extract_session_cookie(b.headers()["set-cookie"].to_str().unwrap()).unwrap();
+    assert_ne!(cookie_a, cookie_b);
+
+    // From session A, change password.
+    let body = serde_json::json!({"current": pw, "new": "n3w-passw0rd-here"}).to_string();
+    let res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/account/password")
+                .header("cookie", &cookie_a)
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Session A still works.
+    let still_ok = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/state")
+                .header("cookie", cookie_a)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(still_ok.status(), StatusCode::OK);
+
+    // Session B is now revoked.
+    let gone = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/state")
+                .header("cookie", cookie_b)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Small helper to keep the password-change tests readable. Builds
+/// a POST /api/login Request with JSON credentials.
+fn login_req(user: &str, password: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/api/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({"username": user, "password": password}).to_string(),
+        ))
+        .unwrap()
 }
 
 #[tokio::test]

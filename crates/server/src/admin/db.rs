@@ -7,12 +7,14 @@
 //!   argon2id hash is stored. v1 ships with a single seeded `admin` user
 //!   and no UI to create more (deliberate — multi-admin is a follow-up).
 //!
-//! * `sessions(token PK, username, expires_at)` — opaque cookie tokens
-//!   issued by `/api/login`. Token is 32 hex bytes (16 bytes of CSPRNG
-//!   entropy from `rand::rngs::OsRng`). Stored as-is (not hashed) for v1;
-//!   the threat model assumes the sqlite file itself is operator-
-//!   controlled, and an attacker with the file already has the password
-//!   hash to brute force. Hashing session tokens is a follow-up.
+//! * `sessions(token_hash PK, username, expires_at)` — issued by
+//!   `/api/login`. The *cookie* on the wire carries a raw 16-byte
+//!   token (hex-encoded, CSPRNG from `rand::rngs::OsRng`); the *db*
+//!   stores `BLAKE3(token)` as a 64-char hex string. Lookup hashes
+//!   the cookie value and matches against the column. This closes
+//!   the "leaked admin.db lets you replay live sessions" hole — an
+//!   attacker with read access to the file gets only the hash, which
+//!   is preimage-resistant.
 //!
 //! All connection access goes through a `std::sync::Mutex` wrapped in
 //! `Arc` and offloaded to `spawn_blocking`. Admin traffic is on the order
@@ -25,6 +27,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension};
+
+use crate::server_config::ServerConfig;
 
 /// Thin async wrapper around a single sqlite connection.
 ///
@@ -39,6 +43,13 @@ impl AdminDb {
     /// Open (or create) the sqlite file at `path`. Does *not* run
     /// migrations — call [`migrate`](Self::migrate) explicitly so
     /// callers can fail fast on schema errors.
+    ///
+    /// On Unix, tightens the file mode to `0600` (owner-only RW)
+    /// before returning. The file holds argon2 hashes + session
+    /// tokens — both useful to an attacker with read access — so
+    /// we don't want to inherit the operator's umask (typically
+    /// `022`, which would leave the file world-readable). Mirrors
+    /// the treatment of the gRPC TLS private key in `tls.rs`.
     pub fn open(path: &Path) -> Result<Self> {
         // Make sure the parent directory exists. Operators usually
         // configure something like `/var/lib/toki/admin.db`; without
@@ -51,6 +62,11 @@ impl AdminDb {
         }
         let conn =
             Connection::open(path).with_context(|| format!("open sqlite {}", path.display()))?;
+        // chmod after open so the file definitely exists. Best-effort:
+        // a chmod failure logs a warning rather than aborting startup
+        // (matches the TLS-key behaviour and stays consistent with how
+        // the gRPC side handles its private-key permissions).
+        tighten_db_perms(path);
         Ok(Self {
             conn: Arc::new(std::sync::Mutex::new(conn)),
         })
@@ -72,6 +88,14 @@ impl AdminDb {
     /// db is a no-op. We use `IF NOT EXISTS` rather than a version
     /// table because v1 has exactly one schema; a real migration
     /// framework would be premature.
+    ///
+    /// The `sessions` table stores `token_hash` (BLAKE3 of the cookie
+    /// value), never the raw token — see module-level docs for why.
+    /// If an older binary populated this table with raw tokens, the
+    /// rows will be unmatchable on next login (their hashes won't
+    /// equal the stored raw values) and the operator will simply be
+    /// asked to log in again. Acceptable one-time UX cost for the
+    /// security upgrade; we don't migrate ancient rows.
     pub async fn migrate(&self) -> Result<()> {
         self.with_conn(|c| {
             c.execute_batch(
@@ -82,14 +106,94 @@ impl AdminDb {
                     created_at    INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS sessions (
-                    token      TEXT PRIMARY KEY NOT NULL,
+                    token_hash TEXT PRIMARY KEY NOT NULL,
                     username   TEXT NOT NULL,
                     expires_at INTEGER NOT NULL,
                     FOREIGN KEY (username) REFERENCES admin_users(username)
                 );
                 CREATE INDEX IF NOT EXISTS sessions_expires_idx
                     ON sessions(expires_at);
+
+                -- Runtime-mutable server settings. Singleton — the
+                -- `CHECK (id = 1)` makes the one-row invariant visible
+                -- and rejects attempts to add a second row. Defaults
+                -- track the legacy hardcoded constants exactly, so a
+                -- fresh db behaves identically to a pre-server_config
+                -- build.
+                CREATE TABLE IF NOT EXISTS server_config (
+                    id              INTEGER PRIMARY KEY CHECK (id = 1),
+                    server_name     TEXT    NOT NULL DEFAULT '',
+                    max_peers       INTEGER NOT NULL DEFAULT 256,
+                    idle_kick_secs  INTEGER NOT NULL DEFAULT 10,
+                    grpc_password   TEXT    NOT NULL DEFAULT '',
+                    updated_at      INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT OR IGNORE INTO server_config (id) VALUES (1);
                 "#,
+            )?;
+            // Upgrade path: a db that pre-dates the grpc_password
+            // column won't get it from `CREATE TABLE IF NOT EXISTS`
+            // (the table already exists). Add it explicitly via a
+            // `pragma_table_info` check so the call stays idempotent
+            // — we can't lean on `ALTER TABLE … IF NOT EXISTS`
+            // because sqlite doesn't support that conditional form.
+            ensure_column_exists(
+                c,
+                "server_config",
+                "grpc_password",
+                "TEXT NOT NULL DEFAULT ''",
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Read the singleton `server_config` row. Returns `Default` if
+    /// the row hasn't been touched yet (i.e. on the very first read
+    /// after migration); the migration's `INSERT OR IGNORE` already
+    /// created it with default column values, so this branch is
+    /// mostly defensive.
+    pub async fn load_server_config(&self) -> Result<ServerConfig> {
+        self.with_conn(|c| {
+            let row = c
+                .query_row(
+                    "SELECT server_name, max_peers, idle_kick_secs, grpc_password \
+                     FROM server_config WHERE id = 1",
+                    [],
+                    |r| {
+                        Ok(ServerConfig {
+                            server_name: r.get(0)?,
+                            max_peers: r.get::<_, i64>(1)? as u32,
+                            idle_kick_secs: r.get::<_, i64>(2)? as u32,
+                            grpc_password: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(row.unwrap_or_default())
+        })
+        .await
+    }
+
+    /// Persist the server config back to the singleton row. Stamps
+    /// `updated_at` to the current unix time so we can tell when a
+    /// setting last changed (useful for the audit log follow-up).
+    pub async fn save_server_config(&self, cfg: &ServerConfig) -> Result<()> {
+        let cfg = cfg.clone();
+        let now = now_unix();
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE server_config \
+                 SET server_name = ?1, max_peers = ?2, idle_kick_secs = ?3, \
+                     grpc_password = ?4, updated_at = ?5 \
+                 WHERE id = 1",
+                params![
+                    cfg.server_name,
+                    cfg.max_peers as i64,
+                    cfg.idle_kick_secs as i64,
+                    cfg.grpc_password,
+                    now,
+                ],
             )?;
             Ok(())
         })
@@ -123,6 +227,49 @@ impl AdminDb {
         .await
     }
 
+    /// Replace the stored argon2 hash for an existing user. Used by
+    /// the `/api/account/password` change flow. Silently no-ops on a
+    /// missing user — callers always verify existence (via the
+    /// session middleware) before reaching this method, so a zero-
+    /// row update would indicate a logic bug we'd rather not paper
+    /// over by erroring.
+    pub async fn update_password_hash(&self, username: &str, new_hash: &str) -> Result<()> {
+        let username = username.to_string();
+        let new_hash = new_hash.to_string();
+        self.with_conn(move |c| {
+            c.execute(
+                "UPDATE admin_users SET password_hash = ?1 WHERE username = ?2",
+                params![new_hash, username],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Delete every session for `username` **except** the one whose
+    /// hash matches `keep_token_hash`. Returns the number of rows
+    /// removed. Used after a successful password change so any
+    /// already-issued cookies that aren't the current browser's get
+    /// invalidated — if the password change is happening because of
+    /// a suspected compromise, the attacker's parallel session dies
+    /// the moment this query commits.
+    pub async fn delete_other_sessions_for_user(
+        &self,
+        username: &str,
+        keep_token_hash: &str,
+    ) -> Result<u64> {
+        let username = username.to_string();
+        let keep = keep_token_hash.to_string();
+        self.with_conn(move |c| {
+            let n = c.execute(
+                "DELETE FROM sessions WHERE username = ?1 AND token_hash != ?2",
+                params![username, keep],
+            )?;
+            Ok(n as u64)
+        })
+        .await
+    }
+
     /// Look up the password hash for a given username. Returns `None`
     /// if the user doesn't exist. Login handlers run a constant-time
     /// argon2 verify against this; the *presence* of a row is therefore
@@ -141,13 +288,16 @@ impl AdminDb {
     }
 
     /// Insert a fresh session row. `expires_at` is a unix timestamp.
+    /// The cookie value handed to the browser is `token`; on disk we
+    /// store only `hash_session_token(token)` so the raw cookie value
+    /// never lives in the sqlite file.
     pub async fn create_session(&self, token: &str, username: &str, expires_at: i64) -> Result<()> {
-        let token = token.to_string();
+        let token_hash = hash_session_token(token);
         let username = username.to_string();
         self.with_conn(move |c| {
             c.execute(
-                "INSERT INTO sessions (token, username, expires_at) VALUES (?1, ?2, ?3)",
-                params![token, username, expires_at],
+                "INSERT INTO sessions (token_hash, username, expires_at) VALUES (?1, ?2, ?3)",
+                params![token_hash, username, expires_at],
             )?;
             Ok(())
         })
@@ -156,14 +306,16 @@ impl AdminDb {
 
     /// Resolve a cookie token back to its (username, expiry). Returns
     /// `None` if the token is unknown *or* expired — callers don't need
-    /// to differentiate; both map to 401.
+    /// to differentiate; both map to 401. The cookie value is hashed
+    /// before the query; the raw token never reaches sqlite.
     pub async fn lookup_session(&self, token: &str) -> Result<Option<SessionRow>> {
-        let token = token.to_string();
+        let token_hash = hash_session_token(token);
         let now = now_unix();
         self.with_conn(move |c| {
             c.query_row(
-                "SELECT username, expires_at FROM sessions WHERE token = ?1 AND expires_at > ?2",
-                params![token, now],
+                "SELECT username, expires_at FROM sessions \
+                 WHERE token_hash = ?1 AND expires_at > ?2",
+                params![token_hash, now],
                 |r| {
                     Ok(SessionRow {
                         username: r.get(0)?,
@@ -177,11 +329,15 @@ impl AdminDb {
     }
 
     /// Drop a single session row. Idempotent — deleting an unknown
-    /// token returns `Ok(())`. Called by `/api/logout`.
+    /// token returns `Ok(())`. Called by `/api/logout`. Like the
+    /// lookup, hashes the cookie value before matching.
     pub async fn delete_session(&self, token: &str) -> Result<()> {
-        let token = token.to_string();
+        let token_hash = hash_session_token(token);
         self.with_conn(move |c| {
-            c.execute("DELETE FROM sessions WHERE token = ?1", params![token])?;
+            c.execute(
+                "DELETE FROM sessions WHERE token_hash = ?1",
+                params![token_hash],
+            )?;
             Ok(())
         })
         .await
@@ -199,10 +355,15 @@ impl AdminDb {
         .await
     }
 
-    /// Internal helper: run a closure with locked, blocking access to
-    /// the sqlite connection on a worker thread. Every public method
-    /// goes through this so the async signatures stay uniform.
-    async fn with_conn<F, R>(&self, f: F) -> Result<R>
+    /// Run a closure with locked, blocking access to the sqlite
+    /// connection on a worker thread. Every public method goes
+    /// through this so the async signatures stay uniform.
+    ///
+    /// `pub(crate)` because the integration tests in `tests/admin.rs`
+    /// poke the db directly to assert invariants the public API
+    /// would otherwise hide (e.g. the H2 "raw token doesn't land on
+    /// disk" check). Not part of the public surface.
+    pub(crate) async fn with_conn<F, R>(&self, f: F) -> Result<R>
     where
         F: FnOnce(&Connection) -> rusqlite::Result<R> + Send + 'static,
         R: Send + 'static,
@@ -224,6 +385,70 @@ impl AdminDb {
 pub struct SessionRow {
     pub username: String,
     pub expires_at: i64,
+}
+
+/// Idempotently add a column to a table. SQLite has no
+/// `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, so we check
+/// `pragma_table_info(<table>)` first and skip the ALTER if the
+/// column is already there. Used for schema upgrades from a db
+/// created by an older binary — fresh dbs get the column via the
+/// initial `CREATE TABLE` and this becomes a no-op.
+fn ensure_column_exists(
+    c: &Connection,
+    table: &str,
+    column: &str,
+    spec: &str,
+) -> rusqlite::Result<()> {
+    let mut stmt = c.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == column);
+    if !exists {
+        // `ALTER TABLE` doesn't accept `?` parameters for column
+        // names, but `table`/`column`/`spec` are all hardcoded at
+        // call sites — no untrusted input lands here.
+        c.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"),
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+/// Apply `chmod 0600` to the admin db file. Best-effort: a permission
+/// error gets warned about but doesn't abort startup (so the panel
+/// still comes up on platforms / filesystems where chmod is a no-op
+/// or unsupported). Same posture as `tls::tighten_key_perms`.
+#[cfg(unix)]
+fn tighten_db_perms(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        tracing::warn!(error = %e, path = %path.display(), "could not chmod admin db");
+    }
+}
+
+#[cfg(not(unix))]
+fn tighten_db_perms(_path: &Path) {
+    // Non-Unix targets (Windows) don't have a meaningful equivalent.
+    // The admin panel on Windows should be locked down via NTFS ACLs
+    // out-of-band; we deliberately don't try to emulate that here.
+}
+
+/// BLAKE3 of the session token, hex-encoded.
+///
+/// Used as the lookup key in the `sessions` table. The cookie carries
+/// the raw 32-hex-char token; we hash on every insert / lookup / delete
+/// so an attacker with read access to `admin.db` only ever sees the
+/// preimage-resistant hash, not anything they can present back over
+/// the wire.
+///
+/// BLAKE3 is unkeyed and the input is already 128 bits of CSPRNG
+/// output, so a salt would add nothing — and a deterministic hash is
+/// the whole point (we *need* the same input to map to the same row).
+pub fn hash_session_token(raw: &str) -> String {
+    let h = blake3::hash(raw.as_bytes());
+    h.to_hex().to_string()
 }
 
 /// Seconds since the unix epoch, as `i64` so sqlite's INTEGER column
@@ -289,6 +514,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_token_never_lands_on_disk() {
+        // H2: the cookie value must not appear in the sqlite file —
+        // only its BLAKE3 hash should. Smoke-test by inserting a
+        // recognisable raw token, dumping the row, and asserting
+        // the raw bytes aren't present anywhere in the column.
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        db.insert_user("admin", "h").await.unwrap();
+        let raw = "deadbeef-this-is-the-cookie-value";
+        db.create_session(raw, "admin", now_unix() + 60)
+            .await
+            .unwrap();
+        let stored: String = db
+            .with_conn(|c| c.query_row("SELECT token_hash FROM sessions LIMIT 1", [], |r| r.get(0)))
+            .await
+            .unwrap();
+        assert!(
+            !stored.contains(raw),
+            "raw token leaked into token_hash column",
+        );
+        assert_eq!(
+            stored.len(),
+            64,
+            "expected 64-char BLAKE3 hex; got {}",
+            stored.len(),
+        );
+        // Round-trip via lookup still works.
+        let row = db.lookup_session(raw).await.unwrap().unwrap();
+        assert_eq!(row.username, "admin");
+    }
+
+    #[tokio::test]
     async fn delete_session_is_idempotent() {
         let db = AdminDb::open_in_memory().unwrap();
         db.migrate().await.unwrap();
@@ -301,6 +558,158 @@ mod tests {
         db.delete_session("tok").await.unwrap();
         // And a delete on an unknown token is also fine.
         db.delete_session("never-existed").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_password_hash_overwrites_existing_row() {
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        db.insert_user("admin", "first-hash").await.unwrap();
+        db.update_password_hash("admin", "second-hash")
+            .await
+            .unwrap();
+        let got = db.get_password_hash("admin").await.unwrap().unwrap();
+        assert_eq!(got, "second-hash");
+    }
+
+    #[tokio::test]
+    async fn delete_other_sessions_for_user_keeps_current() {
+        // Three concurrent sessions for "admin". After deleting "the
+        // others", only the one matching keep_token_hash survives.
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        db.insert_user("admin", "h").await.unwrap();
+        let future = now_unix() + 3600;
+        db.create_session("keep-me", "admin", future).await.unwrap();
+        db.create_session("kill-1", "admin", future).await.unwrap();
+        db.create_session("kill-2", "admin", future).await.unwrap();
+        let keep_hash = hash_session_token("keep-me");
+        let n = db
+            .delete_other_sessions_for_user("admin", &keep_hash)
+            .await
+            .unwrap();
+        assert_eq!(n, 2);
+        assert!(db.lookup_session("keep-me").await.unwrap().is_some());
+        assert!(db.lookup_session("kill-1").await.unwrap().is_none());
+        assert!(db.lookup_session("kill-2").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn server_config_loads_defaults_on_fresh_db() {
+        // After a fresh migration, the INSERT OR IGNORE seeds the
+        // row with defaults from the column DEFAULT clauses. Load
+        // must return those defaults verbatim — they're the same
+        // values the legacy hardcoded constants used.
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        let cfg = db.load_server_config().await.unwrap();
+        assert_eq!(cfg.server_name, "");
+        assert_eq!(cfg.max_peers, 256);
+        assert_eq!(cfg.idle_kick_secs, 10);
+    }
+
+    #[tokio::test]
+    async fn server_config_round_trips() {
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        let new = ServerConfig {
+            server_name: "Singular Toki".into(),
+            max_peers: 1024,
+            idle_kick_secs: 30,
+            grpc_password: "hunter2".into(),
+        };
+        db.save_server_config(&new).await.unwrap();
+        let loaded = db.load_server_config().await.unwrap();
+        assert_eq!(loaded.server_name, "Singular Toki");
+        assert_eq!(loaded.max_peers, 1024);
+        assert_eq!(loaded.idle_kick_secs, 30);
+        assert_eq!(loaded.grpc_password, "hunter2");
+    }
+
+    #[tokio::test]
+    async fn migrate_adds_grpc_password_to_pre_existing_table() {
+        // Upgrade path: a db created by a binary that pre-dates the
+        // grpc_password column should grow that column on next
+        // migrate(). Simulate by manually creating the old shape,
+        // then running migrate(), then verifying the column is
+        // present and load/save round-trip it.
+        let db = AdminDb::open_in_memory().unwrap();
+        db.with_conn(|c| {
+            c.execute_batch(
+                r#"
+                CREATE TABLE server_config (
+                    id              INTEGER PRIMARY KEY CHECK (id = 1),
+                    server_name     TEXT    NOT NULL DEFAULT '',
+                    max_peers       INTEGER NOT NULL DEFAULT 256,
+                    idle_kick_secs  INTEGER NOT NULL DEFAULT 10,
+                    updated_at      INTEGER NOT NULL DEFAULT 0
+                );
+                INSERT INTO server_config (id) VALUES (1);
+                CREATE TABLE admin_users (
+                    username TEXT PRIMARY KEY NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE sessions (
+                    token_hash TEXT PRIMARY KEY NOT NULL,
+                    username TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL
+                );
+                "#,
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        // Now run the migration the upgrade path would take.
+        db.migrate().await.unwrap();
+        // The new column should be present and the row should
+        // round-trip through load/save with grpc_password set.
+        db.save_server_config(&ServerConfig {
+            server_name: "after-upgrade".into(),
+            max_peers: 128,
+            idle_kick_secs: 7,
+            grpc_password: "secret".into(),
+        })
+        .await
+        .unwrap();
+        let loaded = db.load_server_config().await.unwrap();
+        assert_eq!(loaded.grpc_password, "secret");
+        // Running migrate() again must remain idempotent (no error,
+        // no second ALTER fail).
+        db.migrate().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_config_is_singleton() {
+        // The CHECK (id = 1) constraint should refuse any attempt
+        // to add a second row. Smoke this so a future "let's relax
+        // the schema" change can't slip through unnoticed.
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        let err = db
+            .with_conn(|c| {
+                c.execute(
+                    "INSERT INTO server_config (id, server_name) VALUES (2, 'rogue')",
+                    [],
+                )
+            })
+            .await;
+        assert!(err.is_err(), "second row should be rejected by CHECK");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_chmods_db_to_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("toki-db-perms-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("admin.db");
+        let _db = AdminDb::open(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(mode, 0o600, "admin.db must be chmod 0600, was {mode:o}");
     }
 
     #[tokio::test]

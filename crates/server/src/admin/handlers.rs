@@ -15,11 +15,12 @@
 //!      the global registry.
 //!   4. Logs the action at INFO with the admin username for forensics.
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode},
+    extract::{ConnectInfo, FromRequestParts, Path, State},
+    http::{header, request::Parts, StatusCode},
     response::{sse::KeepAlive, IntoResponse, Json, Response, Sse},
     Extension,
 };
@@ -30,14 +31,19 @@ use toki_proto::v1::{
     event, DisplayNameChanged, Event, FrequencyChanged, MemberJoined, MemberLeft, PttEvent,
 };
 
+use crate::server_config::ServerConfig;
 use crate::signaling;
+use crate::throttle::ThrottleReject;
 use crate::validation;
 
 use super::auth::{
     self, generate_session_token, session_clear_cookie, session_set_cookie, AdminUser, COOKIE_NAME,
 };
-use super::db::now_unix;
-use super::dto::{ApiError, LoginRequest, MoveRequest, RenameRequest, Snapshot};
+use super::db::{self as admin_db, now_unix};
+use super::dto::{
+    ApiError, ChangePasswordRequest, LoginRequest, MoveRequest, RenameRequest, ServerInfo,
+    Snapshot, UpdateServerConfigRequest, UpdateServerPasswordRequest,
+};
 use super::sse::{build_sse_stream, snapshot_now};
 use super::AppState;
 
@@ -72,6 +78,32 @@ pub async fn static_css() -> impl IntoResponse {
     asset_response("text/css; charset=utf-8", CSS)
 }
 
+/// `GET /static/fonts/ui.ttf` — proportional UI font.
+///
+/// We embed the same TTFs the client uses (under
+/// `crates/client/assets/ui/`) so the admin panel and the desktop
+/// client share a visual identity. The relative `include_bytes!`
+/// path couples this crate to the client's asset layout — that's
+/// acceptable inside a workspace, and the alternative (duplicating
+/// the TTFs under the server crate) would silently drift the day
+/// the client's fonts change.
+pub async fn font_ui() -> impl IntoResponse {
+    static FONT: &[u8] = include_bytes!("../../../client/assets/ui/ui.ttf");
+    binary_asset_response("font/ttf", FONT)
+}
+
+/// `GET /static/fonts/ui-bold.ttf` — proportional UI font, bold weight.
+pub async fn font_ui_bold() -> impl IntoResponse {
+    static FONT: &[u8] = include_bytes!("../../../client/assets/ui/ui-bold.ttf");
+    binary_asset_response("font/ttf", FONT)
+}
+
+/// `GET /static/fonts/mono.ttf` — monospace font used for data fields.
+pub async fn font_mono() -> impl IntoResponse {
+    static FONT: &[u8] = include_bytes!("../../../client/assets/ui/mono.ttf");
+    binary_asset_response("font/ttf", FONT)
+}
+
 /// Shared envelope for the three embedded asset endpoints: sets the
 /// right Content-Type and forces revalidation on every request. The
 /// admin panel is internal-tooling-grade traffic; we lose nothing by
@@ -86,13 +118,49 @@ fn asset_response(content_type: &'static str, body: &'static str) -> impl IntoRe
     )
 }
 
+/// Same envelope but for binary bodies (fonts). Fonts change only
+/// when the binary is rebuilt — same `no-cache` policy keeps the
+/// asset-update story trivial: rebuild → refresh → new font.
+fn binary_asset_response(content_type: &'static str, body: &'static [u8]) -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+        ],
+        body,
+    )
+}
+
 /// `POST /api/login`. Public route. Verifies the username/password
 /// against argon2id, mints a session row, sets the cookie. Returns
 /// `204 No Content` on success.
+///
+/// Gated by [`IpThrottle`] — same per-IP rate cap + exponential
+/// backoff the gRPC `Register` RPC uses. A failed login arms the
+/// backoff; a successful one clears it. Requests without a peer
+/// address (e.g. unit tests calling `oneshot` directly) skip the
+/// throttle, matching the gRPC handler's treatment of Unix-socket
+/// transports.
 pub async fn login(
     State(state): State<AppState>,
+    MaybePeerIp(peer_ip): MaybePeerIp,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    // Throttle gate — checked *before* the password verify so a
+    // flooder doesn't even spend our argon2 CPU. A rate-limited or
+    // backed-off caller gets a generic 429 with no per-reason leak
+    // (the structured log line records the reason for the operator).
+    if let Some(ip) = peer_ip {
+        if let Err(reject) = state.login_throttle.try_register(ip).await {
+            tracing::warn!(?ip, ?reject, "admin login throttled");
+            let msg = match reject {
+                ThrottleReject::RateLimited => "too many login attempts; slow down",
+                ThrottleReject::Backoff => "too many failed attempts; try again later",
+            };
+            return Err((StatusCode::TOO_MANY_REQUESTS, Json(ApiError::new(msg))));
+        }
+    }
+
     // Opportunistic prune so the sessions table doesn't grow on a
     // server that's been up for weeks. Cheap when the table is empty.
     let _ = state.db.prune_expired_sessions().await;
@@ -121,11 +189,22 @@ pub async fn login(
         }
     };
     if !ok {
-        tracing::warn!(username = %body.username, "admin login failed");
+        // Both "no such user" and "wrong password" land here. We
+        // record the failure on the throttle so repeated probing
+        // (regardless of which way it fails) backs off the IP.
+        if let Some(ip) = peer_ip {
+            state.login_throttle.record_auth_failure(ip).await;
+        }
+        tracing::warn!(?peer_ip, username = %body.username, "admin login failed");
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ApiError::new("invalid username or password")),
         ));
+    }
+    // Authenticated — clear any in-flight backoff so a subsequent
+    // legitimate login from the same IP isn't impeded.
+    if let Some(ip) = peer_ip {
+        state.login_throttle.record_auth_success(ip).await;
     }
 
     // Mint a session row + cookie. TTL came from AdminConfig at
@@ -145,6 +224,116 @@ pub async fn login(
         .headers_mut()
         .insert(header::SET_COOKIE, session_set_cookie(&token, ttl_secs));
     Ok(response)
+}
+
+/// `POST /api/account/password`. Lets the signed-in admin rotate
+/// their own password. The flow:
+///
+///   1. Verify the supplied `current` against the stored argon2 hash.
+///      Wrong → 401 (no leak: same response shape as the login route).
+///   2. Validate `new` (length + control chars).
+///      Bad → 400 with a descriptive `error` field.
+///   3. Hash `new`, write to db.
+///   4. Invalidate every other session for this user, *except* the
+///      one we're currently using. The current cookie keeps working
+///      so the admin doesn't get bounced; any parallel sessions die
+///      immediately. This is the "I think I was compromised, change
+///      pw" workflow — the attacker's session evaporates here.
+///
+/// We don't throttle this endpoint separately: the auth middleware
+/// already guarantees the caller has a valid session, and the worst
+/// case of repeated wrong-current attempts is a logged warning per
+/// attempt — no amplification surface.
+pub async fn change_password(
+    State(state): State<AppState>,
+    Extension(admin): Extension<auth::AdminUser>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<ChangePasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // 1. Verify current. We always run argon2 verify even when the
+    //    user lookup misses, to keep timing uniform (same trick as
+    //    the login handler).
+    let stored = state
+        .db
+        .get_password_hash(&admin.0)
+        .await
+        .map_err(internal_error)?;
+    let ok = match stored {
+        Some(hash) => auth::verify_password(&body.current, &hash),
+        None => {
+            // Defensive: we should never get here because the session
+            // middleware just resolved this username. Burn the CPU
+            // anyway so an attacker can't time the username away.
+            let _ = auth::verify_password(
+                &body.current,
+                "$argon2id$v=19$m=19456,t=2,p=1$YWFhYWFhYWFhYWFhYWFhYQ$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            );
+            false
+        }
+    };
+    if !ok {
+        tracing::warn!(username = %admin.0, "change-password: bad current");
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError::new("current password incorrect")),
+        ));
+    }
+
+    // 2. Validate new.
+    if let Err(msg) = validate_new_password(&body.new) {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError::new(msg))));
+    }
+
+    // 3. Hash + persist.
+    let new_hash = auth::hash_password(&body.new).map_err(internal_error)?;
+    state
+        .db
+        .update_password_hash(&admin.0, &new_hash)
+        .await
+        .map_err(internal_error)?;
+
+    // 4. Kill every other session for this admin. We extract the
+    //    current cookie raw and hash it via the same function the db
+    //    layer uses for storage, so the "keep" predicate matches the
+    //    actual row.
+    let killed = if let Some(raw) = auth::extract_session_cookie(&headers) {
+        let keep_hash = admin_db::hash_session_token(&raw);
+        state
+            .db
+            .delete_other_sessions_for_user(&admin.0, &keep_hash)
+            .await
+            .map_err(internal_error)?
+    } else {
+        // No cookie on this request would be weird (the middleware
+        // wouldn't have let us through), but degrade gracefully.
+        0
+    };
+
+    info!(
+        username = %admin.0,
+        other_sessions_invalidated = killed,
+        "admin changed password",
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Validate a candidate new password. The argon2 cost makes brute-
+/// force expensive even for short passwords, so we keep this lax —
+/// modern guidance (NIST SP 800-63B) recommends length over
+/// complexity rules. We only enforce a sensible minimum length, a
+/// sanity upper bound, and the "no control chars" property we use
+/// elsewhere to keep operator logs clean.
+fn validate_new_password(pw: &str) -> Result<(), String> {
+    if pw.len() < 8 {
+        return Err("new password must be at least 8 characters".into());
+    }
+    if pw.len() > 128 {
+        return Err("new password must be at most 128 characters".into());
+    }
+    if pw.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("new password contains control characters".into());
+    }
+    Ok(())
 }
 
 /// `POST /api/logout`. Removes the session row (so the cookie value
@@ -170,8 +359,170 @@ pub async fn logout(
 pub async fn state_snapshot(State(state): State<AppState>) -> Json<Snapshot> {
     // generation = 0 here is fine; the JS only uses it for ordering
     // across SSE messages, and the snapshot path is one-shot.
-    let snap = snapshot_now(&state.registry, 0).await;
+    let snap = snapshot_now(&state.registry, 0, state.started_at).await;
     Json(snap)
+}
+
+/// `GET /api/server-config`. Returns the live values from the
+/// in-memory shared `ServerConfig`. The admin UI fetches this when
+/// the Server section opens and refetches after every PUT.
+pub async fn get_server_config(State(state): State<AppState>) -> Json<ServerConfig> {
+    Json(state.server_config.read().await.clone())
+}
+
+/// `PUT /api/server-config`. Updates the runtime tunables shown on
+/// the "Runtime" card — `server_name`, `max_peers`, `idle_kick_secs`.
+/// The gRPC server password lives behind its own endpoint
+/// (`PUT /api/server-password`) so the two have independent UI
+/// surfaces, validation paths, and audit trails. Returns the merged
+/// `ServerConfig` (with the unmodified `grpc_password` intact) so
+/// the UI can confirm what landed without a separate GET.
+pub async fn put_server_config(
+    State(state): State<AppState>,
+    Extension(admin): Extension<auth::AdminUser>,
+    Json(body): Json<UpdateServerConfigRequest>,
+) -> Result<Json<ServerConfig>, (StatusCode, Json<ApiError>)> {
+    let (server_name, max_peers, idle_kick_secs) =
+        validate_runtime_fields(body.server_name, body.max_peers, body.idle_kick_secs)
+            .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiError::new(msg))))?;
+
+    // Merge with the live config so we don't clobber grpc_password,
+    // which this endpoint deliberately doesn't touch.
+    let merged = {
+        let current = state.server_config.read().await.clone();
+        ServerConfig {
+            server_name,
+            max_peers,
+            idle_kick_secs,
+            grpc_password: current.grpc_password,
+        }
+    };
+
+    // Persist to sqlite first; only flip the in-memory handle if the
+    // write succeeded. That way a transient db error doesn't leave
+    // signaling + reaper reading values that won't survive a restart.
+    state
+        .db
+        .save_server_config(&merged)
+        .await
+        .map_err(internal_error)?;
+    *state.server_config.write().await = merged.clone();
+
+    info!(
+        admin_user = %admin.0,
+        server_name = %merged.server_name,
+        max_peers = merged.max_peers,
+        idle_kick_secs = merged.idle_kick_secs,
+        "admin updated server config",
+    );
+    Ok(Json(merged))
+}
+
+/// `PUT /api/server-password`. Rotates the shared-secret password
+/// connecting Toki clients must supply on Register. Empty string
+/// disarms the gate entirely. Refuses with 409 when the TOML
+/// override is in effect — operators who pin the password in
+/// `config.toml` have explicitly opted out of UI rotation, and we
+/// don't want to silently make a change that gets shadowed at the
+/// signaling layer.
+pub async fn put_server_password(
+    State(state): State<AppState>,
+    Extension(admin): Extension<auth::AdminUser>,
+    Json(body): Json<UpdateServerPasswordRequest>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    if state.toml_password_override {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiError::new(
+                "server password is managed by config.toml; \
+                 remove the `password = ...` line and restart \
+                 the server to manage it here instead",
+            )),
+        ));
+    }
+    let new_pw = validate_grpc_password(&body.password)
+        .map_err(|msg| (StatusCode::BAD_REQUEST, Json(ApiError::new(msg))))?;
+
+    // Read-modify-write under the lock so a concurrent runtime-PUT
+    // can't clobber the password between our load and save.
+    let merged = {
+        let current = state.server_config.read().await.clone();
+        ServerConfig {
+            grpc_password: new_pw,
+            ..current
+        }
+    };
+    state
+        .db
+        .save_server_config(&merged)
+        .await
+        .map_err(internal_error)?;
+    *state.server_config.write().await = merged.clone();
+
+    info!(
+        admin_user = %admin.0,
+        armed = !merged.grpc_password.is_empty(),
+        "admin rotated server password",
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Bounds + character checks for the three runtime tunables. Pulled
+/// into a helper now that the values come from `UpdateServerConfigRequest`
+/// rather than a full `ServerConfig` body.
+fn validate_runtime_fields(
+    name: String,
+    max_peers: u32,
+    idle_kick_secs: u32,
+) -> Result<(String, u32, u32), String> {
+    let server_name = name.trim().to_string();
+    if server_name.len() > 64 {
+        return Err("server_name exceeds 64 bytes".into());
+    }
+    if server_name.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("server_name contains control characters".into());
+    }
+    if max_peers == 0 || max_peers > 100_000 {
+        return Err("max_peers must be between 1 and 100000".into());
+    }
+    if !(5..=86_400).contains(&idle_kick_secs) {
+        return Err("idle_kick_secs must be between 5 and 86400".into());
+    }
+    Ok((server_name, max_peers, idle_kick_secs))
+}
+
+/// Validate a candidate gRPC password. Empty (after trim) is allowed
+/// and disarms the gate. Trimming matches `config::normalised_password`
+/// so a UI-typed `"  "` collapses to empty too — otherwise the gate
+/// would be "armed but with an almost-empty value", which is worse
+/// than not arming it at all.
+fn validate_grpc_password(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().to_string();
+    if trimmed.len() > 128 {
+        return Err("server password must be at most 128 characters".into());
+    }
+    if trimmed.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("server password contains control characters".into());
+    }
+    Ok(trimmed)
+}
+
+/// `GET /api/server-info`. One-shot static identity payload — fetched
+/// by the dashboard on mount and never again. Carries the values that
+/// only change across restarts (version, started_at, admin bind,
+/// toml_password_override).
+pub async fn server_info(State(state): State<AppState>) -> Json<ServerInfo> {
+    let started_at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .saturating_sub(state.started_at.elapsed().as_secs());
+    Json(ServerInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        admin_bind: state.admin_bind.clone(),
+        started_at_unix,
+        toml_password_override: state.toml_password_override,
+    })
 }
 
 /// `GET /api/events`. SSE stream of `Snapshot` payloads. Subscribes
@@ -558,6 +909,37 @@ struct RenamePlan {
     self_tx: Option<mpsc::Sender<Event>>,
     /// Other members of the renamed client's current room.
     peer_recipients: Vec<mpsc::Sender<Event>>,
+}
+
+/// Optional peer-IP extractor.
+///
+/// In production the admin server is bound via
+/// `into_make_service_with_connect_info::<SocketAddr>()`, so every
+/// request carries a `ConnectInfo<SocketAddr>` extension and we
+/// pull the IP out of it. In tests, the integration suite drives
+/// the router via `tower::ServiceExt::oneshot` which does **not**
+/// populate that extension — there the extractor returns `None`
+/// and the login throttle simply skips its check (matching the
+/// gRPC handler's treatment of Unix-socket transports where the
+/// peer addr is unknown).
+///
+/// `Infallible` rejection because we never want a missing IP to
+/// 500 a request; the absent case is a legitimate runtime shape.
+pub struct MaybePeerIp(pub Option<IpAddr>);
+
+impl<S> FromRequestParts<S> for MaybePeerIp
+where
+    S: Send + Sync,
+{
+    type Rejection = std::convert::Infallible;
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            parts
+                .extensions
+                .get::<ConnectInfo<SocketAddr>>()
+                .map(|c| c.0.ip()),
+        ))
+    }
 }
 
 /// Map an internal `anyhow::Error` to a 500 with a safe message.

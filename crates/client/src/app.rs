@@ -1217,6 +1217,38 @@ impl eframe::App for TokiApp {
             self.connect_fonts_ready = false;
         }
     }
+
+    /// Called once when eframe is tearing the window down (user closed
+    /// the window, Cmd-Q, etc). If a session is open, send a
+    /// [`Cmd::Shutdown`] and block briefly for the Leave RPC to land
+    /// — so the server-side roster updates instantly instead of
+    /// waiting ~10s for the reaper to time us out.
+    ///
+    /// The wait is bounded: the runtime thread normally completes
+    /// a localhost gRPC round-trip in well under 100ms, so 800ms is
+    /// generous. If we hit the timeout (dead server, unplugged
+    /// network), we fall through and let the process exit — the
+    /// reaper will catch the stale session shortly after anyway.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        let connected = matches!(
+            self.state.lock().unwrap().connection,
+            crate::state::ConnState::Connected | crate::state::ConnState::Connecting
+        );
+        if !connected {
+            return;
+        }
+        // std mpsc rather than tokio oneshot so we can `recv_timeout`
+        // from this sync context without juggling a second runtime.
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        if self.cmd_tx.send(runtime::Cmd::Shutdown(ack_tx)).is_err() {
+            // Runtime thread already gone — nothing left to do.
+            return;
+        }
+        match ack_rx.recv_timeout(std::time::Duration::from_millis(800)) {
+            Ok(()) => tracing::info!("graceful disconnect acknowledged"),
+            Err(_) => tracing::warn!("graceful disconnect timed out; relying on server reaper"),
+        }
+    }
 }
 
 impl TokiApp {

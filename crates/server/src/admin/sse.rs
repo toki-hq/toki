@@ -42,7 +42,10 @@ pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 /// normal operation. If all subscribers disconnect, `send` returns
 /// `Err(NoReceivers)` — we ignore it because new subscribers will
 /// arrive whenever a fresh `/api/events` request lands.
-pub async fn run_broadcaster(registry: SharedRegistry, tx: Sender<Snapshot>) {
+///
+/// `started_at` is the timestamp the admin task booted; every
+/// snapshot carries `now - started_at` as `server_uptime_secs`.
+pub async fn run_broadcaster(registry: SharedRegistry, tx: Sender<Snapshot>, started_at: Instant) {
     static GEN: AtomicU64 = AtomicU64::new(0);
     let mut ticker = tokio::time::interval(SNAPSHOT_INTERVAL);
     // `Burst` skipped ticks rather than firing late ones back-to-
@@ -53,7 +56,7 @@ pub async fn run_broadcaster(registry: SharedRegistry, tx: Sender<Snapshot>) {
     loop {
         ticker.tick().await;
         let generation = GEN.fetch_add(1, Ordering::Relaxed) + 1;
-        let snapshot = snapshot_now(&registry, generation).await;
+        let snapshot = snapshot_now(&registry, generation, started_at).await;
         // Ignore "no receivers" — that just means no admin browsers
         // are currently connected. We keep snapshotting so the next
         // subscriber doesn't have to wait a whole interval.
@@ -64,7 +67,11 @@ pub async fn run_broadcaster(registry: SharedRegistry, tx: Sender<Snapshot>) {
 /// Lock the registry, walk it, and produce a self-contained
 /// snapshot. Public so `GET /api/state` can call it without
 /// going through the broadcaster (synchronous first-paint path).
-pub async fn snapshot_now(registry: &SharedRegistry, generation: u64) -> Snapshot {
+pub async fn snapshot_now(
+    registry: &SharedRegistry,
+    generation: u64,
+    started_at: Instant,
+) -> Snapshot {
     let r = registry.lock().await;
     let now = Instant::now();
 
@@ -112,6 +119,7 @@ pub async fn snapshot_now(registry: &SharedRegistry, generation: u64) -> Snapsho
         rooms,
         lobby,
         generation,
+        server_uptime_secs: now.saturating_duration_since(started_at).as_secs(),
     }
 }
 
@@ -188,7 +196,7 @@ mod tests {
         );
         let shared: SharedRegistry = Arc::new(Mutex::new(reg));
 
-        let snap = snapshot_now(&shared, 7).await;
+        let snap = snapshot_now(&shared, 7, Instant::now()).await;
         assert_eq!(snap.generation, 7);
         // Frequencies are sorted lexicographically.
         assert_eq!(snap.rooms.len(), 2);
@@ -207,7 +215,7 @@ mod tests {
         // A fresh server has no clients and no rooms; the snapshot
         // must still serialize cleanly (no NaN, no missing fields).
         let reg: SharedRegistry = Arc::new(Mutex::new(crate::state::Registry::default()));
-        let snap = snapshot_now(&reg, 1).await;
+        let snap = snapshot_now(&reg, 1, Instant::now()).await;
         assert!(snap.rooms.is_empty());
         assert!(snap.lobby.is_empty());
         let json = serde_json::to_string(&snap).unwrap();

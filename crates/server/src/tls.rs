@@ -30,7 +30,11 @@ use crate::config::{TlsFiles, DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY
 /// PEM-encoded certificate + private key pair ready to feed into
 /// Tonic's `ServerTlsConfig::identity`. Always owned `Vec<u8>` so
 /// the caller doesn't have to juggle borrows of the on-disk path.
-#[derive(Debug)]
+///
+/// `Clone` because both the gRPC handshake and the admin HTTPS
+/// listener consume the same identity — cheap deep-copy (a few
+/// kilobytes) at startup; never on the hot path.
+#[derive(Debug, Clone)]
 pub struct TlsMaterial {
     pub cert_pem: Vec<u8>,
     pub key_pem: Vec<u8>,

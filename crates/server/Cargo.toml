@@ -48,6 +48,13 @@ rustls = { version = "0.23", features = ["ring"] }
 # axum for the admin HTTP listener on a separate port; it never
 # interacts with the gRPC service except through the shared registry.
 axum = "0.8"
+# axum's own `serve` only does plain HTTP. `axum-server` is the
+# canonical rustls bridge — same hyper 1.x backbone, accepts a
+# RustlsConfig built from the PEM bytes we already feed Tonic for
+# the gRPC channel. Two layered protections fall out of this:
+#   * cookies + login payload are no longer in cleartext over LAN
+#   * the cookie's `Secure` flag is now meaningful
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 # Async SSE bodies come from axum's `Sse` response, which expects a
 # Stream of Event. tokio-stream's `BroadcastStream` is the adapter we
 # use to pump the admin event broadcast channel into that stream.

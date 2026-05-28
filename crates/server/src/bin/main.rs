@@ -3,7 +3,9 @@ use std::net::SocketAddr;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
-use toki_server::{admin, audio, config::Config, reaper, signaling::SignalingSvc, state, tls};
+use toki_server::{
+    admin, audio, config::Config, reaper, server_config, signaling::SignalingSvc, state, tls,
+};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -64,27 +66,49 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = state::shared();
 
+    // Runtime-mutable server settings. Starts at hardcoded defaults
+    // (same values the code shipped before this lived in the db);
+    // the admin task, if enabled, will overwrite from sqlite right
+    // after it opens. Headless deployments without `[admin]` just
+    // keep these defaults for the lifetime of the process.
+    let server_config = server_config::shared_default();
+
     // Reaper runs forever in the background; we don't .await it in the
     // select! below — if it panics, tracing surfaces it but the server
     // keeps serving (just without stale-client cleanup).
-    tokio::spawn(reaper::run(registry.clone()));
+    tokio::spawn(reaper::run(registry.clone(), server_config.clone()));
 
     let audio_task = tokio::spawn(audio::run(audio_bind, registry.clone()));
 
-    // Admin panel is opt-in via the `[admin]` block in config.toml.
-    // Absent ⇒ no listener, zero overhead for headless installs. When
-    // present, the admin task lives alongside grpc + audio in the
-    // select! below; any error there brings the process down so the
-    // operator can see the failure in journalctl.
-    let admin_task = config.admin.map(|admin_cfg| {
-        tracing::info!(
-            bind = %admin_cfg.bind,
-            port = admin_cfg.port,
-            db_path = %admin_cfg.db_path.display(),
-            "admin panel enabled",
-        );
-        tokio::spawn(admin::run(admin_cfg, registry.clone()))
-    });
+    // Admin panel is always exposed. When `[admin]` is omitted from
+    // config.toml the defaults take over (bind = 127.0.0.1, port = 8000,
+    // db_path = admin.db). The admin task lives alongside grpc + audio
+    // in the select! below; any error there brings the process down so
+    // the operator can see the failure in journalctl. We hand the
+    // admin task its own clone of `tls_material` so it can stand up an
+    // HTTPS listener with the same identity as the gRPC channel —
+    // operators only have one cert fingerprint to pin. The shared
+    // `server_config` handle gets cloned in so the admin task can
+    // load + mutate it; reads from gRPC + reaper see the updates
+    // without restart. The TOML password (if any) takes precedence
+    // over the runtime db; capture that as a boolean so the admin UI
+    // can lock its server-password input accordingly.
+    let toml_password_override = password.is_some();
+    let admin_cfg = config.admin;
+    tracing::info!(
+        bind = %admin_cfg.bind,
+        port = admin_cfg.port,
+        db_path = %admin_cfg.db_path.display(),
+        toml_password_override,
+        "admin panel starting",
+    );
+    let admin_task = tokio::spawn(admin::run(
+        admin_cfg,
+        registry.clone(),
+        tls_material.clone(),
+        server_config.clone(),
+        toml_password_override,
+    ));
 
     tracing::info!(
         ?grpc_addr,
@@ -102,26 +126,15 @@ async fn main() -> anyhow::Result<()> {
     let grpc = Server::builder()
         .tls_config(tls_config)?
         .add_service(
-            SignalingSvc::new(registry, advertised_audio, password)
+            SignalingSvc::new(registry, advertised_audio, password, server_config.clone())
                 .max_decoding_message_size(8 * 1024),
         )
         .serve(grpc_addr);
 
-    // The admin task is `Option<JoinHandle<...>>`; when absent we
-    // substitute a future that pends forever so the `select!` arm
-    // never fires. This keeps the select! shape identical to the
-    // non-admin path without resorting to a macro arm gate.
-    let admin_fut = async {
-        match admin_task {
-            Some(h) => h.await,
-            None => std::future::pending().await,
-        }
-    };
-
     tokio::select! {
         res = grpc => res?,
         res = audio_task => res??,
-        res = admin_fut => res??,
+        res = admin_task => res??,
     }
 
     Ok(())

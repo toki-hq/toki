@@ -4,15 +4,15 @@
 //!
 //! # Cookie format
 //!
-//! `toki_admin_session=<32-hex-bytes>; Path=/; HttpOnly; SameSite=Strict; Max-Age=<ttl>`
+//! `toki_admin_session=<32-hex-bytes>; Path=/; HttpOnly; SameSite=Strict; Secure; Max-Age=<ttl>`
 //!
-//! No `Secure` flag in v1 because the admin panel is HTTP-only on
-//! loopback by default. The cookie is `HttpOnly` so JS can't read it
+//! The admin panel is HTTPS-only, so the cookie is unconditionally
+//! `Secure`: browsers refuse to send it over a non-TLS connection.
+//! `HttpOnly` keeps JS from reading the value via `document.cookie`
 //! (defends against XSS-driven theft if we ever inline user-supplied
-//! HTML — we don't today, but it costs nothing) and `SameSite=Strict`
-//! so a malicious cross-origin page can't ride an active session.
-//! Adding `Secure` is a follow-up that pairs with TLS for the admin
-//! port.
+//! HTML — we don't today, but it costs nothing). `SameSite=Strict`
+//! blocks the cookie from being sent on any cross-site request, so
+//! a hostile page on another origin can't ride an active session.
 //!
 //! # Session lifetime
 //!
@@ -148,24 +148,32 @@ pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Build the `Set-Cookie` value for a freshly-issued session.
+///
+/// `Secure` is unconditional — the admin panel only serves over
+/// TLS, and we want browsers to refuse to send the cookie back if
+/// they're ever tricked into trying a plaintext connection to the
+/// same host (e.g. via misconfigured reverse proxy).
 pub fn session_set_cookie(token: &str, ttl_secs: u64) -> HeaderValue {
     let v = format!(
-        "{name}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={ttl}",
+        "{name}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={ttl}",
         name = COOKIE_NAME,
         token = token,
         ttl = ttl_secs,
     );
-    // The format string only contains `Path=/; HttpOnly; SameSite=Strict`,
-    // `Max-Age=` followed by a decimal, and the token (hex digits) — all
-    // valid header bytes, so `from_str` here can't realistically fail.
+    // The format string only contains `Path=/; HttpOnly; Secure;
+    // SameSite=Strict`, `Max-Age=` followed by a decimal, and the
+    // token (hex digits) — all valid header bytes, so `from_str`
+    // here can't realistically fail.
     HeaderValue::from_str(&v).expect("session cookie is ASCII-safe by construction")
 }
 
 /// Build the `Set-Cookie` value that *clears* the session — used by
-/// `/api/logout`. Same name, empty value, `Max-Age=0`.
+/// `/api/logout`. Same name, empty value, `Max-Age=0`. Carries the
+/// same attributes as the set-form so browsers reliably scope the
+/// clear to the right cookie.
 pub fn session_clear_cookie() -> HeaderValue {
     let v = format!(
-        "{name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+        "{name}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
         name = COOKIE_NAME
     );
     HeaderValue::from_str(&v).expect("clear cookie is ASCII-safe by construction")

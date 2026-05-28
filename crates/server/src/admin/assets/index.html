@@ -8,86 +8,112 @@
 </head>
 <body>
   <!--
-    Single-page admin shell. The login view and the dashboard view live
-    in the same document; `app.js` toggles `[data-view]` on <main> when
-    a session is detected (via a 200 on /api/state).
+    Toki admin panel shell.
+
+    The whole UI lives in a single document; `app.js` toggles
+    `<main data-view="…">` to swap between login / loading / dashboard.
+    Inside the dashboard, a section router replaces the contents of
+    `#section-host` based on the sidebar selection.
+
+    Pure HTML + vanilla JS — no build step. The CSS lives in
+    `/static/style.css` and is documented inline there.
   -->
-  <header class="topbar">
-    <div class="brand">TOKI · admin</div>
-    <div class="status" id="status"></div>
-    <button id="logout" hidden>logout</button>
-  </header>
+  <div id="app">
+    <main id="main" data-view="loading">
+      <!-- ── LOADING ───────────────────────────────────────────── -->
+      <section class="view-loading">
+        <p>· LOADING ·</p>
+      </section>
 
-  <main id="main" data-view="loading">
-    <!-- LOGIN ------------------------------------------------------- -->
-    <section class="view-login">
-      <form id="login-form">
-        <h1>Sign in</h1>
-        <label>
-          username
-          <input type="text" name="username" required autocomplete="username" />
-        </label>
-        <label>
-          password
-          <input type="password" name="password" required autocomplete="current-password" />
-        </label>
-        <button type="submit">sign in</button>
-        <p class="error" id="login-error" hidden></p>
-      </form>
-    </section>
+      <!-- ── LOGIN ─────────────────────────────────────────────── -->
+      <section class="view-login">
+        <form id="login-form" class="login-card">
+          <h1>Sign in</h1>
+          <p class="sub">· ADMIN PANEL ·</p>
+          <label>
+            USERNAME
+            <input class="input" type="text" name="username" required autocomplete="username" autofocus />
+          </label>
+          <label>
+            PASSWORD
+            <input class="input" type="password" name="password" required autocomplete="current-password" />
+          </label>
+          <button type="submit" class="btn phos lg" style="justify-content: center;">SIGN IN</button>
+          <p class="error" id="login-error" hidden></p>
+        </form>
+      </section>
 
-    <!-- DASHBOARD --------------------------------------------------- -->
-    <section class="view-dashboard">
-      <div class="grid" id="rooms-grid">
-        <!-- Frequency cards are appended by app.js. -->
-      </div>
-      <aside class="sidebar">
-        <h2>Lobby</h2>
-        <p class="hint">Registered, not on any frequency.</p>
-        <ul id="lobby-list"></ul>
-        <h2>Events</h2>
-        <ul id="event-log"></ul>
-      </aside>
-    </section>
+      <!-- ── DASHBOARD ─────────────────────────────────────────── -->
+      <section class="view-dashboard">
+        <!-- Header (live data populated by JS) -->
+        <header class="topbar" style="display: none;" id="topbar">
+          <div class="brand">
+            <span class="toki">TOKI</span>
+            <span class="sep">·</span>
+            <span class="admin">ADMIN</span>
+            <span class="version mono" id="brand-version">v—</span>
+          </div>
+          <div class="stats">
+            <div class="stat">
+              <span class="stat-label">HOST</span>
+              <span class="stat-value" id="stat-host">—</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">UPTIME</span>
+              <span class="stat-value" id="stat-uptime">—</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">PEERS</span>
+              <span class="stat-value" id="stat-peers">—</span>
+            </div>
+            <div class="stat">
+              <span class="stat-label">TX</span>
+              <span class="stat-value" id="stat-tx">—</span>
+            </div>
+          </div>
+          <div class="right">
+            <span class="conn-pill" id="conn-pill" title="live feed status">
+              <span class="dot"></span>
+              <span id="conn-label">CONNECTING</span>
+            </span>
+            <button id="logout" class="user-pill" title="sign out">
+              <span>ADMIN</span>
+              <span>↪</span>
+            </button>
+          </div>
+        </header>
 
-    <!-- LOADING ----------------------------------------------------- -->
-    <section class="view-loading">
-      <p>loading…</p>
-    </section>
-  </main>
+        <div style="flex: 1; display: flex; min-height: 0;">
+          <!-- Sidebar (sections + quick links + build footer) -->
+          <nav class="sidebar" id="sidebar" style="display: none;">
+            <span class="tag">· NAV ·</span>
+            <ul class="nav-list" id="nav-list">
+              <!-- Buttons appended by app.js so the active flag is data-driven -->
+            </ul>
 
-  <!--
-    Generic modal used for both "move" and "rename" prompts.
+            <div class="sidebar-group">
+              <span class="tag">· QUICK ·</span>
+              <ul class="quick-list">
+                <li><button class="quick-btn" data-quick="logout"><span class="quick-icon">↪</span><span class="quick-text">Sign out</span></button></li>
+              </ul>
+            </div>
 
-    The cancel button is explicitly `type="button"` so it does NOT
-    submit the form. Two reasons:
+            <div class="sidebar-foot">
+              <div id="build-line">BUILD —</div>
+              <div id="started-line">—</div>
+              <div class="health" id="health-line">healthy</div>
+            </div>
+          </nav>
 
-      1. The input has `required`; if cancel were a submit button,
-         clicking it on an empty Move modal would fail HTML5
-         validation and the dialog would refuse to close.
-      2. Pressing Enter inside a form implicitly triggers the *first
-         submit button in tree order*. If cancel were a submit, Enter
-         would close the dialog with returnValue="cancel" — which our
-         JS reads as "user cancelled" → action aborted. Making cancel
-         a plain button means OK is the only submit, so Enter goes
-         where the user expects.
+          <!-- Content area — the active section's HTML lands here. -->
+          <div class="content" id="content" style="display: none;"></div>
+        </div>
+      </section>
+    </main>
+  </div>
 
-    The cancel handler is wired in app.js via `dlg.close("cancel")`.
-  -->
-  <dialog id="prompt-modal">
-    <form method="dialog" id="prompt-form">
-      <h3 id="prompt-title"></h3>
-      <label>
-        <span id="prompt-label"></span>
-        <input type="text" id="prompt-input" required />
-      </label>
-      <menu>
-        <button type="button" id="prompt-cancel">cancel</button>
-        <button id="prompt-submit" value="ok">ok</button>
-      </menu>
-      <p class="error" id="prompt-error" hidden></p>
-    </form>
-  </dialog>
+  <!-- Toast for action acknowledgements (kick OK, move OK, etc) -->
+  <div id="toast" class="toast hidden"></div>
 
   <script src="/static/app.js" defer></script>
 </body>

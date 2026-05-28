@@ -11,13 +11,16 @@
 //! rather refuse to boot than silently ignore a typo in the password
 //! line and accidentally serve in open mode.
 //!
-//! Today the only configurable knob is the access password. Network
-//! addresses still come from `TOKI_GRPC_ADDR` / `TOKI_AUDIO_ADDR` /
-//! `TOKI_AUDIO_PUBLIC` environment variables so existing systemd unit
-//! files and Docker compose files keep working without a config file.
+//! Network addresses for the gRPC + UDP audio listeners come from
+//! `TOKI_GRPC_ADDR` / `TOKI_AUDIO_ADDR` / `TOKI_AUDIO_PUBLIC` env
+//! variables so existing systemd unit files and Docker compose files
+//! keep working without a config file. The admin dashboard is
+//! always-on; its bind / port / db path live in the `[admin]` block
+//! with defaults that fire when the block is absent.
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::Deserialize;
 
 /// Top-level server config. Missing fields fall back to `Default`.
@@ -46,14 +49,16 @@ pub struct Config {
     #[serde(default)]
     pub tls: Option<TlsFiles>,
 
-    /// Optional admin web panel. When omitted, the admin task isn't
-    /// spawned — zero overhead for headless server installs. When
-    /// present, an HTTP listener is bound to `bind:port` and serves
-    /// the operator dashboard at `/`. On first boot, if the sqlite
-    /// store at `db_path` has no admin users, one is seeded with a
-    /// random password and logged once at WARN level.
+    /// Admin web panel settings. The dashboard is always exposed —
+    /// the `[admin]` block exists only to override the defaults
+    /// (`bind = "127.0.0.1"`, `port = 8000`, etc). On first boot,
+    /// if the sqlite store at `db_path` has no admin users, one is
+    /// seeded with a random password and logged once at WARN level.
+    /// Operators who don't want the panel reachable from the LAN
+    /// keep the default `bind = "127.0.0.1"` and rely on the
+    /// loopback to keep it private.
     #[serde(default)]
-    pub admin: Option<AdminConfig>,
+    pub admin: AdminConfig,
 }
 
 /// Admin web panel settings. All fields have defaults; an empty
@@ -91,6 +96,52 @@ impl Default for AdminConfig {
             db_path: default_admin_db_path(),
             session_ttl_hours: default_admin_session_ttl_hours(),
         }
+    }
+}
+
+/// Environment-variable names for the `[admin]` overrides. Kept as
+/// `const`s so the tests + docs reference them by symbol instead of
+/// repeating string literals.
+pub const ENV_ADMIN_BIND: &str = "TOKI_ADMIN_BIND";
+pub const ENV_ADMIN_PORT: &str = "TOKI_ADMIN_PORT";
+pub const ENV_ADMIN_DB_PATH: &str = "TOKI_ADMIN_DB_PATH";
+pub const ENV_ADMIN_SESSION_TTL_HOURS: &str = "TOKI_ADMIN_SESSION_TTL_HOURS";
+
+impl AdminConfig {
+    /// Apply `TOKI_ADMIN_*` env vars on top of the TOML-loaded
+    /// values. Each var, when set, replaces the corresponding field
+    /// — env beats TOML beats hard-coded defaults, matching the
+    /// twelve-factor pattern used elsewhere in the binary (e.g.
+    /// `TOKI_GRPC_ADDR`).
+    ///
+    /// A malformed value (non-numeric port, etc.) returns an error
+    /// so the operator gets a clear startup failure rather than a
+    /// silent fallback to the TOML value — same posture as the
+    /// other `.parse()?` calls in `main.rs`.
+    ///
+    /// Recognised vars:
+    /// * `TOKI_ADMIN_BIND` — interface, e.g. `0.0.0.0`
+    /// * `TOKI_ADMIN_PORT` — TCP port, e.g. `8000`
+    /// * `TOKI_ADMIN_DB_PATH` — sqlite path
+    /// * `TOKI_ADMIN_SESSION_TTL_HOURS` — positive integer
+    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(v) = std::env::var(ENV_ADMIN_BIND) {
+            self.bind = v;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_PORT) {
+            self.port = v.parse().with_context(|| {
+                format!("{ENV_ADMIN_PORT}={v:?}: expected a TCP port (0..=65535)")
+            })?;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_DB_PATH) {
+            self.db_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_SESSION_TTL_HOURS) {
+            self.session_ttl_hours = v.parse().with_context(|| {
+                format!("{ENV_ADMIN_SESSION_TTL_HOURS}={v:?}: expected a positive integer")
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -134,14 +185,23 @@ impl Config {
     /// A file that exists but parses badly returns `Err` so the
     /// caller can refuse to boot — we'd rather fail loudly than
     /// silently disarm the password gate because of a TOML typo.
+    ///
+    /// `TOKI_ADMIN_*` env vars are applied as the final overlay
+    /// (env > TOML > defaults), so any deployment can tweak the
+    /// admin panel's bind / port / db path without touching the
+    /// TOML.
     pub fn load() -> anyhow::Result<(Self, Option<PathBuf>)> {
-        let Some(path) = locate() else {
-            return Ok((Self::default(), None));
+        let (mut cfg, path) = match locate() {
+            Some(path) => (Self::from_path(&path)?, Some(path)),
+            None => (Self::default(), None),
         };
-        let cfg = Self::from_path(&path)?;
-        Ok((cfg, Some(path)))
+        cfg.admin.apply_env_overrides()?;
+        Ok((cfg, path))
     }
 
+    /// Parse a config file at `path`. Does *not* apply env-var
+    /// overrides — that's `load`'s job. Tests use this directly to
+    /// keep the env-var application out of their critical path.
     pub fn from_path(path: &Path) -> anyhow::Result<Self> {
         match std::fs::read_to_string(path) {
             Ok(s) => {
@@ -240,31 +300,118 @@ mod tests {
             session_ttl_hours = 24
         "#;
         let cfg: Config = toml::from_str(raw).unwrap();
-        let admin = cfg.admin.expect("expected [admin] block");
-        assert_eq!(admin.bind, "0.0.0.0");
-        assert_eq!(admin.port, 9000);
-        assert_eq!(admin.db_path.to_string_lossy(), "/var/lib/toki/admin.db");
-        assert_eq!(admin.session_ttl_hours, 24);
+        assert_eq!(cfg.admin.bind, "0.0.0.0");
+        assert_eq!(cfg.admin.port, 9000);
+        assert_eq!(
+            cfg.admin.db_path.to_string_lossy(),
+            "/var/lib/toki/admin.db"
+        );
+        assert_eq!(cfg.admin.session_ttl_hours, 24);
     }
 
     #[test]
     fn admin_block_fills_defaults_when_empty() {
-        // An empty `[admin]` block means "enable with defaults" —
-        // operator opted into the panel without overriding anything.
+        // An empty `[admin]` block parses cleanly and inherits every
+        // default, identical to omitting the block.
         let cfg: Config = toml::from_str("[admin]\n").unwrap();
-        let admin = cfg.admin.expect("expected [admin] block");
-        assert_eq!(admin.bind, "127.0.0.1");
-        assert_eq!(admin.port, 8000);
-        assert_eq!(admin.db_path.to_string_lossy(), "admin.db");
-        assert_eq!(admin.session_ttl_hours, 12);
+        assert_eq!(cfg.admin.bind, "127.0.0.1");
+        assert_eq!(cfg.admin.port, 8000);
+        assert_eq!(cfg.admin.db_path.to_string_lossy(), "admin.db");
+        assert_eq!(cfg.admin.session_ttl_hours, 12);
     }
 
     #[test]
-    fn admin_block_absent_disables_panel() {
-        // No `[admin]` ⇒ `cfg.admin.is_none()` ⇒ main.rs doesn't
-        // spawn the admin task at all. That's the headless default.
+    fn admin_defaults_apply_when_block_absent() {
+        // The admin dashboard is always exposed. A config.toml that
+        // doesn't mention `[admin]` still produces the default
+        // bind/port/db_path/ttl — same as an empty `[admin]` block.
         let cfg: Config = toml::from_str("password = \"hunter2\"").unwrap();
-        assert!(cfg.admin.is_none());
+        assert_eq!(cfg.admin.bind, "127.0.0.1");
+        assert_eq!(cfg.admin.port, 8000);
+        assert_eq!(cfg.admin.db_path.to_string_lossy(), "admin.db");
+        assert_eq!(cfg.admin.session_ttl_hours, 12);
+    }
+
+    /// RAII guard that clears an env var on drop. Tests that set
+    /// `TOKI_ADMIN_*` use this so a failure mid-test (panic before
+    /// the explicit clear) doesn't leak state into the next case.
+    struct EnvGuard(&'static str);
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.0);
+        }
+    }
+    fn set_env(key: &'static str, val: &str) -> EnvGuard {
+        std::env::set_var(key, val);
+        EnvGuard(key)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_overrides_each_admin_field() {
+        // All four TOKI_ADMIN_* vars set at once → every field
+        // overridden, regardless of what TOML said (here: nothing).
+        let _b = set_env(ENV_ADMIN_BIND, "0.0.0.0");
+        let _p = set_env(ENV_ADMIN_PORT, "9090");
+        let _d = set_env(ENV_ADMIN_DB_PATH, "/tmp/test-admin.db");
+        let _t = set_env(ENV_ADMIN_SESSION_TTL_HOURS, "24");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.bind, "0.0.0.0");
+        assert_eq!(admin.port, 9090);
+        assert_eq!(admin.db_path.to_string_lossy(), "/tmp/test-admin.db");
+        assert_eq!(admin.session_ttl_hours, 24);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_leaves_unset_fields_alone() {
+        // Only port is set in env; bind / db_path / ttl come from
+        // the in-memory config (here, the TOML-loaded values).
+        let _p = set_env(ENV_ADMIN_PORT, "9091");
+        let mut admin = AdminConfig {
+            bind: "1.2.3.4".into(),
+            port: 8000,
+            db_path: PathBuf::from("custom.db"),
+            session_ttl_hours: 6,
+        };
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.bind, "1.2.3.4");
+        assert_eq!(admin.port, 9091);
+        assert_eq!(admin.db_path.to_string_lossy(), "custom.db");
+        assert_eq!(admin.session_ttl_hours, 6);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_overrides_win_over_toml() {
+        // Simulate the full `Config::load` flow: parse TOML, then
+        // apply env. The env value must replace the TOML one.
+        let _g = set_env(ENV_ADMIN_PORT, "7777");
+        let raw = "[admin]\nport = 9000\n";
+        let mut cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.admin.port, 9000); // pre-override
+        cfg.admin.apply_env_overrides().unwrap();
+        assert_eq!(cfg.admin.port, 7777); // env wins
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_port_is_fatal() {
+        let _g = set_env(ENV_ADMIN_PORT, "definitely-not-a-number");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("TOKI_ADMIN_PORT"), "msg = {msg}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_ttl_is_fatal() {
+        let _g = set_env(ENV_ADMIN_SESSION_TTL_HOURS, "-5");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        assert!(format!("{err:#}").contains("TOKI_ADMIN_SESSION_TTL_HOURS"));
     }
 
     #[test]

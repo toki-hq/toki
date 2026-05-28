@@ -50,8 +50,17 @@ pub struct Client {
     pub current_frequency: Option<String>,
     /// Refreshed on every UDP packet from this client (keepalive or audio).
     /// The reaper evicts clients whose `last_seen` is older than the
-    /// configured timeout — see `reaper`.
+    /// configured timeout — see `reaper`. Internal lifecycle signal —
+    /// the admin panel surfaces `connected_at` instead, since a value
+    /// that resets every keepalive (~1-2 s) is useless for "how long
+    /// has this client been here".
     pub last_seen: Instant,
+    /// Wall-clock instant the gRPC `Register` call landed. Never
+    /// updated for the life of the session, so `now - connected_at`
+    /// gives the operator a monotonically-increasing session age.
+    /// Mirrors the "logged in since X" stat in chat-style admin
+    /// surfaces.
+    pub connected_at: Instant,
     /// IP the gRPC `Register` call came from (`None` only on
     /// transports that don't expose one, e.g. Unix sockets). The
     /// audio relay enforces that incoming UDP packets bearing this

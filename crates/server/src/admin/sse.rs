@@ -90,7 +90,7 @@ pub async fn snapshot_now(
                 .map(|c| MemberDto {
                     id: c.id.clone(),
                     display_name: c.display_name.clone(),
-                    last_seen_secs: now.saturating_duration_since(c.last_seen).as_secs(),
+                    connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
                 })
                 .collect();
             RoomDto {
@@ -111,7 +111,7 @@ pub async fn snapshot_now(
         .map(|c| MemberDto {
             id: c.id.clone(),
             display_name: c.display_name.clone(),
-            last_seen_secs: now.saturating_duration_since(c.last_seen).as_secs(),
+            connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
         })
         .collect();
 
@@ -164,6 +164,7 @@ mod tests {
             events_tx: None,
             current_frequency: freq.map(str::to_string),
             last_seen: Instant::now(),
+            connected_at: Instant::now(),
             expected_ip: None,
         }
     }

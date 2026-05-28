@@ -74,6 +74,7 @@ fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         events_tx: None,
         current_frequency: freq.map(str::to_string),
         last_seen: Instant::now(),
+        connected_at: Instant::now(),
         expected_ip: None,
     }
 }

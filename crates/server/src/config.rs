@@ -86,6 +86,17 @@ pub struct AdminConfig {
     /// 401 and the JS shell re-prompts for credentials.
     #[serde(default = "default_admin_session_ttl_hours")]
     pub session_ttl_hours: u64,
+    /// Optional plain-HTTP listener that 308-redirects every request
+    /// to the HTTPS counterpart on `port`. The admin panel is TLS-only
+    /// (gRPC and admin share the same cert), so a browser that lands
+    /// on `http://host:8000` would otherwise see a raw TLS-handshake
+    /// error. When this is `Some(n)`, the admin task binds a second
+    /// listener on `bind:n` that responds to every request with a
+    /// 308 Permanent Redirect to `https://<Host>:port<path>`. Default
+    /// `None` — operators who don't want a second port keep their
+    /// single-port setup. Common value: `8080`.
+    #[serde(default)]
+    pub http_redirect_port: Option<u16>,
 }
 
 impl Default for AdminConfig {
@@ -95,6 +106,7 @@ impl Default for AdminConfig {
             port: default_admin_port(),
             db_path: default_admin_db_path(),
             session_ttl_hours: default_admin_session_ttl_hours(),
+            http_redirect_port: None,
         }
     }
 }
@@ -106,6 +118,38 @@ pub const ENV_ADMIN_BIND: &str = "TOKI_ADMIN_BIND";
 pub const ENV_ADMIN_PORT: &str = "TOKI_ADMIN_PORT";
 pub const ENV_ADMIN_DB_PATH: &str = "TOKI_ADMIN_DB_PATH";
 pub const ENV_ADMIN_SESSION_TTL_HOURS: &str = "TOKI_ADMIN_SESSION_TTL_HOURS";
+pub const ENV_ADMIN_HTTP_REDIRECT_PORT: &str = "TOKI_ADMIN_HTTP_REDIRECT_PORT";
+
+/// Root directory for runtime-managed state (auto-generated TLS
+/// certs, admin sqlite, anything else we write at boot or upgrade
+/// time). Defaults to the process CWD (`.`) so a `cargo run` from a
+/// fresh checkout keeps writing into the repo root, but Docker
+/// images can pin it to `/data` and operators can move state under
+/// `/var/lib/toki` without touching every individual path.
+pub const ENV_DATA_DIR: &str = "TOKI_DATA_DIR";
+
+/// Resolve the data-root directory: `$TOKI_DATA_DIR` if set,
+/// otherwise `.`. Relative paths are kept relative; the resolver
+/// just hands back whatever the env says (the caller is responsible
+/// for `create_dir_all` / canonicalisation if it cares).
+pub fn data_dir() -> PathBuf {
+    std::env::var(ENV_DATA_DIR)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Join `base` and `path`, treating an absolute `path` as a hard
+/// override (so operators who set `db_path = "/var/lib/toki/admin.db"`
+/// keep that path verbatim regardless of `TOKI_DATA_DIR`). Relative
+/// paths get the data-dir prefix so the auto-generated defaults land
+/// under the data root.
+pub fn resolve_under(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
 
 impl AdminConfig {
     /// Apply `TOKI_ADMIN_*` env vars on top of the TOML-loaded
@@ -124,6 +168,8 @@ impl AdminConfig {
     /// * `TOKI_ADMIN_PORT` — TCP port, e.g. `8000`
     /// * `TOKI_ADMIN_DB_PATH` — sqlite path
     /// * `TOKI_ADMIN_SESSION_TTL_HOURS` — positive integer
+    /// * `TOKI_ADMIN_HTTP_REDIRECT_PORT` — TCP port for the plain-HTTP
+    ///   redirect listener; empty string disables it
     pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         if let Ok(v) = std::env::var(ENV_ADMIN_BIND) {
             self.bind = v;
@@ -140,6 +186,18 @@ impl AdminConfig {
             self.session_ttl_hours = v.parse().with_context(|| {
                 format!("{ENV_ADMIN_SESSION_TTL_HOURS}={v:?}: expected a positive integer")
             })?;
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_HTTP_REDIRECT_PORT) {
+            // Empty string disables the redirect listener — handy in
+            // Docker / systemd where unsetting an inherited env var
+            // isn't always possible.
+            self.http_redirect_port = if v.trim().is_empty() {
+                None
+            } else {
+                Some(v.parse().with_context(|| {
+                    format!("{ENV_ADMIN_HTTP_REDIRECT_PORT}={v:?}: expected a TCP port (0..=65535)")
+                })?)
+            };
         }
         Ok(())
     }
@@ -374,6 +432,7 @@ mod tests {
             port: 8000,
             db_path: PathBuf::from("custom.db"),
             session_ttl_hours: 6,
+            http_redirect_port: None,
         };
         admin.apply_env_overrides().unwrap();
         assert_eq!(admin.bind, "1.2.3.4");
@@ -407,11 +466,73 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn env_sets_http_redirect_port_and_empty_clears() {
+        // Setting the env var arms the redirect listener.
+        let _g = set_env(ENV_ADMIN_HTTP_REDIRECT_PORT, "8080");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.http_redirect_port, Some(8080));
+
+        // Empty string explicitly disables it — useful in Docker /
+        // systemd where unsetting an inherited env var is awkward.
+        std::env::set_var(ENV_ADMIN_HTTP_REDIRECT_PORT, "");
+        let mut admin = AdminConfig {
+            http_redirect_port: Some(8080),
+            ..AdminConfig::default()
+        };
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.http_redirect_port, None);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_malformed_http_redirect_port_is_fatal() {
+        let _g = set_env(ENV_ADMIN_HTTP_REDIRECT_PORT, "not-a-port");
+        let mut admin = AdminConfig::default();
+        let err = admin.apply_env_overrides().unwrap_err();
+        assert!(format!("{err:#}").contains("TOKI_ADMIN_HTTP_REDIRECT_PORT"));
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn env_malformed_ttl_is_fatal() {
         let _g = set_env(ENV_ADMIN_SESSION_TTL_HOURS, "-5");
         let mut admin = AdminConfig::default();
         let err = admin.apply_env_overrides().unwrap_err();
         assert!(format!("{err:#}").contains("TOKI_ADMIN_SESSION_TTL_HOURS"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn data_dir_defaults_to_dot_when_env_unset() {
+        std::env::remove_var(ENV_DATA_DIR);
+        assert_eq!(data_dir(), PathBuf::from("."));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn data_dir_honours_env_override() {
+        let _g = set_env(ENV_DATA_DIR, "/var/lib/toki");
+        assert_eq!(data_dir(), PathBuf::from("/var/lib/toki"));
+    }
+
+    #[test]
+    fn resolve_under_keeps_absolute_paths() {
+        // Absolute paths from the operator stay untouched — the
+        // data-dir prefix is for relative defaults only, so a TLS
+        // cert pointed at `/etc/letsencrypt/...` doesn't accidentally
+        // get rewritten to `./etc/letsencrypt/...`.
+        let abs = Path::new("/etc/letsencrypt/cert.pem");
+        assert_eq!(resolve_under(Path::new("/var/lib/toki"), abs), abs);
+    }
+
+    #[test]
+    fn resolve_under_prefixes_relative_paths() {
+        let rel = Path::new("admin.db");
+        assert_eq!(
+            resolve_under(Path::new("/var/lib/toki"), rel),
+            PathBuf::from("/var/lib/toki/admin.db")
+        );
     }
 
     #[test]

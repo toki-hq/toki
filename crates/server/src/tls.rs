@@ -8,8 +8,9 @@
 //!     for real CA-issued certs (Let's Encrypt, internal PKI).
 //!
 //!   * Operator supplied nothing. We try to load
-//!     `tls/{cert,key}.pem` next to the CWD; if either is missing,
-//!     we generate a fresh self-signed pair via `rcgen`, write both
+//!     `{data_dir}/tls/{cert,key}.pem` (where `data_dir` is
+//!     `$TOKI_DATA_DIR`, default `.`); if either is missing, we
+//!     generate a fresh self-signed pair via `rcgen`, write both
 //!     to disk with 0600 mode on the key, and use that. The pair
 //!     persists across restarts so the cert fingerprint stays
 //!     stable — useful both for caching on the client side and for
@@ -25,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{TlsFiles, DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY};
+use crate::config::{resolve_under, TlsFiles, DEFAULT_TLS_CERT, DEFAULT_TLS_DIR, DEFAULT_TLS_KEY};
 
 /// PEM-encoded certificate + private key pair ready to feed into
 /// Tonic's `ServerTlsConfig::identity`. Always owned `Vec<u8>` so
@@ -48,10 +49,20 @@ impl TlsMaterial {
     /// Resolve TLS material for the server's `[tls]` config. Either
     /// loads from the operator-specified paths or falls back to the
     /// auto-generated self-signed pair (creating it if absent).
-    pub fn resolve(cfg: Option<&TlsFiles>) -> Result<Self> {
+    ///
+    /// `data_dir` is the runtime state root (typically `.` or
+    /// `$TOKI_DATA_DIR`); relative operator paths and the auto-gen
+    /// default `tls/{cert,key}.pem` are both resolved against it.
+    /// Absolute operator paths are passed through unchanged so an
+    /// operator who points at `/etc/letsencrypt/...` keeps that path.
+    pub fn resolve(cfg: Option<&TlsFiles>, data_dir: &Path) -> Result<Self> {
         match cfg {
-            Some(files) => load_from_paths(&files.cert, &files.key),
-            None => ensure_self_signed(),
+            Some(files) => {
+                let cert = resolve_under(data_dir, &files.cert);
+                let key = resolve_under(data_dir, &files.key);
+                load_from_paths(&cert, &key)
+            }
+            None => ensure_self_signed(data_dir),
         }
     }
 }
@@ -73,19 +84,19 @@ fn load_from_paths(cert: &Path, key: &Path) -> Result<TlsMaterial> {
 /// deliberate — it means rcgen and `std::fs` agree on the bytes
 /// we're handing to Tonic, with no chance of a stale in-memory copy
 /// drifting from disk.
-fn ensure_self_signed() -> Result<TlsMaterial> {
-    let cert_path = PathBuf::from(DEFAULT_TLS_CERT);
-    let key_path = PathBuf::from(DEFAULT_TLS_KEY);
+fn ensure_self_signed(data_dir: &Path) -> Result<TlsMaterial> {
+    let tls_dir = data_dir.join(DEFAULT_TLS_DIR);
+    let cert_path = data_dir.join(DEFAULT_TLS_CERT);
+    let key_path = data_dir.join(DEFAULT_TLS_KEY);
     if cert_path.exists() && key_path.exists() {
         return load_from_paths(&cert_path, &key_path);
     }
-    generate_self_signed(&cert_path, &key_path)?;
+    generate_self_signed(&tls_dir, &cert_path, &key_path)?;
     load_from_paths(&cert_path, &key_path)
 }
 
-fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<()> {
-    std::fs::create_dir_all(DEFAULT_TLS_DIR)
-        .with_context(|| format!("create {DEFAULT_TLS_DIR}/"))?;
+fn generate_self_signed(tls_dir: &Path, cert_path: &Path, key_path: &Path) -> Result<()> {
+    std::fs::create_dir_all(tls_dir).with_context(|| format!("create {}/", tls_dir.display()))?;
 
     // SANs: localhost + 127.0.0.1 cover the dev-loop case. Operators
     // running on a public hostname should provide a real cert via
@@ -147,7 +158,11 @@ mod tests {
     #[test]
     fn resolve_loads_operator_supplied_paths() {
         let (dir, files) = write_temp_cert();
-        let material = TlsMaterial::resolve(Some(&files)).unwrap();
+        // Absolute paths from the operator pass through unchanged
+        // regardless of what `data_dir` is — operators pointing at
+        // `/etc/letsencrypt/...` shouldn't suddenly read from
+        // `./etc/letsencrypt/...` because of data-dir prefixing.
+        let material = TlsMaterial::resolve(Some(&files), Path::new(".")).unwrap();
         assert_eq!(material.source, files.cert);
         // PEM output starts with `-----BEGIN`.
         let cert_text = std::str::from_utf8(&material.cert_pem).unwrap();
@@ -163,27 +178,24 @@ mod tests {
             cert: PathBuf::from("/nonexistent/cert.pem"),
             key: PathBuf::from("/nonexistent/key.pem"),
         };
-        let err = TlsMaterial::resolve(Some(&files)).unwrap_err();
+        let err = TlsMaterial::resolve(Some(&files), Path::new(".")).unwrap_err();
         // The anyhow chain mentions the path so an operator can
         // debug the config without grepping the source.
         assert!(format!("{err:#}").contains("/nonexistent"));
     }
 
     /// Auto-generation walks the same code path the server boots
-    /// through. We isolate it under a temp CWD because the resolver
-    /// uses relative `tls/` paths from `cd`.
+    /// through. We pass an explicit `data_dir` instead of relying on
+    /// CWD so the test doesn't have to mutate process-global state.
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial]
     fn auto_generates_self_signed_pair_when_no_config() {
         let dir = std::env::temp_dir().join(format!("toki-tls-auto-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&dir).unwrap();
 
         // First call: no files yet, generator runs.
-        let first = TlsMaterial::resolve(None).unwrap();
+        let first = TlsMaterial::resolve(None, &dir).unwrap();
         assert!(dir.join("tls").join("cert.pem").exists());
         assert!(dir.join("tls").join("key.pem").exists());
 
@@ -200,10 +212,25 @@ mod tests {
         // Second call: files already exist, generator does NOT run
         // and the cert bytes match the first call — i.e. the same
         // identity persists across restarts.
-        let second = TlsMaterial::resolve(None).unwrap();
+        let second = TlsMaterial::resolve(None, &dir).unwrap();
         assert_eq!(first.cert_pem, second.cert_pem);
 
-        std::env::set_current_dir(original_cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `data_dir` is honoured for the auto-gen branch: certs land
+    /// under `{data_dir}/tls/`, not under CWD/tls/. This is the
+    /// `TOKI_DATA_DIR=/var/lib/toki` path in production.
+    #[test]
+    fn auto_gen_uses_data_dir_prefix() {
+        let dir = std::env::temp_dir().join(format!("toki-tls-datadir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let _ = TlsMaterial::resolve(None, &dir).unwrap();
+        assert!(dir.join("tls").join("cert.pem").exists());
+        assert!(dir.join("tls").join("key.pem").exists());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

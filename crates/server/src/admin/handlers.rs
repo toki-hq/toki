@@ -104,6 +104,34 @@ pub async fn font_mono() -> impl IntoResponse {
     binary_asset_response("font/ttf", FONT)
 }
 
+/// `GET /favicon.ico` — multi-resolution Windows-style icon.
+///
+/// Browsers ask for `/favicon.ico` automatically on every page load
+/// regardless of `<link rel="icon">`, so we serve it from the root.
+/// The asset itself is shared with the desktop client — same
+/// rationale as the fonts: embed-from-client so the desktop and
+/// admin surfaces stay visually aligned.
+pub async fn favicon_ico() -> impl IntoResponse {
+    static ICO: &[u8] = include_bytes!("../../../client/assets/icon/Toki.ico");
+    binary_asset_response("image/vnd.microsoft.icon", ICO)
+}
+
+/// `GET /static/icon.svg` — vector logo, used by the modern
+/// `<link rel="icon" type="image/svg+xml">` hint. Browsers that
+/// support it (Firefox, Chromium ≥ 80) prefer this over the .ico.
+pub async fn favicon_svg() -> impl IntoResponse {
+    static SVG: &[u8] = include_bytes!("../../../client/assets/icon/toki-icon.svg");
+    binary_asset_response("image/svg+xml", SVG)
+}
+
+/// `GET /static/icon-512.png` — high-resolution PNG, used as the
+/// `apple-touch-icon` and as a fallback for browsers that ignore
+/// the SVG link.
+pub async fn favicon_png() -> impl IntoResponse {
+    static PNG: &[u8] = include_bytes!("../../../client/assets/icon/toki-icon-512.png");
+    binary_asset_response("image/png", PNG)
+}
+
 /// Shared envelope for the three embedded asset endpoints: sets the
 /// right Content-Type and forces revalidation on every request. The
 /// admin panel is internal-tooling-grade traffic; we lose nothing by

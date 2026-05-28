@@ -1,10 +1,15 @@
 use std::net::SocketAddr;
 
+use anyhow::Context as _;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
 use toki_server::{
-    admin, audio, config::Config, reaper, server_config, signaling::SignalingSvc, state, tls,
+    admin, audio,
+    config::{self, Config},
+    reaper, server_config,
+    signaling::SignalingSvc,
+    state, tls,
 };
 
 #[tokio::main]
@@ -41,11 +46,23 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("password gate DISARMED — server is in open mode");
     }
 
+    // Resolve the runtime data root (`$TOKI_DATA_DIR`, defaults to
+    // `.`). Auto-generated TLS certs land under `{data_dir}/tls/`,
+    // and any relative `[admin] db_path` resolves against it too —
+    // so Docker images can pin everything stateful to `/data` with
+    // a single env var while leaving absolute operator paths
+    // (e.g. `/etc/letsencrypt/...`) untouched.
+    let data_dir = config::data_dir();
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("create data dir {}", data_dir.display()))?;
+    tracing::info!(data_dir = %data_dir.display(), "data dir resolved");
+
     // TLS is mandatory. Either the operator supplied cert + key
     // paths in [tls], or we auto-generate a self-signed pair to
-    // `tls/{cert,key}.pem` on first run and reuse it thereafter.
-    // Either way, gRPC is always HTTPS — there is no plaintext mode.
-    let tls_material = tls::TlsMaterial::resolve(config.tls.as_ref())?;
+    // `{data_dir}/tls/{cert,key}.pem` on first run and reuse it
+    // thereafter. Either way, gRPC is always HTTPS — there is no
+    // plaintext mode.
+    let tls_material = tls::TlsMaterial::resolve(config.tls.as_ref(), &data_dir)?;
     tracing::info!(
         source = %tls_material.source.display(),
         "TLS ARMED — gRPC channel will serve HTTPS/2"
@@ -94,7 +111,11 @@ async fn main() -> anyhow::Result<()> {
     // over the runtime db; capture that as a boolean so the admin UI
     // can lock its server-password input accordingly.
     let toml_password_override = password.is_some();
-    let admin_cfg = config.admin;
+    let mut admin_cfg = config.admin;
+    // Anchor a relative `db_path` under `TOKI_DATA_DIR`. Absolute
+    // operator paths (e.g. `/var/lib/toki/admin.db`) are honoured
+    // verbatim — same posture as `[tls]` operator paths.
+    admin_cfg.db_path = config::resolve_under(&data_dir, &admin_cfg.db_path);
     tracing::info!(
         bind = %admin_cfg.bind,
         port = admin_cfg.port,

@@ -31,6 +31,6 @@ ENV TOKI_CONFIG=/data/config.toml
 
 USER toki
 
-EXPOSE 50051 50052
+EXPOSE 50051 50052 8000
 
 ENTRYPOINT ["./entrypoint.sh"]

@@ -46,6 +46,13 @@ pub fn build(state: AppState) -> Router {
         .route("/static/fonts/ui.ttf", get(handlers::font_ui))
         .route("/static/fonts/ui-bold.ttf", get(handlers::font_ui_bold))
         .route("/static/fonts/mono.ttf", get(handlers::font_mono))
+        // Favicons: `/favicon.ico` is the browser-default request
+        // path (fired before our HTML's `<link>` tags are parsed);
+        // the SVG + PNG variants are referenced explicitly from
+        // index.html so modern browsers pick the sharper asset.
+        .route("/favicon.ico", get(handlers::favicon_ico))
+        .route("/static/icon.svg", get(handlers::favicon_svg))
+        .route("/static/icon-512.png", get(handlers::favicon_png))
         .route("/api/login", post(handlers::login))
         // Protected `/api/*` subtree (login + logout excluded above).
         .nest("/api", protected)

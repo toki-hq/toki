@@ -41,6 +41,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use axum::{
+    extract::{OriginalUri, State},
+    http::{header, HeaderMap, StatusCode},
+    response::Redirect,
+    routing::any,
+    Router,
+};
 use axum_server::tls_rustls::RustlsConfig;
 
 use crate::config::AdminConfig;
@@ -200,14 +207,144 @@ pub async fn run(
         "admin panel listening (HTTPS)",
     );
 
+    // Optional plain-HTTP listener that 308-redirects every request
+    // to the HTTPS counterpart. The admin panel is TLS-only, so an
+    // operator who types `http://host:8000` would otherwise get a
+    // raw TLS-handshake error. When `http_redirect_port` is set, we
+    // bind a second listener on `bind:that_port` that returns a 308
+    // for every method + path; modern browsers preserve the method
+    // (so POST/PUT survive) and cache the upgrade per-origin.
+    let redirect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
+        match cfg.http_redirect_port {
+            Some(http_port) => {
+                let http_bind: SocketAddr = format!("{}:{}", cfg.bind, http_port)
+                    .parse()
+                    .with_context(|| {
+                        format!("parse admin HTTP redirect bind {}:{}", cfg.bind, http_port)
+                    })?;
+                tracing::info!(
+                    %http_bind,
+                    https_port = cfg.port,
+                    "admin HTTP→HTTPS redirect listening",
+                );
+                Box::pin(serve_redirect(http_bind, cfg.port))
+            }
+            None => Box::pin(std::future::pending()),
+        };
+
     // `into_make_service_with_connect_info::<SocketAddr>` populates
     // the `ConnectInfo<SocketAddr>` extractor on every request — the
     // login handler reads the peer IP from there for its per-IP
     // rate-limit gate. Without it the extractor returns None and
     // the throttle wouldn't fire.
-    axum_server::bind_rustls(bind, tls_cfg)
-        .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .context("admin axum_server::bind_rustls")?;
+    let serve_fut = async move {
+        axum_server::bind_rustls(bind, tls_cfg)
+            .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .context("admin axum_server::bind_rustls")
+    };
+
+    // Both listeners run concurrently. If either errors we bring the
+    // whole admin task down — `main.rs` will see this through the
+    // `tokio::select!` and exit the process so the operator sees the
+    // failure rather than a half-working admin surface.
+    tokio::select! {
+        res = serve_fut => res?,
+        res = redirect_fut => res?,
+    }
     Ok(())
+}
+
+/// Plain-HTTP listener that 308-redirects every request to the HTTPS
+/// admin port. The handler reconstructs the canonical URL from the
+/// inbound `Host` header (stripping any port the client supplied) and
+/// the original path-and-query; the target host:port is
+/// `<bare_host>:<https_port>`. 308 (vs 301/302) preserves the request
+/// method, which matters for the JS shell's `fetch(...)` mutations.
+async fn serve_redirect(bind: SocketAddr, https_port: u16) -> Result<()> {
+    let app: Router = Router::new()
+        .fallback(any(redirect_handler))
+        .with_state(https_port);
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind admin HTTP redirect listener at {bind}"))?;
+    axum::serve(listener, app)
+        .await
+        .context("admin HTTP redirect axum::serve")?;
+    Ok(())
+}
+
+/// Build the 308 target URL. We trust the `Host` header for the
+/// hostname (this listener only ever serves the admin panel, so the
+/// security implications of trusting `Host` are limited to "the
+/// browser redirects to a different name it already typed"). If the
+/// header is missing or malformed we 400 — better than emitting an
+/// `https://:8000/...` URL that the browser will refuse.
+async fn redirect_handler(
+    State(https_port): State<u16>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Redirect, (StatusCode, &'static str)> {
+    let host_header = headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .ok_or((StatusCode::BAD_REQUEST, "missing or invalid Host header"))?;
+    let bare_host = strip_host_port(host_header);
+    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let target = format!("https://{bare_host}:{https_port}{path_and_query}");
+    Ok(Redirect::permanent(&target))
+}
+
+/// Strip any `:port` suffix from a `Host` header value, returning
+/// the bare hostname/IP. Handles three cases:
+///
+/// * `example.com:8000` → `example.com`
+/// * `[::1]:8000` → `[::1]` (IPv6 literal, keep brackets)
+/// * `[::1]` / `example.com` → unchanged
+///
+/// Returning a `&str` borrow lets the caller `format!` the redirect
+/// URL without a heap allocation per request.
+fn strip_host_port(host_header: &str) -> &str {
+    if host_header.starts_with('[') {
+        // IPv6 literal: port (if any) follows the closing `]`.
+        // Without `]:` we either have a bare bracketed address
+        // (no port) or a malformed header — pass through either way.
+        match host_header.rfind("]:") {
+            Some(idx) => &host_header[..=idx],
+            None => host_header,
+        }
+    } else {
+        // Hostname or IPv4 — at most one `:`, separating port.
+        host_header
+            .split_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(host_header)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_host_port;
+
+    #[test]
+    fn strips_port_from_hostname() {
+        assert_eq!(strip_host_port("example.com:8000"), "example.com");
+        assert_eq!(strip_host_port("example.com"), "example.com");
+    }
+
+    #[test]
+    fn strips_port_from_ipv4() {
+        assert_eq!(strip_host_port("127.0.0.1:8000"), "127.0.0.1");
+        assert_eq!(strip_host_port("127.0.0.1"), "127.0.0.1");
+    }
+
+    #[test]
+    fn preserves_ipv6_brackets() {
+        // Bracketed IPv6, with and without a port. The brackets must
+        // survive so the resulting redirect URL parses on the client.
+        assert_eq!(strip_host_port("[::1]:8000"), "[::1]");
+        assert_eq!(strip_host_port("[::1]"), "[::1]");
+        assert_eq!(strip_host_port("[2001:db8::1]:443"), "[2001:db8::1]");
+        assert_eq!(strip_host_port("[2001:db8::1]"), "[2001:db8::1]");
+    }
 }

@@ -232,7 +232,10 @@ jobs:
       - name: cargo bundle
         # Per the [package.metadata.bundle] block in client/Cargo.toml,
         # this produces target/release/bundle/osx/Toki.app.
-        run: cargo bundle -p toki-client --release --locked
+        # `cargo bundle` rejects `--locked` (unlike `cargo build`),
+        # so we rely on the lockfile being respected at the underlying
+        # `cargo build` invocation cargo-bundle issues internally.
+        run: cargo bundle -p toki-client --release
 
       - name: zip the .app
         run: |

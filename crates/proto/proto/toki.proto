@@ -82,6 +82,13 @@ message Event {
     // confirmed "you are now on frequency X" signal so it can render
     // a clean roster (the surrounding Joined/Left events fill it).
     FrequencyChanged frequency_changed = 4;
+    // Sent when a member's display_name is updated server-side
+    // (today: triggered exclusively by the admin panel's rename
+    // action). Broadcast to every member of the renamed user's
+    // current room *and* to the renamed user's own stream — the
+    // subject compares `client_id` against their own id to know
+    // whether their topbar callsign needs refreshing.
+    DisplayNameChanged display_name_changed = 5;
   }
 }
 
@@ -96,6 +103,11 @@ message MemberLeft {
 
 message FrequencyChanged {
   string frequency = 1;
+}
+
+message DisplayNameChanged {
+  string client_id = 1;
+  string display_name = 2;
 }
 
 message PttEvent {

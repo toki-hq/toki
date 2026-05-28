@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
-use toki_server::{audio, config::Config, reaper, signaling::SignalingSvc, state, tls};
+use toki_server::{admin, audio, config::Config, reaper, signaling::SignalingSvc, state, tls};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -71,6 +71,21 @@ async fn main() -> anyhow::Result<()> {
 
     let audio_task = tokio::spawn(audio::run(audio_bind, registry.clone()));
 
+    // Admin panel is opt-in via the `[admin]` block in config.toml.
+    // Absent ⇒ no listener, zero overhead for headless installs. When
+    // present, the admin task lives alongside grpc + audio in the
+    // select! below; any error there brings the process down so the
+    // operator can see the failure in journalctl.
+    let admin_task = config.admin.map(|admin_cfg| {
+        tracing::info!(
+            bind = %admin_cfg.bind,
+            port = admin_cfg.port,
+            db_path = %admin_cfg.db_path.display(),
+            "admin panel enabled",
+        );
+        tokio::spawn(admin::run(admin_cfg, registry.clone()))
+    });
+
     tracing::info!(
         ?grpc_addr,
         password_required = password.is_some(),
@@ -92,9 +107,21 @@ async fn main() -> anyhow::Result<()> {
         )
         .serve(grpc_addr);
 
+    // The admin task is `Option<JoinHandle<...>>`; when absent we
+    // substitute a future that pends forever so the `select!` arm
+    // never fires. This keeps the select! shape identical to the
+    // non-admin path without resorting to a macro arm gate.
+    let admin_fut = async {
+        match admin_task {
+            Some(h) => h.await,
+            None => std::future::pending().await,
+        }
+    };
+
     tokio::select! {
         res = grpc => res?,
         res = audio_task => res??,
+        res = admin_fut => res??,
     }
 
     Ok(())

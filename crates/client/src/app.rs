@@ -313,6 +313,8 @@ impl TokiApp {
             holder,
             holder_name,
             is_transmitting,
+            display_name: s.display_name.clone(),
+            frequency: s.frequency.clone(),
             log_tail: s.log.iter().next_back().cloned().unwrap_or_default(),
         }
     }
@@ -473,6 +475,43 @@ impl TokiApp {
         self.freq_change_deadline = Some(Instant::now() + T::FREQ_DEBOUNCE);
     }
 
+    /// Snap the local tuner widget to whatever frequency the *server*
+    /// last told us we're on. Normally that already matches the
+    /// tuner's `channel_idx` and this is a no-op. The case it
+    /// actually handles is an admin-driven move via the admin panel:
+    /// the server sends us a `FrequencyChanged` event we didn't ask
+    /// for, the runtime writes `state.frequency`, and on the next
+    /// frame this method nudges `channel_idx` over so the OLED and
+    /// channel-strip render the new value.
+    ///
+    /// Guard against the user-initiated case: if a debounce is in
+    /// flight, the user is still tuning and `state.frequency` lags
+    /// `channel_idx` until the RPC round-trips — clobbering the
+    /// local value here would yank the OLED back as they scroll.
+    fn sync_tuner_to_server(&mut self, snap: &StateSnapshot) {
+        if self.freq_change_deadline.is_some() {
+            return;
+        }
+        let Some(server_freq) = snap.frequency.as_deref() else {
+            return;
+        };
+        let Some(server_idx) = T::channel_of_label(server_freq) else {
+            // Unknown frequency string — refuse to clobber the
+            // local tuner over a malformed server payload.
+            return;
+        };
+        if server_idx == self.channel_idx {
+            return;
+        }
+        // Persist the new frequency to the saved config too, so a
+        // user who's moved by an admin and then reconnects lands on
+        // the room they were actually on, not the one they typed in
+        // the connect dialog days ago.
+        self.channel_idx = server_idx;
+        self.config.connection.frequency = T::frequency_label(T::frequency_of(self.channel_idx));
+        self.config.save();
+    }
+
     /// Run from the update loop each frame: if a debounce is in
     /// flight and the deadline has passed, fire the ChangeFrequency
     /// RPC for the user's final channel selection and clear the
@@ -506,6 +545,16 @@ struct StateSnapshot {
     holder: Option<String>,
     holder_name: String,
     is_transmitting: bool,
+    /// Our own live callsign. Mirrors `ClientState.display_name` and
+    /// changes mid-session when the admin renames us — read by the
+    /// topbar so the change is visible without a reconnect.
+    display_name: String,
+    /// Our current frequency room as the *server* sees it. The GUI's
+    /// tuner widget reads `App.channel_idx` for its primary display,
+    /// but compares against this each frame so admin-driven moves
+    /// (server→client `FrequencyChanged`) snap the tuner over to
+    /// match without round-tripping through user input.
+    frequency: Option<String>,
     #[allow(dead_code)]
     log_tail: String,
 }
@@ -1055,6 +1104,15 @@ impl eframe::App for TokiApp {
         // Fire any pending frequency-change RPC once the user has
         // stopped clicking chevrons for `FREQ_DEBOUNCE`.
         self.tick_freq_debounce();
+        // Sync the tuner widget's local `channel_idx` to whatever the
+        // server says we're on. Normally these match (the user moved
+        // the tuner, we sent ChangeFrequency, the server echoed back).
+        // But an admin-driven move sends a server-initiated
+        // `FrequencyChanged` event the user didn't request — the
+        // tuner needs to snap over to the new value. Single-direction
+        // sync (server → tuner) so we don't loop the user's own
+        // pending moves back into the local state mid-debounce.
+        self.sync_tuner_to_server(&snap);
 
         // ── Recording: poll the rdev/device_query listener ──────────
         if self.recording {
@@ -1251,9 +1309,14 @@ impl TokiApp {
             Stroke::new(1.0, T::DIVIDER),
         );
 
-        // Callsign / connection-state label.
+        // Callsign / connection-state label. Read from the live
+        // `snap.display_name` rather than `config.connection.display_name`
+        // so admin-driven renames (which mutate the live state via the
+        // `DisplayNameChanged` event) take effect immediately on the
+        // topbar without a reconnect. The config field stays as the
+        // saved default for the *next* connection.
         let callsign = match &snap.connection {
-            ConnState::Connected => self.config.connection.display_name.to_uppercase(),
+            ConnState::Connected => snap.display_name.to_uppercase(),
             ConnState::Connecting => "CONNECTING…".into(),
             ConnState::Disconnected => "OFFLINE".into(),
             ConnState::Failed(_) => "FAILED".into(),

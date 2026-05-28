@@ -1,0 +1,265 @@
+/* Minimal, framework-free styling. Two-tone dark theme so the admin
+   panel reads as "operator console" rather than "marketing site". */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: #0e1116;
+  color: #d4d7dc;
+  height: 100%;
+}
+
+button, input { font: inherit; }
+
+a { color: #6ea8ff; }
+
+/* ---- Top bar ----------------------------------------------------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  background: #161b22;
+  border-bottom: 1px solid #232a33;
+}
+.brand { font-weight: 700; letter-spacing: 0.08em; }
+
+/* Live-feed indicator. Neutral grey when we have no opinion yet
+   (initial paint, before any SSE event); green while snapshots
+   are arriving; red and pulsing while the EventSource is
+   reconnecting. Hover shows a textual description for clarity. */
+.status {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #6e7681;
+  flex-shrink: 0;
+  transition: background-color 0.2s ease-out;
+}
+.status.ok  { background: #5fdf80; }
+.status.bad {
+  background: #ff7b72;
+  animation: status-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+#logout {
+  margin-left: auto;
+  background: transparent;
+  color: #d4d7dc;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.25rem 0.75rem;
+  cursor: pointer;
+}
+#logout:hover { background: #1f242c; }
+
+/* ---- View toggling ----------------------------------------------
+   The base rule below hides every <section> under <main>. The
+   conditional rules un-hide exactly the section that matches the
+   current `data-view`. We have to put the *full* display property
+   (flex / grid / block) on the conditional rule rather than on the
+   unconditional `.view-foo` class — otherwise a class selector
+   (specificity 0,1,0) wins over `main > section` (specificity 0,0,2)
+   and the section is always visible regardless of data-view. */
+
+main > section { display: none; }
+
+main[data-view="loading"] .view-loading {
+  display: block;
+}
+
+main[data-view="login"] .view-login {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: calc(100vh - 50px);
+}
+
+main[data-view="dashboard"] .view-dashboard {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 1rem;
+  padding: 1rem;
+  height: calc(100vh - 50px);
+}
+.view-login form {
+  width: 320px;
+  background: #161b22;
+  border: 1px solid #232a33;
+  border-radius: 6px;
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.view-login h1 { margin: 0 0 0.5rem 0; font-size: 1.2rem; }
+.view-login label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85em; color: #8b949e; }
+.view-login input {
+  background: #0e1116;
+  border: 1px solid #30363d;
+  color: #d4d7dc;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+}
+.view-login button {
+  margin-top: 0.5rem;
+  background: #2b6cb0;
+  color: white;
+  border: none;
+  padding: 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.view-login button:hover { background: #3578c0; }
+
+.error { color: #ff7b72; font-size: 0.85em; min-height: 1em; }
+
+/* ---- Rooms grid -------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 0.75rem;
+  align-content: start;
+  overflow-y: auto;
+}
+
+.room {
+  background: #161b22;
+  border: 1px solid #232a33;
+  border-radius: 6px;
+  padding: 0.75rem;
+}
+.room header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+.room h3 { margin: 0; font-size: 1rem; }
+.room .count { color: #8b949e; font-size: 0.8em; }
+
+.room ul { list-style: none; padding: 0; margin: 0; }
+.room li {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0;
+  border-top: 1px dashed #232a33;
+}
+.room li:first-child { border-top: none; }
+
+.member-name { flex: 1; }
+.member-meta { color: #8b949e; font-size: 0.75em; }
+
+.holder .member-name {
+  color: #5fdf80;
+  font-weight: 700;
+}
+.holder .member-name::before {
+  content: "● ";
+  color: #5fdf80;
+}
+
+.actions { display: flex; gap: 0.25rem; }
+.actions button {
+  background: transparent;
+  color: #8b949e;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  padding: 0.1rem 0.4rem;
+  font-size: 0.75em;
+  cursor: pointer;
+}
+.actions button:hover { color: #d4d7dc; border-color: #57606a; }
+.actions button.danger:hover { color: #ff7b72; border-color: #ff7b72; }
+
+/* ---- Sidebar (lobby + log) -------------------------------------- */
+
+.sidebar {
+  background: #161b22;
+  border: 1px solid #232a33;
+  border-radius: 6px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.sidebar h2 {
+  font-size: 0.85em;
+  text-transform: uppercase;
+  color: #8b949e;
+  letter-spacing: 0.1em;
+  margin: 0.5rem 0 0.25rem 0;
+}
+.sidebar h2:first-child { margin-top: 0; }
+.sidebar .hint { font-size: 0.75em; color: #6e7681; margin: 0 0 0.5rem 0; }
+.sidebar ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.85em;
+  max-height: 35vh;
+  overflow-y: auto;
+}
+.sidebar li { padding: 0.2rem 0; color: #8b949e; }
+.sidebar li.fresh { color: #d4d7dc; }
+
+#event-log li::before { content: "› "; color: #6e7681; }
+
+/* ---- Modal ------------------------------------------------------- */
+
+dialog {
+  border: 1px solid #232a33;
+  background: #161b22;
+  color: #d4d7dc;
+  border-radius: 6px;
+  padding: 0;
+  min-width: 320px;
+}
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.6);
+}
+dialog form {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+dialog h3 { margin: 0; font-size: 1rem; }
+dialog label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85em; color: #8b949e; }
+dialog input {
+  background: #0e1116;
+  border: 1px solid #30363d;
+  color: #d4d7dc;
+  border-radius: 4px;
+  padding: 0.4rem 0.6rem;
+}
+dialog menu {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+}
+dialog menu button {
+  background: transparent;
+  color: #d4d7dc;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 0.3rem 0.9rem;
+  cursor: pointer;
+}
+dialog menu button[value="ok"] {
+  background: #2b6cb0;
+  border-color: #2b6cb0;
+  color: white;
+}

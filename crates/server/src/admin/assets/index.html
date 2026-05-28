@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Toki — admin</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <!--
+    Single-page admin shell. The login view and the dashboard view live
+    in the same document; `app.js` toggles `[data-view]` on <main> when
+    a session is detected (via a 200 on /api/state).
+  -->
+  <header class="topbar">
+    <div class="brand">TOKI · admin</div>
+    <div class="status" id="status"></div>
+    <button id="logout" hidden>logout</button>
+  </header>
+
+  <main id="main" data-view="loading">
+    <!-- LOGIN ------------------------------------------------------- -->
+    <section class="view-login">
+      <form id="login-form">
+        <h1>Sign in</h1>
+        <label>
+          username
+          <input type="text" name="username" required autocomplete="username" />
+        </label>
+        <label>
+          password
+          <input type="password" name="password" required autocomplete="current-password" />
+        </label>
+        <button type="submit">sign in</button>
+        <p class="error" id="login-error" hidden></p>
+      </form>
+    </section>
+
+    <!-- DASHBOARD --------------------------------------------------- -->
+    <section class="view-dashboard">
+      <div class="grid" id="rooms-grid">
+        <!-- Frequency cards are appended by app.js. -->
+      </div>
+      <aside class="sidebar">
+        <h2>Lobby</h2>
+        <p class="hint">Registered, not on any frequency.</p>
+        <ul id="lobby-list"></ul>
+        <h2>Events</h2>
+        <ul id="event-log"></ul>
+      </aside>
+    </section>
+
+    <!-- LOADING ----------------------------------------------------- -->
+    <section class="view-loading">
+      <p>loading…</p>
+    </section>
+  </main>
+
+  <!--
+    Generic modal used for both "move" and "rename" prompts.
+
+    The cancel button is explicitly `type="button"` so it does NOT
+    submit the form. Two reasons:
+
+      1. The input has `required`; if cancel were a submit button,
+         clicking it on an empty Move modal would fail HTML5
+         validation and the dialog would refuse to close.
+      2. Pressing Enter inside a form implicitly triggers the *first
+         submit button in tree order*. If cancel were a submit, Enter
+         would close the dialog with returnValue="cancel" — which our
+         JS reads as "user cancelled" → action aborted. Making cancel
+         a plain button means OK is the only submit, so Enter goes
+         where the user expects.
+
+    The cancel handler is wired in app.js via `dlg.close("cancel")`.
+  -->
+  <dialog id="prompt-modal">
+    <form method="dialog" id="prompt-form">
+      <h3 id="prompt-title"></h3>
+      <label>
+        <span id="prompt-label"></span>
+        <input type="text" id="prompt-input" required />
+      </label>
+      <menu>
+        <button type="button" id="prompt-cancel">cancel</button>
+        <button id="prompt-submit" value="ok">ok</button>
+      </menu>
+      <p class="error" id="prompt-error" hidden></p>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

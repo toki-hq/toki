@@ -37,3 +37,12 @@ design/
 # Tracked locally so future-you keeps the context; not shipped because
 # they're often half-thoughts that would rot in public.
 /notes/
+
+# Admin panel sqlite store. Created on first boot at the path
+# configured by `[admin].db_path` (default `admin.db` next to CWD).
+# Contains the seeded admin user's argon2id hash + live session
+# tokens — operator-local, must not land in version control.
+/admin.db
+/admin.db-journal
+/admin.db-wal
+/admin.db-shm

@@ -489,6 +489,33 @@ impl Session {
                             st.frequency = Some(fc.frequency.clone());
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
+                        Some(Ev::DisplayNameChanged(dnc)) => {
+                            // Either someone in our room was renamed
+                            // (peer case) or *we* were renamed (subject
+                            // case). In both, we rebind the roster
+                            // entry; in the subject case we also
+                            // refresh our own `display_name` so the
+                            // topbar callsign re-renders this frame.
+                            let mut st = state_for_events.lock().unwrap();
+                            let is_self = st.self_id.as_deref() == Some(dnc.client_id.as_str());
+                            // Only update the roster entry if the
+                            // client is actually in our current room
+                            // (we may receive a self-rename while in
+                            // the lobby, with no roster to update).
+                            if st.members.contains_key(&dnc.client_id) {
+                                st.members
+                                    .insert(dnc.client_id.clone(), dnc.display_name.clone());
+                            }
+                            if is_self {
+                                let old = std::mem::replace(
+                                    &mut st.display_name,
+                                    dnc.display_name.clone(),
+                                );
+                                st.log(format!("✏️ renamed: {old} → {}", dnc.display_name));
+                            } else {
+                                st.log(format!("✏️ peer renamed to {}", dnc.display_name));
+                            }
+                        }
                         None => {}
                     },
                     Err(e) => {
@@ -497,7 +524,24 @@ impl Session {
                     }
                 }
             }
-            info!("event stream closed");
+            // Stream closed cleanly — either the server shut down or
+            // an admin kicked us. Either way, the events_tx on the
+            // server side is gone and no further events will arrive.
+            // Surface this to the GUI: flip the connection state back
+            // to Disconnected, drop the roster, and log a friendly
+            // line so the operator sees the cause rather than just
+            // a silently-stuck "Connected" status bar.
+            //
+            // We can't tell server-shutdown apart from admin-kick
+            // here — both look like a graceful EOF — so the log
+            // message is deliberately generic.
+            info!("event stream closed; transitioning to Disconnected");
+            let mut st = state_for_events.lock().unwrap();
+            st.connection = crate::state::ConnState::Disconnected;
+            st.members.clear();
+            st.holder = None;
+            st.frequency = None;
+            st.log("⚠ disconnected by server");
         });
 
         // ── PTT outbound stream (us → server) ─────────────────────────

@@ -623,7 +623,11 @@ impl Signaling for SignalingSvc {
 /// The caller is responsible for clearing the leaver's
 /// `current_frequency` if appropriate and for actually awaiting the
 /// broadcasts outside the registry lock.
-fn remove_from_room(
+///
+/// `pub(crate)` so the admin module can reuse this for its
+/// "move to frequency" operation — keeps the leave-side semantics
+/// identical between gRPC ChangeFrequency and admin-driven moves.
+pub(crate) fn remove_from_room(
     registry: &mut Registry,
     client_id: &str,
     frequency: &str,

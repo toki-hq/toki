@@ -45,6 +45,66 @@ pub struct Config {
     /// always TLS — there's no plaintext mode.
     #[serde(default)]
     pub tls: Option<TlsFiles>,
+
+    /// Optional admin web panel. When omitted, the admin task isn't
+    /// spawned — zero overhead for headless server installs. When
+    /// present, an HTTP listener is bound to `bind:port` and serves
+    /// the operator dashboard at `/`. On first boot, if the sqlite
+    /// store at `db_path` has no admin users, one is seeded with a
+    /// random password and logged once at WARN level.
+    #[serde(default)]
+    pub admin: Option<AdminConfig>,
+}
+
+/// Admin web panel settings. All fields have defaults; an empty
+/// `[admin]` block in TOML is equivalent to "enable with defaults".
+#[derive(Debug, Deserialize)]
+pub struct AdminConfig {
+    /// Interface to bind the admin HTTP listener to. Defaults to
+    /// `127.0.0.1` so the admin surface stays loopback-only unless
+    /// the operator explicitly opens it to the LAN — the panel is
+    /// HTTP-only (no TLS) in v1, so exposing it publicly is a
+    /// deliberate choice.
+    #[serde(default = "default_admin_bind")]
+    pub bind: String,
+    /// Port for the admin HTTP listener. Default `8000` to match
+    /// the spec; freely changeable without touching the gRPC port.
+    #[serde(default = "default_admin_port")]
+    pub port: u16,
+    /// SQLite path for the admin user + session store. Relative
+    /// paths are resolved against the process CWD, the same way
+    /// `tls/cert.pem` is.
+    #[serde(default = "default_admin_db_path")]
+    pub db_path: PathBuf,
+    /// Session TTL in hours. Cookies issued by `/api/login` are
+    /// valid for this long; on expiry the next API call returns
+    /// 401 and the JS shell re-prompts for credentials.
+    #[serde(default = "default_admin_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+}
+
+impl Default for AdminConfig {
+    fn default() -> Self {
+        Self {
+            bind: default_admin_bind(),
+            port: default_admin_port(),
+            db_path: default_admin_db_path(),
+            session_ttl_hours: default_admin_session_ttl_hours(),
+        }
+    }
+}
+
+fn default_admin_bind() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_admin_port() -> u16 {
+    8000
+}
+fn default_admin_db_path() -> PathBuf {
+    PathBuf::from("admin.db")
+}
+fn default_admin_session_ttl_hours() -> u64 {
+    12
 }
 
 /// PEM-encoded certificate + private-key paths for the gRPC TLS
@@ -168,6 +228,43 @@ mod tests {
         let cfg = Config::from_path(Path::new("/nonexistent/toki-test.toml")).unwrap();
         assert!(cfg.normalised_password().is_none());
         assert!(cfg.tls.is_none());
+    }
+
+    #[test]
+    fn admin_block_round_trips_with_overrides() {
+        let raw = r#"
+            [admin]
+            bind = "0.0.0.0"
+            port = 9000
+            db_path = "/var/lib/toki/admin.db"
+            session_ttl_hours = 24
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let admin = cfg.admin.expect("expected [admin] block");
+        assert_eq!(admin.bind, "0.0.0.0");
+        assert_eq!(admin.port, 9000);
+        assert_eq!(admin.db_path.to_string_lossy(), "/var/lib/toki/admin.db");
+        assert_eq!(admin.session_ttl_hours, 24);
+    }
+
+    #[test]
+    fn admin_block_fills_defaults_when_empty() {
+        // An empty `[admin]` block means "enable with defaults" —
+        // operator opted into the panel without overriding anything.
+        let cfg: Config = toml::from_str("[admin]\n").unwrap();
+        let admin = cfg.admin.expect("expected [admin] block");
+        assert_eq!(admin.bind, "127.0.0.1");
+        assert_eq!(admin.port, 8000);
+        assert_eq!(admin.db_path.to_string_lossy(), "admin.db");
+        assert_eq!(admin.session_ttl_hours, 12);
+    }
+
+    #[test]
+    fn admin_block_absent_disables_panel() {
+        // No `[admin]` ⇒ `cfg.admin.is_none()` ⇒ main.rs doesn't
+        // spawn the admin task at all. That's the headless default.
+        let cfg: Config = toml::from_str("password = \"hunter2\"").unwrap();
+        assert!(cfg.admin.is_none());
     }
 
     #[test]

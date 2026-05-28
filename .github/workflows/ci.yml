@@ -1,16 +1,28 @@
 name: ci
 
-# Build + test + coverage on every push and PR. Linux only for the
-# default matrix — macOS and Windows are valuable but eframe pulls in
-# big native deps that triple CI time, so they're commented out
-# below as an opt-in when there's something OS-specific to verify.
+# Pipeline shape:
+#
+#   PR / push to main, release-* :
+#     - test+coverage  (fmt, clippy, build, tests under llvm-cov)
+#     - docker-server-smoke  (build the server image, don't push)
+#
+#   Tag push v*  (release flow):
+#     - test+coverage  (gate: green before anything ships)
+#     - docker-server-release  (multi-arch push to Docker Hub)
+#     - client-release  (macOS/.app, Windows/.exe, Linux binary — all zipped)
+#     - publish-release  (attach zips to the GitHub release for the tag)
+#
+# Secrets required for the release flow:
+#   * DOCKERHUB_USERNAME — Docker Hub username for ellessen/toki-server pushes
+#   * DOCKERHUB_TOKEN    — Docker Hub access token with read+write+delete
+#   * GITHUB_TOKEN       — provided automatically; used by `gh release upload`
 
 on:
   push:
-    branches: [main]
+    branches: [main, "release-*"]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, "release-*"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,35 +30,30 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
+  # ───────────────────────────────────────────────────────────────
+  # Test + coverage in one job. Coverage runs the workspace tests
+  # under llvm-cov, so an explicit `cargo test` step would be
+  # redundant. `lcov.info` lands as an artifact for CI consumers
+  # (codecov-action, manual download, etc.).
+  # ───────────────────────────────────────────────────────────────
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-        # os: [ubuntu-latest, macos-latest]  # opt in if needed
+    name: test + coverage
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt, clippy, llvm-tools-preview
 
-      - name: install + cache system deps (linux)
-        if: matrix.os == 'ubuntu-latest'
-        # `cache-apt-pkgs-action` resolves the requested packages,
-        # restores them from cache when the list hash matches, or
-        # downloads + installs + repopulates the cache when it
-        # doesn't. Saves ~30-60s on every run after the first.
+      - name: install + cache system deps
+        # eframe/winit/cpal pull a wide native dep set on Linux; the
+        # apt-cache action restores from cache when the package list
+        # hash matches. `version: 1.0` is the cache key — bump it
+        # when the package list changes.
         uses: awalsh128/cache-apt-pkgs-action@v1
         with:
-          # Full set eframe + winit + cpal need on Linux. The X11
-          # libs (libx11, libxcursor, libxi, libxkbcommon, libxcb*)
-          # back the windowing + input plumbing; libgl1-mesa-dev
-          # gives egui_glow an OpenGL implementation to link
-          # against; libasound2-dev is cpal's ALSA backend.
           packages: >-
             protobuf-compiler
             libasound2-dev
@@ -58,70 +65,12 @@ jobs:
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
           version: 1.0
 
-      - name: install protobuf (macos)
-        if: matrix.os == 'macos-latest'
-        run: brew install protobuf
-
-      - name: cache cargo registry + build
-        # Rust-cache covers ~/.cargo/registry, ~/.cargo/git, and
-        # ./target. Apt deps are cached separately above.
+      - name: cache cargo registry + target
         uses: Swatinem/rust-cache@v2
 
       - name: cache cargo tool installs
-        # `~/.cargo/bin` isn't covered by rust-cache. Pinning it on
-        # the Cargo.lock hash lets cargo-llvm-cov + any future
-        # `cargo install` come back from cache instead of compiling.
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin
-          key: cargo-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-bin-${{ runner.os }}-
-
-      - name: fmt
-        run: cargo fmt --all -- --check
-
-      - name: clippy
-        # `-D warnings` would catch the long-standing
-        # `result_large_err` on tonic::Status; downgrade to warn so
-        # CI doesn't fail on something inherent to the gRPC API.
-        run: cargo clippy --workspace --all-targets -- -W clippy::all -A clippy::result_large_err
-
-      - name: build
-        run: cargo build --workspace --all-targets --locked
-
-      - name: test
-        run: cargo test --workspace --locked
-
-  coverage:
-    name: coverage
-    runs-on: ubuntu-latest
-    needs: test
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: install + cache system deps
-        # Same package set + version key as the `test` job above so
-        # the apt cache is shared across both jobs in the same run.
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          packages: >-
-            protobuf-compiler
-            libasound2-dev
-            libgl1-mesa-dev
-            libx11-dev
-            libxcursor-dev
-            libxi-dev
-            libxkbcommon-dev libxkbcommon-x11-dev
-            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-          version: 1.0
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: cache cargo tool installs
+        # `~/.cargo/bin` isn't covered by rust-cache. Pinning on the
+        # Cargo.lock hash keeps cargo-llvm-cov hot across runs.
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin
@@ -129,12 +78,22 @@ jobs:
           restore-keys: cargo-bin-${{ runner.os }}-
 
       - name: install cargo-llvm-cov
-        # `taiki-e/install-action` skips re-download when the binary
-        # is already present in ~/.cargo/bin (i.e. when the cache
-        # above restored it), so the cache + install pair is cheap.
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: run coverage
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        # `result_large_err` fires on tonic::Status in our generated
+        # gRPC code — out of our control, downgrade to warn so CI
+        # doesn't fail on it.
+        run: cargo clippy --workspace --all-targets -- -W clippy::all -A clippy::result_large_err
+
+      - name: tests + coverage
+        # `coverage.sh --ci` builds, runs every test under
+        # instrumentation, and emits target/coverage/lcov.info.
+        # This is our single source of test signal — replaces the
+        # split `cargo test` + `coverage` jobs the previous CI had.
         run: bash scripts/coverage.sh --ci
 
       - name: upload lcov
@@ -144,33 +103,274 @@ jobs:
           path: target/coverage/lcov.info
           if-no-files-found: error
 
-      # Uncomment + add CODECOV_TOKEN to repo secrets to publish.
-      # - name: upload to codecov
-      #   uses: codecov/codecov-action@v4
-      #   with:
-      #     files: target/coverage/lcov.info
-      #     token: ${{ secrets.CODECOV_TOKEN }}
-      #     fail_ci_if_error: true
-
-  build-server-docker-image:
-    name: Build Docker image for server
+  # ───────────────────────────────────────────────────────────────
+  # Smoke-build the server Docker image on every PR and push to
+  # main/release-* — verifies the Dockerfile still works without
+  # publishing anything. Single-platform (amd64) for speed; the
+  # multi-arch build is reserved for the tag-time release job.
+  # ───────────────────────────────────────────────────────────────
+  docker-server-smoke:
+    name: docker server (smoke build)
     runs-on: ubuntu-latest
-    needs: test
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - uses: docker/build-push-action@v6
+      - name: build (no push)
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: scripts/server.dockerfile
-          tags: toki-server:latest
+          push: false
+          load: false
+          tags: toki-server:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/toki-hq/toki
-            org.opencontainers.image.description=Toki server Docker image
+            org.opencontainers.image.description=Toki server (smoke build)
             org.opencontainers.image.licenses=MIT
+
+  # ───────────────────────────────────────────────────────────────
+  # Tag-only: multi-arch publish of `ellessen/toki-server` to
+  # Docker Hub. Image tagged with the version (stripped of the
+  # leading `v`) and `latest`. Gated on the test job so we never
+  # ship a red build.
+  # ───────────────────────────────────────────────────────────────
+  docker-server-release:
+    name: docker server (release)
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up QEMU
+        # Needed for linux/arm64 cross-builds on an x86 runner.
+        uses: docker/setup-qemu-action@v3
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: derive version from tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: build + push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/server.dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ellessen/toki-server:${{ steps.tag.outputs.version }}
+            ellessen/toki-server:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/toki-hq/toki
+            org.opencontainers.image.description=Toki server
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.tag.outputs.version }}
+
+  # ───────────────────────────────────────────────────────────────
+  # Tag-only: build the desktop client on each OS in its native
+  # form and ship a single zip per platform.
+  #
+  #   macOS    →  cargo-bundle produces Toki.app, zipped whole
+  #   Windows  →  toki.exe, Compress-Archive'd
+  #   Linux    →  toki binary, zip'd
+  #
+  # Per-platform jobs (rather than a matrix with shared steps)
+  # because the install/build/package commands diverge enough that
+  # `if: matrix.os == ...` would be more noise than savings.
+  # ───────────────────────────────────────────────────────────────
+  client-macos:
+    name: client (macOS .app)
+    runs-on: macos-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cache cargo-bundle install
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: cargo-bin-macos-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-bin-macos-
+
+      - name: install protoc
+        run: brew install protobuf
+
+      - name: install cargo-bundle
+        # `taiki-e/install-action` fetches a precompiled binary and
+        # skips when the cache already has it — much faster than
+        # `cargo install cargo-bundle`.
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bundle
+
+      - name: derive version from tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: cargo bundle
+        # Per the [package.metadata.bundle] block in client/Cargo.toml,
+        # this produces target/release/bundle/osx/Toki.app.
+        run: cargo bundle -p toki-client --release --locked
+
+      - name: zip the .app
+        run: |
+          cd target/release/bundle/osx
+          zip -r "$GITHUB_WORKSPACE/toki-client-${{ steps.tag.outputs.version }}-macos.zip" Toki.app
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: toki-client-macos
+          path: toki-client-*-macos.zip
+          if-no-files-found: error
+
+  client-windows:
+    name: client (Windows .exe)
+    runs-on: windows-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: derive version from tag
+        id: tag
+        shell: bash
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: build release
+        run: cargo build -p toki-client --release --locked
+
+      - name: zip the .exe
+        # Use PowerShell's native Compress-Archive so we don't
+        # depend on the runner's 7z install.
+        shell: pwsh
+        run: |
+          $version = "${{ steps.tag.outputs.version }}"
+          $out = "toki-client-$version-windows-x86_64.zip"
+          Compress-Archive -Path target/release/toki.exe -DestinationPath $out
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: toki-client-windows
+          path: toki-client-*-windows-x86_64.zip
+          if-no-files-found: error
+
+  client-linux:
+    name: client (Linux binary)
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install + cache system deps
+        # Same package set as the test job — eframe/cpal need the
+        # full native stack to *link*, even though end users only
+        # need the runtime libs.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: >-
+            protobuf-compiler
+            libasound2-dev
+            libgl1-mesa-dev
+            libx11-dev
+            libxcursor-dev
+            libxi-dev
+            libxkbcommon-dev libxkbcommon-x11-dev
+            libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+          version: 1.0
+
+      - name: derive version from tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: build release
+        run: cargo build -p toki-client --release --locked
+
+      - name: zip the binary
+        run: |
+          cd target/release
+          zip "$GITHUB_WORKSPACE/toki-client-${{ steps.tag.outputs.version }}-linux-x86_64.zip" toki
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: toki-client-linux
+          path: toki-client-*-linux-x86_64.zip
+          if-no-files-found: error
+
+  # ───────────────────────────────────────────────────────────────
+  # Tag-only: download every client zip the platform-jobs produced
+  # and attach them to the GitHub Release for this tag. The
+  # release object is expected to already exist (created by the
+  # operator via `gh release create v0.1.x` or the GitHub UI);
+  # `--clobber` lets us re-run this job idempotently if a previous
+  # attempt half-succeeded.
+  # ───────────────────────────────────────────────────────────────
+  publish-release:
+    name: attach artifacts to GitHub release
+    runs-on: ubuntu-latest
+    needs: [docker-server-release, client-macos, client-windows, client-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all client artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: toki-client-*
+
+      - name: collect zips into one folder
+        run: |
+          mkdir -p release-files
+          find artifacts -name '*.zip' -exec cp {} release-files/ \;
+          ls -la release-files
+
+      - name: upload zips to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # `--clobber` makes re-runs safe: if a previous run already
+          # uploaded some of the zips, the new ones replace them
+          # rather than failing the job.
+          gh release upload "$TAG" release-files/*.zip --clobber

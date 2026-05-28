@@ -72,11 +72,17 @@ async fn main() -> anyhow::Result<()> {
         &tls_material.key_pem,
     ));
 
+    // gRPC (TCP) and audio (UDP) default to the **same** port
+    // number. `(TCP, 50051)` and `(UDP, 50051)` are distinct binding
+    // tuples at the kernel level — DNS, NTP, QUIC+HTTPS all do the
+    // same — so a single firewall/NAT rule (50051 TCP+UDP) covers
+    // both. Either env var can still pick a different port; this
+    // is just the out-of-the-box default.
     let grpc_addr: SocketAddr = std::env::var("TOKI_GRPC_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:50051".into())
         .parse()?;
     let audio_bind: SocketAddr = std::env::var("TOKI_AUDIO_ADDR")
-        .unwrap_or_else(|_| "0.0.0.0:50052".into())
+        .unwrap_or_else(|_| "0.0.0.0:50051".into())
         .parse()?;
     let advertised_audio =
         std::env::var("TOKI_AUDIO_PUBLIC").unwrap_or_else(|_| audio_bind.to_string());

@@ -25,7 +25,7 @@ Codec is intentionally raw PCM for the foundation (~780 kbps per stream — fine
 ## Running
 
 ```sh
-# server (gRPC :50051, UDP audio :50052)
+# server (gRPC TCP :50051, UDP audio :50051 — same port, different protocol)
 cargo run -p toki-server
 
 # client

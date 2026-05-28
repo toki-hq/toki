@@ -31,6 +31,11 @@ ENV TOKI_CONFIG=/data/config.toml
 
 USER toki
 
-EXPOSE 50051 50052 8000
+# gRPC + audio share port 50051 (TCP for gRPC, UDP for audio — the
+# kernel keys binds by `(protocol, port)`, so they coexist). 8000
+# is the admin web panel. Declaring the protocol explicitly so
+# `docker run -P` / `docker inspect` know to publish the UDP side
+# as well — bare `EXPOSE 50051` defaults to TCP only.
+EXPOSE 50051/tcp 50051/udp 8000/tcp
 
 ENTRYPOINT ["./entrypoint.sh"]

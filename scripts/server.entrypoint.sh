@@ -1,6 +1,6 @@
 #!/bin/sh
 
-CONFIG_DIR=/usr/local/toki # Config directory
+CONFIG_DIR=/data # Config directory
 
 mkdir -p $CONFIG_DIR
 export TOKI_CONFIG=$CONFIG_DIR/config.toml

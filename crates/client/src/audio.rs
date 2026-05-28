@@ -195,6 +195,41 @@ pub struct BeepPreset {
     pub release: BeepPattern,
 }
 
+/// Fixed two-tone roger played fleet-wide when a *priority* speaker
+/// takes the floor — whether by keying up on an idle channel or by
+/// preempting a non-priority holder. Deliberately *not* part of the
+/// tunable [`BeepPreset`] set: a priority cue is only useful if every
+/// member recognizes it, so it stays constant network-wide (volume
+/// still honours the user's beep-volume preference). A rising G5→C6
+/// pair reads as urgent/attention without sounding like a normal
+/// take-floor blip.
+pub const PRIORITY_ROGER: &[BeepStep] = &[
+    BeepStep::Tone {
+        freq_hz: G5,
+        duration_ms: 130,
+    },
+    BeepStep::Rest { duration_ms: 40 },
+    BeepStep::Tone {
+        freq_hz: C6,
+        duration_ms: 170,
+    },
+];
+
+/// Short descending cue heard *only* by the speaker who was bumped off
+/// the floor by a priority preemption. Pairs with the "Preempted by
+/// <name>" log line so the cut-off operator gets both an audible and a
+/// visible signal. A C6→C5 drop reads as "you lost it".
+pub const PREEMPTED_BUMP: &[BeepStep] = &[
+    BeepStep::Tone {
+        freq_hz: C6,
+        duration_ms: 80,
+    },
+    BeepStep::Tone {
+        freq_hz: C5,
+        duration_ms: 150,
+    },
+];
+
 impl BeepPreset {
     /// Master list of available presets. The first entry is treated
     /// as the fallback for unknown/legacy IDs.

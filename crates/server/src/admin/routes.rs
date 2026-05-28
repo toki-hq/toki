@@ -31,6 +31,7 @@ pub fn build(state: AppState) -> Router {
         .route("/clients/{id}/kick", post(handlers::kick))
         .route("/clients/{id}/move", post(handlers::move_client))
         .route("/clients/{id}/rename", post(handlers::rename))
+        .route("/clients/{id}/priority", post(handlers::set_priority))
         .route("/account/password", post(handlers::change_password))
         .route("/logout", post(handlers::logout))
         .layer(middleware::from_fn_with_state(

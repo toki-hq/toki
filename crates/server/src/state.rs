@@ -48,6 +48,17 @@ pub struct Client {
     /// audio relay's forwarding fan-out off this — silent clients on
     /// frequency A never receive a sender's voice on frequency B.
     pub current_frequency: Option<String>,
+    /// Frequency on which an admin has elected this session as a
+    /// *priority* speaker, if any. Priority is **per-channel** and
+    /// **per-session**: it's effective only while
+    /// `current_frequency == priority_freq`, goes dormant if the
+    /// member tunes elsewhere (re-activating if they return), and
+    /// vanishes when the session ends — there is no persistent
+    /// identity to anchor it to. A priority press preempts a
+    /// *non-priority* holder on the same channel; priority-vs-priority
+    /// is first-come (see `push_to_talk`). `None` for ordinary
+    /// members.
+    pub priority_freq: Option<String>,
     /// Refreshed on every UDP packet from this client (keepalive or audio).
     /// The reaper evicts clients whose `last_seen` is older than the
     /// configured timeout — see `reaper`. Internal lifecycle signal —

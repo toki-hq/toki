@@ -462,9 +462,17 @@ impl Session {
                             // Update holder state and detect transitions in one
                             // critical section, then play beeps / flip the audio
                             // gate outside the lock.
-                            let (acquired, released, talker_name) = {
+                            //
+                            // Priority adds a third transition beyond the usual
+                            // acquire/release: a *takeover*, where the holder
+                            // changes from one member directly to another
+                            // without an intervening release. The server only
+                            // emits that for a priority preemption, flagged via
+                            // `p.priority`.
+                            let (acquired, released, took_over, prev_holder, talker_name) = {
                                 let mut st = state_for_events.lock().unwrap();
-                                let was_held = st.holder.is_some();
+                                let prev_holder = st.holder.clone();
+                                let was_held = prev_holder.is_some();
                                 let new_holder = if p.pressed {
                                     Some(p.client_id.clone())
                                 } else {
@@ -473,22 +481,65 @@ impl Session {
                                 st.holder = new_holder.clone();
                                 let acquired = !was_held && new_holder.is_some();
                                 let released = was_held && new_holder.is_none();
+                                // Takeover: a different member seized a floor
+                                // that was already held (preemption).
+                                let took_over =
+                                    was_held && new_holder.is_some() && new_holder != prev_holder;
                                 let name = st
                                     .members
                                     .get(&p.client_id)
                                     .cloned()
                                     .unwrap_or_else(|| p.client_id.clone());
-                                (acquired, released, name)
+                                (acquired, released, took_over, prev_holder, name)
                             };
 
-                            // Flip our own audio gate only when the server
-                            // confirms US as the holder — so a denied press
-                            // never causes audio to leak out.
+                            // Were *we* just bumped off the floor by a priority
+                            // speaker? True iff we held it a moment ago and a
+                            // different member now holds it. The relay already
+                            // stopped forwarding our audio when the server
+                            // flipped the holder; closing the gate here stops us
+                            // from uselessly uploading and clears our TX state.
+                            let self_preempted = took_over
+                                && prev_holder.as_deref() == Some(self_id_for_events.as_str())
+                                && p.client_id != self_id_for_events;
+
+                            // Flip our own audio gate. Normally we only open it
+                            // when the server confirms US as the holder. The
+                            // preemption case also forces it *closed* on the
+                            // bumped speaker.
                             if p.client_id == self_id_for_events {
                                 ptt_for_events.store(p.pressed, Ordering::Relaxed);
+                            } else if self_preempted {
+                                ptt_for_events.store(false, Ordering::Relaxed);
                             }
 
-                            if acquired {
+                            if self_preempted {
+                                // Distinct cue + message for the cut-off
+                                // speaker; suppress the priority roger for them
+                                // so they hear only the "you lost it" bump.
+                                let tone = audio::beep_pattern(
+                                    audio::PREEMPTED_BUMP,
+                                    beeps_for_events.volume(),
+                                );
+                                push_playback(&playback_for_events, &tone);
+                                state_for_events
+                                    .lock()
+                                    .unwrap()
+                                    .log(format!("⚡ Preempted by {talker_name}"));
+                            } else if p.priority && (acquired || took_over) {
+                                // A priority speaker took the floor (idle-grant
+                                // or preemption). Everyone still listening hears
+                                // the fixed two-tone priority roger.
+                                let tone = audio::beep_pattern(
+                                    audio::PRIORITY_ROGER,
+                                    beeps_for_events.volume(),
+                                );
+                                push_playback(&playback_for_events, &tone);
+                                state_for_events
+                                    .lock()
+                                    .unwrap()
+                                    .log(format!("⚡ {talker_name} took priority"));
+                            } else if acquired {
                                 // Look up the active preset live so a
                                 // change in Settings takes effect on
                                 // the very next take-floor event,
@@ -795,6 +846,10 @@ impl Session {
             client_id: self.client_id.clone(),
             pressed,
             sequence: seq,
+            // Client never self-declares priority — the server is the
+            // sole arbiter. This field is only meaningful on the
+            // server→client grant broadcast.
+            priority: false,
         };
         if let Err(e) = self.ptt_tx.send(evt).await {
             warn!(error = %e, "ptt send failed");

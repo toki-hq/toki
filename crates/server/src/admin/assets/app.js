@@ -3,7 +3,7 @@
 // Wire contract (must stay in sync with crates/server/src/admin/dto.rs):
 //   Snapshot         { rooms, lobby, generation, serverUptimeSecs }
 //   RoomDto          { frequency, holder, members: MemberDto[] }
-//   MemberDto        { id, displayName, connectedSecs }
+//   MemberDto        { id, displayName, connectedSecs, priority }
 //   ServerInfo       { version, adminBind, startedAtUnix }
 //
 // Architecture: a single `state` object holds the latest snapshot +
@@ -516,10 +516,13 @@
       const isHolder = room?.holder === m.id;
       const stateClass = isHolder ? "tx" : "rx";
       const stateLabel = isHolder ? "● TX" : "◐ RX";
+      const priorityBadge = m.priority
+        ? `<span class="prio-badge" title="Priority speaker — can preempt the floor on this channel">⚡ PRIO</span>`
+        : "";
       return `
-        <li class="member-row">
+        <li class="member-row${m.priority ? " is-priority" : ""}">
           <span class="state-dot ${stateClass}"></span>
-          <span class="callsign">${esc(m.displayName)}</span>
+          <span class="callsign">${esc(m.displayName)}${priorityBadge}</span>
           <span class="state-label ${stateClass}">${stateLabel}</span>
           <span class="seen" title="Time since this client registered">${formatDuration(m.connectedSecs)}</span>
           <span class="id">${esc(m.id)}</span>
@@ -1142,6 +1145,11 @@
         confirmKick(peer);
         return;
       }
+      if (act === "priority") {
+        closeActionMenu();
+        doPriority(peer, !peer.priority);
+        return;
+      }
     });
 
     document.body.appendChild(menuEl);
@@ -1155,8 +1163,10 @@
       </div>
       <button data-action="rename"><span class="icon">✎</span><span>Rename callsign</span></button>
       <button data-action="move-open"><span class="icon">⇄</span><span>Move to channel…</span><span style="margin-left:auto; color: var(--ink-faint);">›</span></button>
+      ${peer.priority
+        ? `<button data-action="priority" title="Revoke this member's priority on this channel"><span class="icon">⚡</span><span>Revoke priority</span></button>`
+        : `<button data-action="priority" title="Let this member preempt the floor on this channel"><span class="icon">⚡</span><span>Promote to priority</span></button>`}
       <button class="amber" data-action="kick"><span class="icon">↯</span><span>Kick (disconnect)</span></button>
-      <button disabled title="Not implemented — no per-peer mod system yet"><span class="icon">★</span><span>Promote to mod</span></button>
       <button disabled title="Not implemented — no DM/whisper backend"><span class="icon">~</span><span>Whisper…</span></button>
       <button disabled class="red" title="Not implemented — kick already force-disconnects"><span class="icon">⊘</span><span>Force-disconnect</span></button>
     `;
@@ -1187,6 +1197,18 @@
       toast(`Moved ${peer.displayName} → ${target}`);
     } catch (e) {
       toast(`Move failed: ${e.message}`, "red");
+    }
+  }
+
+  async function doPriority(peer, grant) {
+    try {
+      await api("POST", `/api/clients/${encodeURIComponent(peer.id)}/priority`, { grant });
+      toast(grant
+        ? `⚡ ${peer.displayName} promoted to priority`
+        : `Priority revoked from ${peer.displayName}`,
+        grant ? "" : "amber");
+    } catch (e) {
+      toast(`Priority change failed: ${e.message}`, "red");
     }
   }
 

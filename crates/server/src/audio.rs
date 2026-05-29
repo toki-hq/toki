@@ -10,8 +10,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::wire::{
-    build_nonce, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN,
-    TOKEN_LEN, VERSION_AUDIO_PCM,
+    build_nonce, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
+    MAX_OPUS_PAYLOAD, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM,
 };
 
 use crate::state::{hash_token, SharedRegistry};
@@ -88,20 +88,25 @@ pub async fn run(
             .expect("slice has TAG_LEN bytes");
         let ciphertext_in = &buf[HEADER_LEN_C2S..len];
 
-        // Strict shape check for audio frames: legitimate audio packets
-        // are *exactly* HEADER_LEN_C2S + FRAME_BYTES long (ChaCha20 is
-        // a stream cipher, so ciphertext length == plaintext length).
-        // Keepalive packets have zero-length ciphertext. Any other
-        // shape is malformed or hostile.
+        // Per-codec shape checks. ChaCha20 is a stream cipher, so the
+        // ciphertext length equals the plaintext length. PCM frames are
+        // *exactly* FRAME_BYTES; Opus frames are variable but bounded;
+        // keepalives carry no payload. Anything else is malformed/hostile.
         if version == VERSION_AUDIO_PCM && ciphertext_in.len() != FRAME_BYTES {
             debug!(
                 len,
                 expected = HEADER_LEN_C2S + FRAME_BYTES,
-                "audio frame wrong size, dropping"
+                "PCM frame wrong size, dropping"
             );
             continue;
         }
-        if version != VERSION_AUDIO_PCM && !ciphertext_in.is_empty() {
+        if version == VERSION_AUDIO_OPUS
+            && (ciphertext_in.is_empty() || ciphertext_in.len() > MAX_OPUS_PAYLOAD)
+        {
+            debug!(len, "Opus frame out of bounds, dropping");
+            continue;
+        }
+        if !is_audio(version) && !ciphertext_in.is_empty() {
             debug!(len, version, "non-audio packet with payload, dropping");
             continue;
         }
@@ -112,7 +117,7 @@ pub async fn run(
         // mutex contention with legitimate clients. Key is the raw
         // token bytes as a fixed-size array — avoids the per-packet
         // Vec allocation we'd pay with `token.to_vec()`.
-        if version == VERSION_AUDIO_PCM {
+        if is_audio(version) {
             let mut rate_key = [0u8; TOKEN_LEN];
             rate_key.copy_from_slice(token);
             let now = Instant::now();
@@ -220,7 +225,7 @@ pub async fn run(
                 client.last_seen = std::time::Instant::now();
             }
 
-            if version != VERSION_AUDIO_PCM {
+            if !is_audio(version) {
                 // Keepalive: address + seq + heartbeat updated above;
                 // nothing to forward.
                 continue;
@@ -281,16 +286,18 @@ pub async fn run(
             let nonce_bytes = build_nonce(target.seq);
             let nonce = Nonce::from_slice(&nonce_bytes);
             let mut buf_ct = plaintext.clone();
-            let tag =
-                match cipher.encrypt_in_place_detached(nonce, &[VERSION_AUDIO_PCM], &mut buf_ct) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!(error = %e, "AEAD encrypt failed for outbound peer");
-                        continue;
-                    }
-                };
-            // S2C layout: seq (8) | tag (16) | ciphertext
+            // AAD = the *sender's* codec version, which we also stamp into
+            // the S2C header so the receiver picks the matching decoder.
+            let tag = match cipher.encrypt_in_place_detached(nonce, &[version], &mut buf_ct) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "AEAD encrypt failed for outbound peer");
+                    continue;
+                }
+            };
+            // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
             let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
+            pkt.push(version);
             pkt.extend_from_slice(&target.seq.to_le_bytes());
             pkt.extend_from_slice(tag.as_slice());
             pkt.extend_from_slice(&buf_ct);

@@ -86,6 +86,25 @@ pub struct ServerConfig {
     /// feature behind one flag keeps the default behaviour identical
     /// to pre-feature builds.
     pub named_channels_enabled: bool,
+
+    /// Voice codec/quality clients are asked to use, advertised in
+    /// `RegisterResponse`: 0 = Raw PCM (no compression, legacy path),
+    /// 1 = Low (~16 kbps Opus), 2 = Standard (~24 kbps), 3 = High
+    /// (~32 kbps). See [`opus_settings`]. Advisory — the relay forwards
+    /// whatever a client sends and receivers decode per-packet.
+    pub audio_quality: u32,
+}
+
+/// Map an [`ServerConfig::audio_quality`] level to the codec the client
+/// should use: `(opus_enabled, bitrate_bps)`. Level 0 is raw PCM (Opus
+/// off); unknown levels fall back to Standard.
+pub fn opus_settings(audio_quality: u32) -> (bool, u32) {
+    match audio_quality {
+        0 => (false, 0),
+        1 => (true, 16_000),
+        3 => (true, 32_000),
+        _ => (true, 24_000),
+    }
 }
 
 impl Default for ServerConfig {
@@ -100,6 +119,9 @@ impl Default for ServerConfig {
             idle_kick_secs: 10,
             grpc_password: String::new(),
             named_channels_enabled: false,
+            // Standard Opus by default — a fresh deployment compresses
+            // voice out of the box (the headline win of this feature).
+            audio_quality: 2,
         }
     }
 }
@@ -134,6 +156,16 @@ mod tests {
             !d.named_channels_enabled,
             "named channels off by default (gated feature)"
         );
+        assert_eq!(d.audio_quality, 2, "Standard Opus by default");
+    }
+
+    #[test]
+    fn opus_settings_maps_levels() {
+        assert_eq!(opus_settings(0), (false, 0)); // Raw PCM
+        assert_eq!(opus_settings(1), (true, 16_000));
+        assert_eq!(opus_settings(2), (true, 24_000));
+        assert_eq!(opus_settings(3), (true, 32_000));
+        assert_eq!(opus_settings(99), (true, 24_000), "unknown → Standard");
     }
 
     #[test]
@@ -146,6 +178,7 @@ mod tests {
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
+            audio_quality: 3,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -153,6 +186,7 @@ mod tests {
         assert!(json.contains("\"idleKickSecs\":30"));
         assert!(json.contains("\"grpcPassword\":\"hunter2\""));
         assert!(json.contains("\"namedChannelsEnabled\":true"));
+        assert!(json.contains("\"audioQuality\":3"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);
@@ -162,5 +196,6 @@ mod tests {
             parsed.named_channels_enabled,
             original.named_channels_enabled
         );
+        assert_eq!(parsed.audio_quality, original.audio_quality);
     }
 }

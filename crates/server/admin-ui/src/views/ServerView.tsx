@@ -94,6 +94,7 @@ function RuntimeConfig() {
   const [maxPeers, setMaxPeers] = useState("");
   const [idleKick, setIdleKick] = useState("");
   const [namedChannels, setNamedChannels] = useState(false);
+  const [audioQuality, setAudioQuality] = useState(2);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -105,6 +106,7 @@ function RuntimeConfig() {
         setMaxPeers(String(c.maxPeers));
         setIdleKick(String(c.idleKickSecs));
         setNamedChannels(c.namedChannelsEnabled);
+        setAudioQuality(c.audioQuality);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
   }, []);
@@ -114,7 +116,8 @@ function RuntimeConfig() {
     (name !== cfg.serverName ||
       maxPeers !== String(cfg.maxPeers) ||
       idleKick !== String(cfg.idleKickSecs) ||
-      namedChannels !== cfg.namedChannelsEnabled);
+      namedChannels !== cfg.namedChannelsEnabled ||
+      audioQuality !== cfg.audioQuality);
 
   async function save() {
     setBusy(true);
@@ -124,6 +127,7 @@ function RuntimeConfig() {
         maxPeers: Number(maxPeers),
         idleKickSecs: Number(idleKick),
         namedChannelsEnabled: namedChannels,
+        audioQuality,
       });
       setCfg(updated);
       toast.success("Server config saved");
@@ -176,6 +180,34 @@ function RuntimeConfig() {
             onCheckedChange={setNamedChannels}
             aria-label="Toggle named channels"
           />
+        </div>
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+          <Label>Voice quality</Label>
+          <div className="flex gap-1 rounded-md border border-border p-0.5">
+            {[
+              { v: 0, label: "Raw" },
+              { v: 1, label: "Low" },
+              { v: 2, label: "Standard" },
+              { v: 3, label: "High" },
+            ].map((q) => (
+              <button
+                key={q.v}
+                onClick={() => setAudioQuality(q.v)}
+                className={`flex-1 rounded px-2 py-1 font-mono text-[11px] tracking-wider transition-colors ${
+                  audioQuality === q.v
+                    ? "bg-primary/15 text-primary"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-xs text-muted-foreground">
+            {audioQuality === 0
+              ? "Raw PCM — no compression (~768 kbps/stream)."
+              : `Opus ~${audioQuality === 1 ? 16 : audioQuality === 3 ? 32 : 24} kbps — applied to clients on their next connect.`}
+          </span>
         </div>
         <Button className="mt-1 self-start" disabled={!dirty || busy} onClick={() => void save()}>
           {busy ? "Saving…" : "Save"}

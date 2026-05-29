@@ -17,7 +17,7 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use chacha20poly1305::{
     aead::{generic_array::GenericArray, AeadInPlace},
@@ -28,8 +28,8 @@ use toki_proto::v1::{
     LeaveRequest, PttEvent, RegisterRequest,
 };
 use toki_proto::wire::{
-    build_nonce, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN,
-    VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
+    build_nonce, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD,
+    OPUS_FRAME_SAMPLES, SEQ_LEN, TAG_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
 };
 
 use crate::audio::{self, push_playback, BeepParams, PlaybackBuf};
@@ -289,6 +289,72 @@ async fn handle_cmd(
 /// "quick acknowledgment" presses still work back-to-back.
 const PTT_COOLDOWN: Duration = Duration::from_millis(250);
 
+/// Outbound voice encoder. `Pcm` passes each 10 ms mic frame straight
+/// through (raw i16 LE, the legacy path). `Opus` buffers two 10 ms
+/// frames into a 20 ms frame, encodes it, and emits a small
+/// variable-length payload. Codec is chosen at connect time from the
+/// server's `RegisterResponse` advertisement.
+enum AudioEncoder {
+    Pcm,
+    Opus {
+        enc: audiopus::coder::Encoder,
+        /// Samples not yet forming a full 20 ms (960-sample) frame.
+        buf: Vec<i16>,
+    },
+}
+
+impl AudioEncoder {
+    fn new(opus_enabled: bool, bitrate: u32) -> Self {
+        if !opus_enabled {
+            return Self::Pcm;
+        }
+        match Self::make_opus(bitrate) {
+            Ok(enc) => Self::Opus {
+                enc,
+                buf: Vec::with_capacity(OPUS_FRAME_SAMPLES * 2),
+            },
+            Err(e) => {
+                warn!(error = %e, "Opus encoder init failed; falling back to raw PCM");
+                Self::Pcm
+            }
+        }
+    }
+
+    fn make_opus(bitrate: u32) -> Result<audiopus::coder::Encoder, audiopus::Error> {
+        use audiopus::{coder::Encoder, Application, Bitrate, Channels, SampleRate};
+        let mut enc = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
+        enc.set_bitrate(Bitrate::BitsPerSecond(bitrate as i32))?;
+        Ok(enc)
+    }
+
+    /// Consume one 10 ms (480-sample) mic frame; return the
+    /// `(version, payload)` packets ready to seal + send (0, 1, or more).
+    fn push(&mut self, samples: &[i16]) -> Vec<(u8, Vec<u8>)> {
+        match self {
+            Self::Pcm => {
+                let mut payload = Vec::with_capacity(samples.len() * 2);
+                for &s in samples {
+                    payload.extend_from_slice(&s.to_le_bytes());
+                }
+                vec![(VERSION_AUDIO_PCM, payload)]
+            }
+            Self::Opus { enc, buf } => {
+                buf.extend_from_slice(samples);
+                let mut out = Vec::new();
+                while buf.len() >= OPUS_FRAME_SAMPLES {
+                    let frame: Vec<i16> = buf.drain(..OPUS_FRAME_SAMPLES).collect();
+                    let mut encoded = [0u8; MAX_OPUS_PAYLOAD];
+                    match enc.encode(&frame, &mut encoded) {
+                        Ok(n) => out.push((VERSION_AUDIO_OPUS, encoded[..n].to_vec())),
+                        Err(e) => warn!(error = %e, "Opus encode failed, dropping frame"),
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
 struct Session {
     client_id: String,
     audio_token: Vec<u8>,
@@ -316,6 +382,10 @@ struct Session {
     cooldown_until: StdMutex<Option<Instant>>,
     udp: Arc<UdpSocket>,
     signaling: SignalingClient<Channel>,
+    /// Outbound voice encoder (PCM or Opus per the server's advertised
+    /// codec). Behind a mutex because `send_audio` takes `&self`; the
+    /// lock is held only to produce packets, never across an `await`.
+    encode: StdMutex<AudioEncoder>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -384,6 +454,10 @@ impl Session {
 
         let client_id = reg.client_id;
         let audio_token = reg.audio_token;
+        // Codec the server asked us to use (advisory; receivers decode
+        // per-packet regardless). Built into the encoder below.
+        let opus_enabled = reg.opus_enabled;
+        let opus_bitrate = reg.opus_bitrate;
         // Server must return exactly MAC_KEY_LEN bytes; treat any
         // other length as a protocol violation rather than silently
         // truncating / padding and producing useless MACs.
@@ -677,6 +751,15 @@ impl Session {
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_AUDIO_PACKET];
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_for_recv));
+            // One reusable Opus decoder for the inbound stream. Only one
+            // peer transmits per channel at a time, so a single decoder
+            // is fine; `None` if libopus init somehow fails (Opus frames
+            // are then dropped, PCM still plays).
+            let mut decoder = audiopus::coder::Decoder::new(
+                audiopus::SampleRate::Hz48000,
+                audiopus::Channels::Mono,
+            )
+            .ok();
             // Server→peer seq counter for strict-monotonic replay
             // protection on the inbound path. Server starts at 1,
             // matching the client→server direction.
@@ -689,24 +772,24 @@ impl Session {
                             warn!(n, "server packet too small, dropping");
                             continue;
                         }
-                        // S2C layout: seq (8) | tag (16) | ciphertext
-                        let seq_bytes: [u8; SEQ_LEN] =
-                            buf[..SEQ_LEN].try_into().expect("slice has SEQ_LEN bytes");
+                        // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
+                        let version = buf[0];
+                        let seq_bytes: [u8; SEQ_LEN] = buf[1..1 + SEQ_LEN]
+                            .try_into()
+                            .expect("slice has SEQ_LEN bytes");
                         let seq = u64::from_le_bytes(seq_bytes);
-                        let tag_bytes: [u8; TAG_LEN] = buf[SEQ_LEN..SEQ_LEN + TAG_LEN]
+                        let tag_bytes: [u8; TAG_LEN] = buf[1 + SEQ_LEN..1 + SEQ_LEN + TAG_LEN]
                             .try_into()
                             .expect("slice has TAG_LEN bytes");
                         let mut plaintext = buf[HEADER_LEN_S2C..n].to_vec();
                         let nonce_bytes = build_nonce(seq);
                         let nonce = Nonce::from_slice(&nonce_bytes);
                         let tag = Tag::from_slice(&tag_bytes);
+                        // AAD is the relayed codec version (matches the
+                        // server's seal), so a tampered version byte fails
+                        // the tag check.
                         if cipher
-                            .decrypt_in_place_detached(
-                                nonce,
-                                &[VERSION_AUDIO_PCM],
-                                &mut plaintext,
-                                tag,
-                            )
+                            .decrypt_in_place_detached(nonce, &[version], &mut plaintext, tag)
                             .is_err()
                         {
                             warn!("server audio AEAD verify failed, dropping");
@@ -719,7 +802,15 @@ impl Session {
                             continue;
                         }
                         server_last_seq = seq;
-                        let samples = pcm_from_bytes(&plaintext);
+                        // Decode per the codec the sender used.
+                        let samples = match version {
+                            VERSION_AUDIO_PCM => pcm_from_bytes(&plaintext),
+                            VERSION_AUDIO_OPUS => decode_opus(&mut decoder, &plaintext),
+                            other => {
+                                debug!(version = other, "unknown audio codec, dropping");
+                                continue;
+                            }
+                        };
                         push_playback(&playback, &samples);
                     }
                     Err(e) => {
@@ -768,6 +859,7 @@ impl Session {
             cooldown_until: StdMutex::new(None),
             udp,
             signaling,
+            encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
     }
@@ -884,19 +976,21 @@ impl Session {
     }
 
     async fn send_audio(&self, samples: &[i16]) {
-        let mut payload = Vec::with_capacity(samples.len() * 2);
-        for &s in samples {
-            payload.extend_from_slice(&s.to_le_bytes());
-        }
-        let pkt = build_authenticated_packet(
-            &self.audio_token,
-            VERSION_AUDIO_PCM,
-            &self.audio_mac_key,
-            &self.udp_seq,
-            &payload,
-        );
-        if let Err(e) = self.udp.send(&pkt).await {
-            warn!(error = %e, "udp send failed");
+        // Encode under the lock (fast, no await), then seal + send each
+        // resulting packet. PCM yields one packet per 10 ms frame; Opus
+        // yields one per buffered 20 ms frame (so often zero this call).
+        let packets = self.encode.lock().unwrap().push(samples);
+        for (version, payload) in packets {
+            let pkt = build_authenticated_packet(
+                &self.audio_token,
+                version,
+                &self.audio_mac_key,
+                &self.udp_seq,
+                &payload,
+            );
+            if let Err(e) = self.udp.send(&pkt).await {
+                warn!(error = %e, "udp send failed");
+            }
         }
     }
 
@@ -1153,6 +1247,26 @@ fn pcm_from_bytes(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
+/// Decode one Opus packet to 48 kHz mono i16. Output buffer has 60 ms of
+/// headroom (we only ever send 20 ms frames). Returns empty on a decoder
+/// error or when the decoder is unavailable — playback treats it as loss.
+fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) -> Vec<i16> {
+    let Some(dec) = decoder.as_mut() else {
+        return Vec::new();
+    };
+    let mut out = vec![0i16; OPUS_FRAME_SAMPLES * 3];
+    match dec.decode(Some(packet), &mut out[..], false) {
+        Ok(samples) => {
+            out.truncate(samples);
+            out
+        }
+        Err(e) => {
+            warn!(error = %e, "Opus decode failed, dropping");
+            Vec::new()
+        }
+    }
+}
+
 /// The server may advertise its audio endpoint as `0.0.0.0:port`, which
 /// isn't routable from a client. When that happens, substitute the host
 /// portion of the signaling URL.
@@ -1180,6 +1294,41 @@ fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result<Socke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pcm_encoder_emits_one_packet_per_frame() {
+        let mut enc = AudioEncoder::new(false, 0);
+        let pkts = enc.push(&vec![0i16; 480]);
+        assert_eq!(pkts.len(), 1);
+        assert_eq!(pkts[0].0, VERSION_AUDIO_PCM);
+        assert_eq!(pkts[0].1.len(), 960, "480 samples × 2 bytes");
+    }
+
+    #[test]
+    fn opus_buffers_to_20ms_then_encodes_and_decodes() {
+        let mut enc = AudioEncoder::new(true, 24_000);
+        // A single 10 ms frame buffers — not yet a full 20 ms frame.
+        assert!(
+            enc.push(&vec![1000i16; 480]).is_empty(),
+            "first 10ms frame should buffer"
+        );
+        // The second completes 20 ms → exactly one Opus packet.
+        let pkts = enc.push(&vec![1000i16; 480]);
+        assert_eq!(pkts.len(), 1);
+        assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
+        assert!(
+            !pkts[0].1.is_empty() && pkts[0].1.len() <= MAX_OPUS_PAYLOAD,
+            "opus payload bounded, got {}",
+            pkts[0].1.len()
+        );
+        // And it decodes back to a full 20 ms (960-sample) frame.
+        let mut dec = Some(
+            audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
+                .unwrap(),
+        );
+        let out = decode_opus(&mut dec, &pkts[0].1);
+        assert_eq!(out.len(), OPUS_FRAME_SAMPLES);
+    }
 
     #[test]
     fn normalise_to_https_adds_scheme_to_bare_hostport() {

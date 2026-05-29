@@ -143,6 +143,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         grpc_password: String::new(),
         grpc_password_set: !cfg.grpc_password.is_empty(),
         named_channels_enabled: cfg.named_channels_enabled,
+        audio_quality: cfg.audio_quality,
     }
 }
 
@@ -208,6 +209,11 @@ impl Admin for AdminApi {
         let (server_name, max_peers, idle_kick_secs) =
             validate_runtime_fields(body.server_name, body.max_peers, body.idle_kick_secs)
                 .map_err(Status::invalid_argument)?;
+        if body.audio_quality > 3 {
+            return Err(Status::invalid_argument(
+                "audio_quality must be 0 (raw), 1 (low), 2 (standard) or 3 (high)",
+            ));
+        }
 
         // Merge with the live config so we don't clobber grpc_password.
         let merged = {
@@ -218,6 +224,7 @@ impl Admin for AdminApi {
                 idle_kick_secs,
                 grpc_password: current.grpc_password,
                 named_channels_enabled: body.named_channels_enabled,
+                audio_quality: body.audio_quality,
             }
         };
         self.state
@@ -241,11 +248,12 @@ impl Admin for AdminApi {
             &admin.0,
             "",
             &format!(
-                "name='{}' max_peers={} idle_kick={}s named_channels={}",
+                "name='{}' max_peers={} idle_kick={}s named_channels={} audio_quality={}",
                 merged.server_name,
                 merged.max_peers,
                 merged.idle_kick_secs,
-                merged.named_channels_enabled
+                merged.named_channels_enabled,
+                merged.audio_quality
             ),
         );
         Ok(Response::new(config_to_wire(&merged)))
@@ -1177,6 +1185,7 @@ mod tests {
                     max_peers: 0,
                     idle_kick_secs: 10,
                     named_channels_enabled: false,
+                    audio_quality: 2,
                 },
                 &token,
             ))

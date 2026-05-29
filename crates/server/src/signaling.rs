@@ -307,11 +307,19 @@ impl Signaling for SignalingSvc {
             ),
         );
 
+        // Advertise the operator's chosen voice codec/quality so the
+        // client knows whether to Opus-encode and at what bitrate. Read
+        // fresh so an admin change applies to the next connection.
+        let (opus_enabled, opus_bitrate) =
+            crate::server_config::opus_settings(self.server_config.read().await.audio_quality);
+
         Ok(Response::new(RegisterResponse {
             client_id: id,
             audio_token: token,
             audio_endpoint: self.audio_endpoint.clone(),
             audio_mac_key: audio_mac_key.to_vec(),
+            opus_enabled,
+            opus_bitrate,
         }))
     }
 

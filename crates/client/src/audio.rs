@@ -22,7 +22,10 @@
 //! refuses, adapting on the fly:
 //!
 //!   - Multi-channel input is downmixed to mono by averaging channels.
-//!   - Mono output samples are replicated across all device channels.
+//!   - Output is opened in stereo so the balance knob can pan our mono
+//!     content between L/R (equal-power); on a 2-channel stream both
+//!     channels get the sample scaled by the pan gains, on other
+//!     channel counts it's simply replicated.
 //!   - Non-f32 sample formats (i16, u16) are converted in the callback.
 //!   - Sample-rate mismatch is resolved by an inline linear resampler at
 //!     each boundary: capture → wire (48 kHz) before send, wire → device
@@ -847,6 +850,20 @@ const PREFERRED: cpal::StreamConfig = cpal::StreamConfig {
     buffer_size: cpal::BufferSize::Default,
 };
 
+/// Output is opened in **stereo** (not mono like the capture side) so
+/// the balance knob has two channels to pan between. With a 1-channel
+/// stream the OS up-mixes our single channel into both ears and we
+/// lose all L/R control — exactly the "balance does nothing" symptom.
+/// Our content is mono; the output callback writes the same sample to
+/// L and R (scaled by the equal-power pan). If the device rejects this
+/// config we fall back to its native default, which is virtually
+/// always ≥2-channel for speakers/headphones anyway.
+const PREFERRED_OUTPUT: cpal::StreamConfig = cpal::StreamConfig {
+    channels: 2,
+    sample_rate: cpal::SampleRate(PREFERRED_RATE),
+    buffer_size: cpal::BufferSize::Default,
+};
+
 fn open_input(
     dev: &cpal::Device,
     mic_tx: UnboundedSender<Vec<i16>>,
@@ -908,8 +925,8 @@ fn open_output(
 ) -> Result<cpal::Stream> {
     match build_output_stream::<f32>(
         dev,
-        &PREFERRED,
-        1,
+        &PREFERRED_OUTPUT,
+        2,
         playback.clone(),
         gain.clone(),
         balance.clone(),
@@ -917,7 +934,7 @@ fn open_output(
         spectrum.clone(),
     ) {
         Ok(s) => {
-            info!("output: 1 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
+            info!("output: 2 ch @ {PREFERRED_RATE} Hz f32 (preferred)");
             return Ok(s);
         }
         Err(e) => {

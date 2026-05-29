@@ -75,6 +75,7 @@ async fn register_or_fail(client: &mut SignalingClient<Channel>, name: &str) -> 
         .register(RegisterRequest {
             display_name: name.into(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .expect("register should succeed")
@@ -104,6 +105,7 @@ async fn register_advertises_opus_by_default() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap()
@@ -114,12 +116,65 @@ async fn register_advertises_opus_by_default() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn register_rejects_incompatible_minor_version() {
+    let mut client = boot(None).await;
+    // A wildly different MAJOR.MINOR than the server → refused up front
+    // with FailedPrecondition (not Unauthenticated — it's not an auth
+    // failure), so the user sees "please update" instead of dead audio.
+    let err = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: "99.99.0".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn register_rejects_missing_client_version() {
+    let mut client = boot(None).await;
+    // Pre-gate clients send no version → treated as incompatible.
+    let err = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: String::new(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn register_accepts_matching_major_minor_with_different_patch() {
+    let mut client = boot(None).await;
+    // Same MAJOR.MINOR as the server but a different patch → accepted,
+    // since patch releases are guaranteed wire-compatible.
+    let (major, minor) = toki_proto::version::major_minor(env!("CARGO_PKG_VERSION")).unwrap();
+    let resp = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: format!("{major}.{minor}.999"),
+        })
+        .await
+        .expect("matching major.minor should be accepted");
+    assert!(!resp.into_inner().client_id.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn register_password_required_rejects_wrong_password() {
     let mut client = boot(Some("hunter2")).await;
     let err = client
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "wrong".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();
@@ -134,6 +189,7 @@ async fn register_password_required_accepts_correct_password() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "hunter2".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .expect("good password should succeed");
@@ -148,6 +204,7 @@ async fn register_rejects_control_chars_in_display_name() {
         .register(RegisterRequest {
             display_name: "evil\n[INFO] root logged in".into(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();
@@ -163,6 +220,7 @@ async fn register_rejects_empty_display_name() {
         .register(RegisterRequest {
             display_name: String::new(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();
@@ -343,6 +401,7 @@ async fn db_password_arms_the_gate_when_no_toml_override() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "wrong".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();
@@ -353,6 +412,7 @@ async fn db_password_arms_the_gate_when_no_toml_override() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "from-db".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .expect("DB-sourced password should authenticate");
@@ -369,6 +429,7 @@ async fn toml_password_overrides_db() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "from-db".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();
@@ -379,6 +440,7 @@ async fn toml_password_overrides_db() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: "from-toml".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .expect("TOML override should win");
@@ -396,6 +458,7 @@ async fn both_unset_means_open_mode() {
         .register(RegisterRequest {
             display_name: "anon".into(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .expect("open mode should accept any caller");
@@ -421,6 +484,7 @@ async fn register_rejected_when_at_max_peers() {
             .register(RegisterRequest {
                 display_name: format!("peer-{i}"),
                 password: String::new(),
+                client_version: env!("CARGO_PKG_VERSION").into(),
             })
             .await
             .expect("under-cap register must succeed");
@@ -429,6 +493,7 @@ async fn register_rejected_when_at_max_peers() {
         .register(RegisterRequest {
             display_name: "overflow".into(),
             password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
         })
         .await
         .unwrap_err();

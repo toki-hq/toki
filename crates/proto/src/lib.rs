@@ -122,3 +122,77 @@ pub mod wire {
         nonce
     }
 }
+
+/// Protocol-version compatibility between a Toki client and server.
+///
+/// The UDP audio wire format and the gRPC contract can change across
+/// **minor** versions (e.g. the v0.3.0 Opus work added a codec byte to
+/// the server→peer packet header). A client and server on different
+/// MAJOR.MINOR can still complete the gRPC handshake — protobuf fields
+/// are additive — but their audio would silently fail to decode. To
+/// turn that dead air into an explicit, actionable error, the server
+/// gates `Register` on a matching MAJOR.MINOR. **Patch** releases are
+/// guaranteed wire-compatible, so they interoperate freely.
+pub mod version {
+    /// Extract the leading `major.minor` from a semantic-version string,
+    /// ignoring patch, pre-release (`-rc.1`), and build (`+meta`) parts.
+    /// Returns `None` if the string doesn't start with two dot-separated
+    /// integers (including the empty string).
+    pub fn major_minor(v: &str) -> Option<(u64, u64)> {
+        // Drop any pre-release / build metadata before splitting.
+        let core = v.split(['-', '+']).next().unwrap_or(v);
+        let mut parts = core.split('.');
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        Some((major, minor))
+    }
+
+    /// True iff `client` and `server` share the same MAJOR.MINOR. Patch
+    /// may differ. Either side failing to parse (an empty / malformed
+    /// version, as sent by clients predating this gate) is treated as
+    /// **incompatible** — those builds predate the current wire format.
+    pub fn compatible(server: &str, client: &str) -> bool {
+        match (major_minor(server), major_minor(client)) {
+            (Some(s), Some(c)) => s == c,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    use super::version::{compatible, major_minor};
+
+    #[test]
+    fn parses_major_minor_ignoring_patch_and_metadata() {
+        assert_eq!(major_minor("0.3.1"), Some((0, 3)));
+        assert_eq!(major_minor("1.4.0-rc.2"), Some((1, 4)));
+        assert_eq!(major_minor("2.10.5+build.7"), Some((2, 10)));
+    }
+
+    #[test]
+    fn rejects_unparseable_versions() {
+        assert_eq!(major_minor(""), None);
+        assert_eq!(major_minor("0"), None);
+        assert_eq!(major_minor("x.y.z"), None);
+    }
+
+    #[test]
+    fn same_major_minor_is_compatible_regardless_of_patch() {
+        assert!(compatible("0.3.0", "0.3.0"));
+        assert!(compatible("0.3.0", "0.3.9"));
+        assert!(compatible("0.3.7", "0.3.1"));
+    }
+
+    #[test]
+    fn differing_major_or_minor_is_incompatible() {
+        assert!(!compatible("0.3.0", "0.4.0")); // minor
+        assert!(!compatible("0.3.0", "1.3.0")); // major
+    }
+
+    #[test]
+    fn empty_or_garbage_client_is_incompatible() {
+        assert!(!compatible("0.3.0", "")); // pre-gate client
+        assert!(!compatible("0.3.0", "garbage"));
+    }
+}

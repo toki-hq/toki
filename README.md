@@ -31,6 +31,7 @@ Voice is **Opus** by default (~24 kbps/stream of audio — a ~15–20× cut vs t
 - **UDP audio** is AEAD-encrypted, MAC-verified, replay-protected, and IP-bound — a captured token can't be replayed off-path or from another address.
 - **Admin auth**: argon2id password hashes + BLAKE3-hashed, server-revocable session cookies (HttpOnly, Secure, SameSite=Strict). First boot seeds an `admin` user with a random password logged once at `WARN`. Per-IP rate limiting on login; `admin.db` is `chmod 0600`.
 - Inbound gRPC messages are capped at 8 KB; a `max_peers` ceiling and an idle reaper bound resource use.
+- **Version gate**: clients send their version on `Register`; the server requires a matching **MAJOR.MINOR** (patch may differ — patches are wire-compatible) and rejects a mismatch with `FAILED_PRECONDITION` and a "please update" message. The UDP audio wire format can change across minor versions, so this turns silent dead-air into an actionable error rather than letting incompatible builds half-connect.
 
 ## Running
 

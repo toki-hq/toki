@@ -20,6 +20,10 @@ use crate::state::{hash_token, Client, Registry, SharedChannelNames, SharedRegis
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
+/// This server's own version, used to gate client compatibility on
+/// `Register` (matching MAJOR.MINOR required; see `toki_proto::version`).
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct SignalingSvc {
     registry: SharedRegistry,
     audio_endpoint: String,
@@ -143,6 +147,32 @@ impl Signaling for SignalingSvc {
                 tracing::warn!(?ip, ?reject, "register throttled");
                 return Err(Status::resource_exhausted(msg));
             }
+        }
+
+        // Protocol-version gate. The UDP audio wire format / gRPC
+        // contract can change across minor versions, so a client on a
+        // different MAJOR.MINOR would connect but get silently broken
+        // audio. Reject up front with an actionable message. This is a
+        // benign incompatibility, not an attack, so it does NOT record
+        // an auth failure / trip the backoff — the user just needs to
+        // update. Patch releases are wire-compatible and pass.
+        if !toki_proto::version::compatible(SERVER_VERSION, &req.client_version) {
+            let client_v = if req.client_version.is_empty() {
+                "unknown"
+            } else {
+                &req.client_version
+            };
+            tracing::warn!(
+                ?peer_ip,
+                client_version = %client_v,
+                server_version = SERVER_VERSION,
+                "register rejected: incompatible client version"
+            );
+            return Err(Status::failed_precondition(format!(
+                "version mismatch: this server is Toki v{SERVER_VERSION}; \
+                 your client (v{client_v}) must match its major.minor version. \
+                 Please update the client."
+            )));
         }
 
         // Validate display name *before* the password check so we

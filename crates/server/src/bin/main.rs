@@ -5,9 +5,9 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 use tracing_subscriber::EnvFilter;
 
 use toki_server::{
-    admin, audio,
+    admin, audio, audit,
     config::{self, Config},
-    reaper, server_config,
+    metrics, reaper, server_config,
     signaling::SignalingSvc,
     state, tls,
 };
@@ -103,12 +103,30 @@ async fn main() -> anyhow::Result<()> {
     // keep these defaults for the lifetime of the process.
     let server_config = server_config::shared_default();
 
+    // Voice-relay byte counters (ingress/egress), shared with the UDP
+    // audio task that bumps them and the admin metrics sampler that
+    // reads deltas.
+    let byte_counters = metrics::shared_counters();
+
+    // Audit-log pipeline: producers (signaling, reaper, admin RPCs,
+    // login) push events onto this sink; the admin task owns the single
+    // writer that drains it to sqlite (it holds the db handle).
+    let (audit_tx, audit_rx) = audit::channel();
+
     // Reaper runs forever in the background; we don't .await it in the
     // select! below — if it panics, tracing surfaces it but the server
     // keeps serving (just without stale-client cleanup).
-    tokio::spawn(reaper::run(registry.clone(), server_config.clone()));
+    tokio::spawn(reaper::run(
+        registry.clone(),
+        server_config.clone(),
+        audit_tx.clone(),
+    ));
 
-    let audio_task = tokio::spawn(audio::run(audio_bind, registry.clone()));
+    let audio_task = tokio::spawn(audio::run(
+        audio_bind,
+        registry.clone(),
+        byte_counters.clone(),
+    ));
 
     // Admin panel is always exposed. When `[admin]` is omitted from
     // config.toml the defaults take over (bind = 127.0.0.1, port = 8000,
@@ -123,6 +141,9 @@ async fn main() -> anyhow::Result<()> {
     // without restart. The TOML password (if any) takes precedence
     // over the runtime db; capture that as a boolean so the admin UI
     // can lock its server-password input accordingly.
+    // Clone the audit sink for the signaling service before the original
+    // is moved into the admin task below.
+    let audit_tx_sig = audit_tx.clone();
     let toml_password_override = password.is_some();
     let mut admin_cfg = config.admin;
     // Anchor a relative `db_path` under `TOKI_DATA_DIR`. Absolute
@@ -142,6 +163,10 @@ async fn main() -> anyhow::Result<()> {
         tls_material.clone(),
         server_config.clone(),
         channel_names.clone(),
+        byte_counters.clone(),
+        audit_tx,
+        audit_rx,
+        data_dir.clone(),
         toml_password_override,
     ));
 
@@ -167,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 password,
                 server_config.clone(),
                 channel_names,
+                audit_tx_sig,
             )
             .max_decoding_message_size(8 * 1024),
         )

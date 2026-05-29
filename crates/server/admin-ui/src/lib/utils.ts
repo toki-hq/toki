@@ -28,6 +28,29 @@ export function formatUptime(secs: number): string {
   return d > 0 ? `${d}d ${hms}` : hms;
 }
 
+/** Human bandwidth from bytes/second: B/s · kB/s · MB/s (1 decimal). */
+export function formatRate(bytesPerSec: number): string {
+  const b = Math.max(0, bytesPerSec);
+  if (b < 1024) return `${Math.round(b)} B/s`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} kB/s`;
+  return `${(b / (1024 * 1024)).toFixed(1)} MB/s`;
+}
+
+/** Human byte size: B · KB · MB · GB (1 decimal above bytes). */
+export function formatBytes(n: number): string {
+  const b = Math.max(0, n);
+  if (b < 1024) return `${Math.round(b)} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(b / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+/** Compact wall-clock HH:MM from a unix-seconds timestamp. */
+export function formatClock(tsUnix: number): string {
+  const d = new Date(tsUnix * 1000);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
 /** The Toki band: 446.00–448.00 MHz in 0.05 steps → 41 channels. */
 export const ALL_FREQUENCIES: string[] = Array.from({ length: 41 }, (_, i) =>
   (446.0 + i * 0.05).toFixed(2),

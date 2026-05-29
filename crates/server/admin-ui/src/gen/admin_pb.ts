@@ -2,15 +2,15 @@
 // @generated from file admin.proto (package toki.admin.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file admin.proto.
  */
 export const file_admin: GenFile = /*@__PURE__*/
-  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSL7AQoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRozChFDaGFubmVsTmFtZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBImEKBFJvb20SEQoJZnJlcXVlbmN5GAEgASgJEhMKBmhvbGRlchgCIAEoCUgAiAEBEiYKB21lbWJlcnMYAyADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlckIJCgdfaG9sZGVyIlQKBk1lbWJlchIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSFgoOY29ubmVjdGVkX3NlY3MYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiagoKU2VydmVySW5mbxIPCgd2ZXJzaW9uGAEgASgJEhIKCmFkbWluX2JpbmQYAiABKAkSFwoPc3RhcnRlZF9hdF91bml4GAMgASgEEh4KFnRvbWxfcGFzc3dvcmRfb3ZlcnJpZGUYBCABKAgioAEKDFNlcnZlckNvbmZpZxITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SFQoNZ3JwY19wYXNzd29yZBgEIAEoCRIZChFncnBjX3Bhc3N3b3JkX3NldBgFIAEoCBIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAYgASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0InsKGVVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QSEwoLc2VydmVyX25hbWUYASABKAkSEQoJbWF4X3BlZXJzGAIgASgNEhYKDmlkbGVfa2lja19zZWNzGAMgASgNEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBCABKAgiLAoYU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0EhAKCHBhc3N3b3JkGAEgASgJIhsKGVNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2UiPgoVQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0Eg8KB2N1cnJlbnQYASABKAkSFAoMbmV3X3Bhc3N3b3JkGAIgASgJIhgKFkNoYW5nZVBhc3N3b3JkUmVzcG9uc2UiHwoRS2lja0NsaWVudFJlcXVlc3QSCgoCaWQYASABKAkiFAoSS2lja0NsaWVudFJlc3BvbnNlIjIKEU1vdmVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIUChJNb3ZlQ2xpZW50UmVzcG9uc2UiNwoTUmVuYW1lQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiFgoUUmVuYW1lQ2xpZW50UmVzcG9uc2UiLwoSU2V0UHJpb3JpdHlSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhUKE1NldFByaW9yaXR5UmVzcG9uc2UiOAoVU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIhgKFlNldENoYW5uZWxOYW1lUmVzcG9uc2UiHQobQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0Ih4KHENsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2UyuQgKBUFkbWluEj8KBVdhdGNoEhsudG9raS5hZG1pbi52MS5XYXRjaFJlcXVlc3QaFy50b2tpLmFkbWluLnYxLlNuYXBzaG90MAESTwoNR2V0U2VydmVySW5mbxIjLnRva2kuYWRtaW4udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaGS50b2tpLmFkbWluLnYxLlNlcnZlckluZm8SVQoPR2V0U2VydmVyQ29uZmlnEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSWwoSVXBkYXRlU2VydmVyQ29uZmlnEigudG9raS5hZG1pbi52MS5VcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSZgoRU2V0U2VydmVyUGFzc3dvcmQSJy50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBooLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZRJdCg5DaGFuZ2VQYXNzd29yZBIkLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlc3BvbnNlElEKCktpY2tDbGllbnQSIC50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVzcG9uc2USUQoKTW92ZUNsaWVudBIgLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXNwb25zZRJXCgxSZW5hbWVDbGllbnQSIi50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlcXVlc3QaIy50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlc3BvbnNlElQKC1NldFByaW9yaXR5EiEudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlcXVlc3QaIi50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVzcG9uc2USXQoOU2V0Q2hhbm5lbE5hbWUSJC50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVxdWVzdBolLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE5hbWVSZXNwb25zZRJvChRDbGVhckFsbENoYW5uZWxOYW1lcxIqLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0GisudG9raS5hZG1pbi52MS5DbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlYgZwcm90bzM");
+  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSL7AQoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRozChFDaGFubmVsTmFtZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBImEKBFJvb20SEQoJZnJlcXVlbmN5GAEgASgJEhMKBmhvbGRlchgCIAEoCUgAiAEBEiYKB21lbWJlcnMYAyADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlckIJCgdfaG9sZGVyIlQKBk1lbWJlchIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSFgoOY29ubmVjdGVkX3NlY3MYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiagoKU2VydmVySW5mbxIPCgd2ZXJzaW9uGAEgASgJEhIKCmFkbWluX2JpbmQYAiABKAkSFwoPc3RhcnRlZF9hdF91bml4GAMgASgEEh4KFnRvbWxfcGFzc3dvcmRfb3ZlcnJpZGUYBCABKAgioAEKDFNlcnZlckNvbmZpZxITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SFQoNZ3JwY19wYXNzd29yZBgEIAEoCRIZChFncnBjX3Bhc3N3b3JkX3NldBgFIAEoCBIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAYgASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0InsKGVVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QSEwoLc2VydmVyX25hbWUYASABKAkSEQoJbWF4X3BlZXJzGAIgASgNEhYKDmlkbGVfa2lja19zZWNzGAMgASgNEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBCABKAgiLAoYU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0EhAKCHBhc3N3b3JkGAEgASgJIhsKGVNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2UiPgoVQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0Eg8KB2N1cnJlbnQYASABKAkSFAoMbmV3X3Bhc3N3b3JkGAIgASgJIhgKFkNoYW5nZVBhc3N3b3JkUmVzcG9uc2UiHwoRS2lja0NsaWVudFJlcXVlc3QSCgoCaWQYASABKAkiFAoSS2lja0NsaWVudFJlc3BvbnNlIjIKEU1vdmVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIUChJNb3ZlQ2xpZW50UmVzcG9uc2UiNwoTUmVuYW1lQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiFgoUUmVuYW1lQ2xpZW50UmVzcG9uc2UiLwoSU2V0UHJpb3JpdHlSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhUKE1NldFByaW9yaXR5UmVzcG9uc2UiOAoVU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIhgKFlNldENoYW5uZWxOYW1lUmVzcG9uc2UiHQobQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0Ih4KHENsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2UieAoMTWV0cmljU2FtcGxlEg8KB3RzX3VuaXgYASABKAQSGAoQcnhfYnl0ZXNfcGVyX3NlYxgCIAEoBBIYChB0eF9ieXRlc19wZXJfc2VjGAMgASgEEg0KBXVzZXJzGAQgASgNEhQKDHRyYW5zbWl0dGluZxgFIAEoDSI+Cg5NZXRyaWNzUmVxdWVzdBIsCgZ3aW5kb3cYASABKA4yHC50b2tpLmFkbWluLnYxLk1ldHJpY3NXaW5kb3ciPwoPTWV0cmljc1Jlc3BvbnNlEiwKB3NhbXBsZXMYASADKAsyGy50b2tpLmFkbWluLnYxLk1ldHJpY1NhbXBsZSIYChZHZXRTZXJ2ZXJIZWFsdGhSZXF1ZXN0IocBCgxTZXJ2ZXJIZWFsdGgSEwoLY3B1X3BlcmNlbnQYASABKAESFgoObWVtX3VzZWRfYnl0ZXMYAiABKAQSFwoPbWVtX3RvdGFsX2J5dGVzGAMgASgEEhcKD2Rpc2tfdXNlZF9ieXRlcxgEIAEoBBIYChBkaXNrX3RvdGFsX2J5dGVzGAUgASgEImkKCkF1ZGl0RW50cnkSCgoCaWQYASABKAQSDwoHdHNfdW5peBgCIAEoBBIMCgRraW5kGAMgASgJEg0KBWFjdG9yGAQgASgJEhEKCWZyZXF1ZW5jeRgFIAEoCRIOCgZkZXRhaWwYBiABKAkiXwoPQXVkaXRMb2dSZXF1ZXN0EioKBmZpbHRlchgBIAEoDjIaLnRva2kuYWRtaW4udjEuQXVkaXRGaWx0ZXISDQoFbGltaXQYAiABKA0SEQoJYmVmb3JlX2lkGAMgASgEIk0KEEF1ZGl0TG9nUmVzcG9uc2USKgoHZW50cmllcxgBIAMoCzIZLnRva2kuYWRtaW4udjEuQXVkaXRFbnRyeRINCgV0b3RhbBgCIAEoBCpZCg1NZXRyaWNzV2luZG93EhcKE01FVFJJQ1NfV0lORE9XX0hPVVIQABIWChJNRVRSSUNTX1dJTkRPV19EQVkQARIXChNNRVRSSUNTX1dJTkRPV19XRUVLEAIqdAoLQXVkaXRGaWx0ZXISFAoQQVVESVRfRklMVEVSX0FMTBAAEhYKEkFVRElUX0ZJTFRFUl9BRE1JThABEhwKGEFVRElUX0ZJTFRFUl9DT05ORUNUSU9OUxACEhkKFUFVRElUX0ZJTFRFUl9TRUNVUklUWRADMq0KCgVBZG1pbhI/CgVXYXRjaBIbLnRva2kuYWRtaW4udjEuV2F0Y2hSZXF1ZXN0GhcudG9raS5hZG1pbi52MS5TbmFwc2hvdDABEk8KDUdldFNlcnZlckluZm8SIy50b2tpLmFkbWluLnYxLkdldFNlcnZlckluZm9SZXF1ZXN0GhkudG9raS5hZG1pbi52MS5TZXJ2ZXJJbmZvElUKD0dldFNlcnZlckNvbmZpZxIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVyQ29uZmlnUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVyQ29uZmlnElsKElVwZGF0ZVNlcnZlckNvbmZpZxIoLnRva2kuYWRtaW4udjEuVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVyQ29uZmlnEmYKEVNldFNlcnZlclBhc3N3b3JkEicudG9raS5hZG1pbi52MS5TZXRTZXJ2ZXJQYXNzd29yZFJlcXVlc3QaKC50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2USXQoOQ2hhbmdlUGFzc3dvcmQSJC50b2tpLmFkbWluLnYxLkNoYW5nZVBhc3N3b3JkUmVxdWVzdBolLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXNwb25zZRJRCgpLaWNrQ2xpZW50EiAudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVxdWVzdBohLnRva2kuYWRtaW4udjEuS2lja0NsaWVudFJlc3BvbnNlElEKCk1vdmVDbGllbnQSIC50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5Nb3ZlQ2xpZW50UmVzcG9uc2USVwoMUmVuYW1lQ2xpZW50EiIudG9raS5hZG1pbi52MS5SZW5hbWVDbGllbnRSZXF1ZXN0GiMudG9raS5hZG1pbi52MS5SZW5hbWVDbGllbnRSZXNwb25zZRJUCgtTZXRQcmlvcml0eRIhLnRva2kuYWRtaW4udjEuU2V0UHJpb3JpdHlSZXF1ZXN0GiIudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlc3BvbnNlEl0KDlNldENoYW5uZWxOYW1lEiQudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlcXVlc3QaJS50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVzcG9uc2USbwoUQ2xlYXJBbGxDaGFubmVsTmFtZXMSKi50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdBorLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZRJLCgpHZXRNZXRyaWNzEh0udG9raS5hZG1pbi52MS5NZXRyaWNzUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuTWV0cmljc1Jlc3BvbnNlElUKD0dldFNlcnZlckhlYWx0aBIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVySGVhbHRoUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVySGVhbHRoEk4KC0dldEF1ZGl0TG9nEh4udG9raS5hZG1pbi52MS5BdWRpdExvZ1JlcXVlc3QaHy50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message toki.admin.v1.Snapshot
@@ -554,6 +554,329 @@ export const ClearAllChannelNamesResponseSchema: GenMessage<ClearAllChannelNames
   messageDesc(file_admin, 24);
 
 /**
+ * One sampled data point. `rx/tx_bytes_per_sec` are the average voice-
+ * relay (UDP) throughput over the sample interval — ingress (client→
+ * server) and egress (server→client). gRPC signaling traffic is not
+ * counted (negligible next to audio).
+ *
+ * @generated from message toki.admin.v1.MetricSample
+ */
+export type MetricSample = Message<"toki.admin.v1.MetricSample"> & {
+  /**
+   * sample time, unix seconds
+   *
+   * @generated from field: uint64 ts_unix = 1;
+   */
+  tsUnix: bigint;
+
+  /**
+   * ingress, bytes/s
+   *
+   * @generated from field: uint64 rx_bytes_per_sec = 2;
+   */
+  rxBytesPerSec: bigint;
+
+  /**
+   * egress, bytes/s
+   *
+   * @generated from field: uint64 tx_bytes_per_sec = 3;
+   */
+  txBytesPerSec: bigint;
+
+  /**
+   * connected peers at sample time
+   *
+   * @generated from field: uint32 users = 4;
+   */
+  users: number;
+
+  /**
+   * peers holding a PTT floor
+   *
+   * @generated from field: uint32 transmitting = 5;
+   */
+  transmitting: number;
+};
+
+/**
+ * Describes the message toki.admin.v1.MetricSample.
+ * Use `create(MetricSampleSchema)` to create a new message.
+ */
+export const MetricSampleSchema: GenMessage<MetricSample> = /*@__PURE__*/
+  messageDesc(file_admin, 25);
+
+/**
+ * @generated from message toki.admin.v1.MetricsRequest
+ */
+export type MetricsRequest = Message<"toki.admin.v1.MetricsRequest"> & {
+  /**
+   * @generated from field: toki.admin.v1.MetricsWindow window = 1;
+   */
+  window: MetricsWindow;
+};
+
+/**
+ * Describes the message toki.admin.v1.MetricsRequest.
+ * Use `create(MetricsRequestSchema)` to create a new message.
+ */
+export const MetricsRequestSchema: GenMessage<MetricsRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 26);
+
+/**
+ * @generated from message toki.admin.v1.MetricsResponse
+ */
+export type MetricsResponse = Message<"toki.admin.v1.MetricsResponse"> & {
+  /**
+   * oldest → newest, downsampled
+   *
+   * @generated from field: repeated toki.admin.v1.MetricSample samples = 1;
+   */
+  samples: MetricSample[];
+};
+
+/**
+ * Describes the message toki.admin.v1.MetricsResponse.
+ * Use `create(MetricsResponseSchema)` to create a new message.
+ */
+export const MetricsResponseSchema: GenMessage<MetricsResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 27);
+
+/**
+ * @generated from message toki.admin.v1.GetServerHealthRequest
+ */
+export type GetServerHealthRequest = Message<"toki.admin.v1.GetServerHealthRequest"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.GetServerHealthRequest.
+ * Use `create(GetServerHealthRequestSchema)` to create a new message.
+ */
+export const GetServerHealthRequestSchema: GenMessage<GetServerHealthRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 28);
+
+/**
+ * @generated from message toki.admin.v1.ServerHealth
+ */
+export type ServerHealth = Message<"toki.admin.v1.ServerHealth"> & {
+  /**
+   * process+system CPU, 0..100
+   *
+   * @generated from field: double cpu_percent = 1;
+   */
+  cpuPercent: number;
+
+  /**
+   * @generated from field: uint64 mem_used_bytes = 2;
+   */
+  memUsedBytes: bigint;
+
+  /**
+   * @generated from field: uint64 mem_total_bytes = 3;
+   */
+  memTotalBytes: bigint;
+
+  /**
+   * for the data-dir's filesystem
+   *
+   * @generated from field: uint64 disk_used_bytes = 4;
+   */
+  diskUsedBytes: bigint;
+
+  /**
+   * @generated from field: uint64 disk_total_bytes = 5;
+   */
+  diskTotalBytes: bigint;
+};
+
+/**
+ * Describes the message toki.admin.v1.ServerHealth.
+ * Use `create(ServerHealthSchema)` to create a new message.
+ */
+export const ServerHealthSchema: GenMessage<ServerHealth> = /*@__PURE__*/
+  messageDesc(file_admin, 29);
+
+/**
+ * @generated from message toki.admin.v1.AuditEntry
+ */
+export type AuditEntry = Message<"toki.admin.v1.AuditEntry"> & {
+  /**
+   * monotonic row id (paging cursor)
+   *
+   * @generated from field: uint64 id = 1;
+   */
+  id: bigint;
+
+  /**
+   * @generated from field: uint64 ts_unix = 2;
+   */
+  tsUnix: bigint;
+
+  /**
+   * e.g. "kick", "connect", "auth-fail"
+   *
+   * @generated from field: string kind = 3;
+   */
+  kind: string;
+
+  /**
+   * admin user / callsign / "SYSTEM"
+   *
+   * @generated from field: string actor = 4;
+   */
+  actor: string;
+
+  /**
+   * canonical freq, or "" if N/A
+   *
+   * @generated from field: string frequency = 5;
+   */
+  frequency: string;
+
+  /**
+   * free-text description
+   *
+   * @generated from field: string detail = 6;
+   */
+  detail: string;
+};
+
+/**
+ * Describes the message toki.admin.v1.AuditEntry.
+ * Use `create(AuditEntrySchema)` to create a new message.
+ */
+export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
+  messageDesc(file_admin, 30);
+
+/**
+ * @generated from message toki.admin.v1.AuditLogRequest
+ */
+export type AuditLogRequest = Message<"toki.admin.v1.AuditLogRequest"> & {
+  /**
+   * @generated from field: toki.admin.v1.AuditFilter filter = 1;
+   */
+  filter: AuditFilter;
+
+  /**
+   * page size (server caps it)
+   *
+   * @generated from field: uint32 limit = 2;
+   */
+  limit: number;
+
+  /**
+   * 0 = newest page; else id < before_id
+   *
+   * @generated from field: uint64 before_id = 3;
+   */
+  beforeId: bigint;
+};
+
+/**
+ * Describes the message toki.admin.v1.AuditLogRequest.
+ * Use `create(AuditLogRequestSchema)` to create a new message.
+ */
+export const AuditLogRequestSchema: GenMessage<AuditLogRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 31);
+
+/**
+ * @generated from message toki.admin.v1.AuditLogResponse
+ */
+export type AuditLogResponse = Message<"toki.admin.v1.AuditLogResponse"> & {
+  /**
+   * newest-first
+   *
+   * @generated from field: repeated toki.admin.v1.AuditEntry entries = 1;
+   */
+  entries: AuditEntry[];
+
+  /**
+   * total matching the filter
+   *
+   * @generated from field: uint64 total = 2;
+   */
+  total: bigint;
+};
+
+/**
+ * Describes the message toki.admin.v1.AuditLogResponse.
+ * Use `create(AuditLogResponseSchema)` to create a new message.
+ */
+export const AuditLogResponseSchema: GenMessage<AuditLogResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 32);
+
+/**
+ * @generated from enum toki.admin.v1.MetricsWindow
+ */
+export enum MetricsWindow {
+  /**
+   * last 60 min
+   *
+   * @generated from enum value: METRICS_WINDOW_HOUR = 0;
+   */
+  HOUR = 0,
+
+  /**
+   * last 24 h
+   *
+   * @generated from enum value: METRICS_WINDOW_DAY = 1;
+   */
+  DAY = 1,
+
+  /**
+   * last 7 d
+   *
+   * @generated from enum value: METRICS_WINDOW_WEEK = 2;
+   */
+  WEEK = 2,
+}
+
+/**
+ * Describes the enum toki.admin.v1.MetricsWindow.
+ */
+export const MetricsWindowSchema: GenEnum<MetricsWindow> = /*@__PURE__*/
+  enumDesc(file_admin, 0);
+
+/**
+ * Coarse server-side category filter (kinds are bucketed deterministically;
+ * see the audit recorder for the kind vocabulary).
+ *
+ * @generated from enum toki.admin.v1.AuditFilter
+ */
+export enum AuditFilter {
+  /**
+   * @generated from enum value: AUDIT_FILTER_ALL = 0;
+   */
+  ALL = 0,
+
+  /**
+   * operator actions (kick/move/rename/…/config)
+   *
+   * @generated from enum value: AUDIT_FILTER_ADMIN = 1;
+   */
+  ADMIN = 1,
+
+  /**
+   * peer connect / disconnect
+   *
+   * @generated from enum value: AUDIT_FILTER_CONNECTIONS = 2;
+   */
+  CONNECTIONS = 2,
+
+  /**
+   * auth success / failure
+   *
+   * @generated from enum value: AUDIT_FILTER_SECURITY = 3;
+   */
+  SECURITY = 3,
+}
+
+/**
+ * Describes the enum toki.admin.v1.AuditFilter.
+ */
+export const AuditFilterSchema: GenEnum<AuditFilter> = /*@__PURE__*/
+  enumDesc(file_admin, 1);
+
+/**
  * Admin control-plane service for the Toki server's web panel.
  *
  * Served as gRPC-Web over the admin TLS listener (default :8000), same
@@ -683,6 +1006,41 @@ export const Admin: GenService<{
     methodKind: "unary";
     input: typeof ClearAllChannelNamesRequestSchema;
     output: typeof ClearAllChannelNamesResponseSchema;
+  },
+  /**
+   * ── Metrics / KPIs / audit ──────────────────────────────────────
+   * Time-series of voice-relay bandwidth + peer count, persisted at
+   * 1-minute resolution. Server downsamples to a bounded point count
+   * for the requested window.
+   *
+   * @generated from rpc toki.admin.v1.Admin.GetMetrics
+   */
+  getMetrics: {
+    methodKind: "unary";
+    input: typeof MetricsRequestSchema;
+    output: typeof MetricsResponseSchema;
+  },
+  /**
+   * Point-in-time host health (CPU / memory / disk), sampled in the
+   * background so this read is cheap.
+   *
+   * @generated from rpc toki.admin.v1.Admin.GetServerHealth
+   */
+  getServerHealth: {
+    methodKind: "unary";
+    input: typeof GetServerHealthRequestSchema;
+    output: typeof ServerHealthSchema;
+  },
+  /**
+   * Paged, filtered audit log (admin actions + security + connect /
+   * disconnect). Newest-first; page backwards with `before_id`.
+   *
+   * @generated from rpc toki.admin.v1.Admin.GetAuditLog
+   */
+  getAuditLog: {
+    methodKind: "unary";
+    input: typeof AuditLogRequestSchema;
+    output: typeof AuditLogResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_admin, 0);

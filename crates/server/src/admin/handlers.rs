@@ -146,6 +146,17 @@ pub async fn login(
             state.login_throttle.record_auth_failure(ip).await;
         }
         tracing::warn!(?peer_ip, username = %body.username, "admin login failed");
+        crate::audit::record(
+            &state.audit,
+            "auth-fail",
+            crate::audit::SYSTEM_ACTOR,
+            "",
+            &format!(
+                "failed admin login for '{}' from {}",
+                body.username,
+                peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+            ),
+        );
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ApiError::new("invalid username or password")),
@@ -164,6 +175,16 @@ pub async fn login(
         .await
         .map_err(internal_error)?;
     info!(username = %body.username, "admin login success");
+    crate::audit::record(
+        &state.audit,
+        "auth-ok",
+        &body.username,
+        "",
+        &format!(
+            "admin login from {}",
+            peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+        ),
+    );
 
     let mut response = StatusCode::NO_CONTENT.into_response();
     response

@@ -42,6 +42,18 @@ service Admin {
   rpc SetChannelName(SetChannelNameRequest) returns (SetChannelNameResponse);
   // Clear every channel name in one shot.
   rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
+
+  // ── Metrics / KPIs / audit ──────────────────────────────────────
+  // Time-series of voice-relay bandwidth + peer count, persisted at
+  // 1-minute resolution. Server downsamples to a bounded point count
+  // for the requested window.
+  rpc GetMetrics(MetricsRequest) returns (MetricsResponse);
+  // Point-in-time host health (CPU / memory / disk), sampled in the
+  // background so this read is cheap.
+  rpc GetServerHealth(GetServerHealthRequest) returns (ServerHealth);
+  // Paged, filtered audit log (admin actions + security + connect /
+  // disconnect). Newest-first; page backwards with `before_id`.
+  rpc GetAuditLog(AuditLogRequest) returns (AuditLogResponse);
 }
 
 // ── Live state ────────────────────────────────────────────────────
@@ -145,3 +157,71 @@ message SetChannelNameResponse {}
 
 message ClearAllChannelNamesRequest {}
 message ClearAllChannelNamesResponse {}
+
+// ── Metrics ───────────────────────────────────────────────────────
+
+// One sampled data point. `rx/tx_bytes_per_sec` are the average voice-
+// relay (UDP) throughput over the sample interval — ingress (client→
+// server) and egress (server→client). gRPC signaling traffic is not
+// counted (negligible next to audio).
+message MetricSample {
+  uint64 ts_unix = 1;               // sample time, unix seconds
+  uint64 rx_bytes_per_sec = 2;      // ingress, bytes/s
+  uint64 tx_bytes_per_sec = 3;      // egress, bytes/s
+  uint32 users = 4;                 // connected peers at sample time
+  uint32 transmitting = 5;          // peers holding a PTT floor
+}
+
+enum MetricsWindow {
+  METRICS_WINDOW_HOUR = 0;          // last 60 min
+  METRICS_WINDOW_DAY = 1;           // last 24 h
+  METRICS_WINDOW_WEEK = 2;          // last 7 d
+}
+
+message MetricsRequest {
+  MetricsWindow window = 1;
+}
+message MetricsResponse {
+  repeated MetricSample samples = 1; // oldest → newest, downsampled
+}
+
+// ── Host health ───────────────────────────────────────────────────
+
+message GetServerHealthRequest {}
+message ServerHealth {
+  double cpu_percent = 1;           // process+system CPU, 0..100
+  uint64 mem_used_bytes = 2;
+  uint64 mem_total_bytes = 3;
+  uint64 disk_used_bytes = 4;       // for the data-dir's filesystem
+  uint64 disk_total_bytes = 5;
+}
+
+// ── Audit log ─────────────────────────────────────────────────────
+
+message AuditEntry {
+  uint64 id = 1;                    // monotonic row id (paging cursor)
+  uint64 ts_unix = 2;
+  string kind = 3;                  // e.g. "kick", "connect", "auth-fail"
+  string actor = 4;                 // admin user / callsign / "SYSTEM"
+  string frequency = 5;             // canonical freq, or "" if N/A
+  string detail = 6;                // free-text description
+}
+
+// Coarse server-side category filter (kinds are bucketed deterministically;
+// see the audit recorder for the kind vocabulary).
+enum AuditFilter {
+  AUDIT_FILTER_ALL = 0;
+  AUDIT_FILTER_ADMIN = 1;           // operator actions (kick/move/rename/…/config)
+  AUDIT_FILTER_CONNECTIONS = 2;     // peer connect / disconnect
+  AUDIT_FILTER_SECURITY = 3;        // auth success / failure
+}
+
+message AuditLogRequest {
+  AuditFilter filter = 1;
+  uint32 limit = 2;                 // page size (server caps it)
+  uint64 before_id = 3;             // 0 = newest page; else id < before_id
+}
+message AuditLogResponse {
+  repeated AuditEntry entries = 1;  // newest-first
+  uint64 total = 2;                 // total matching the filter
+}

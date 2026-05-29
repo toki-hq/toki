@@ -58,7 +58,9 @@ use tonic_web::GrpcWebLayer;
 
 use toki_proto::admin::v1::admin_server::AdminServer;
 
+use crate::audit::AuditSink;
 use crate::config::AdminConfig;
+use crate::metrics::{SharedByteCounters, SharedHealth};
 use crate::server_config::SharedServerConfig;
 use crate::state::{SharedChannelNames, SharedRegistry};
 use crate::throttle::IpThrottle;
@@ -120,6 +122,12 @@ pub struct AppState {
     /// broadcaster folds it into each `Snapshot` so the panel can label
     /// every frequency — occupied or not.
     pub channel_names: SharedChannelNames,
+    /// Latest host-health snapshot (CPU / memory / disk), refreshed by
+    /// the metrics sampler. `GetServerHealth` clones it out.
+    pub health: SharedHealth,
+    /// Audit-log sink. Admin RPCs push their actions here; the writer
+    /// task drains it to sqlite. Login (auth-ok / auth-fail) uses it too.
+    pub audit: AuditSink,
     /// `true` when `config.toml` set a `password`. The TOML value
     /// takes precedence at the signaling layer (see `SignalingSvc`)
     /// and we surface this flag to the UI so the server-password
@@ -143,12 +151,17 @@ pub struct AppState {
 /// the caller (`main.rs`) selects on this future alongside the
 /// other server tasks, so any error here brings the whole process
 /// down rather than leaving a half-running server.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     cfg: AdminConfig,
     registry: SharedRegistry,
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
+    byte_counters: SharedByteCounters,
+    audit: AuditSink,
+    audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
+    data_dir: std::path::PathBuf,
     toml_password_override: bool,
 ) -> Result<()> {
     let bind: SocketAddr = format!("{}:{}", cfg.bind, cfg.port)
@@ -197,11 +210,15 @@ pub async fn run(
     // from on the next tick.
     let (tx, _) = tokio::sync::broadcast::channel::<toki_proto::admin::v1::Snapshot>(16);
 
+    // Shared host-health snapshot, written by the metrics sampler and
+    // read by `GetServerHealth`.
+    let health = crate::metrics::shared_health();
+
     let started_at = Instant::now();
     let admin_bind = bind.to_string();
     let state = AppState {
         registry: registry.clone(),
-        db,
+        db: db.clone(),
         broadcaster: tx.clone(),
         session_ttl: Duration::from_secs(cfg.session_ttl_hours * 3600),
         started_at,
@@ -209,8 +226,24 @@ pub async fn run(
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
         channel_names: channel_names.clone(),
+        health: health.clone(),
+        audit,
         toml_password_override,
     };
+
+    // Audit writer: drains the audit channel into sqlite for the life of
+    // the process (the only task that writes the audit_log table).
+    tokio::spawn(crate::audit::run_writer(audit_rx, db.clone()));
+
+    // Metrics sampler: refreshes host health + persists the 1-minute
+    // bandwidth/users time-series, pruning past the retention window.
+    tokio::spawn(crate::metrics::run_sampler(
+        byte_counters,
+        registry.clone(),
+        db,
+        health,
+        data_dir,
+    ));
 
     // Periodic snapshot loop. Lives for the lifetime of the admin
     // task; aborted implicitly when this function returns (its tokio

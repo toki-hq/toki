@@ -1,6 +1,8 @@
 pub mod admin;
 pub mod audio;
+pub mod audit;
 pub mod config;
+pub mod metrics;
 pub mod reaper;
 pub mod server_config;
 pub mod signaling;

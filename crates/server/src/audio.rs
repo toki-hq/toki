@@ -37,7 +37,11 @@ struct RateState {
     packets: u32,
 }
 
-pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<()> {
+pub async fn run(
+    bind: SocketAddr,
+    registry: SharedRegistry,
+    counters: crate::metrics::SharedByteCounters,
+) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(bind).await?;
     tracing::info!(?bind, "audio relay listening");
 
@@ -58,6 +62,9 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
                 continue;
             }
         };
+        // Ingress accounting: count every received datagram (incl.
+        // keepalives + rejected packets) — it's real bytes on the wire.
+        counters.add_rx(len as u64);
 
         if len < HEADER_LEN_C2S {
             debug!(len, "packet too small");
@@ -287,8 +294,9 @@ pub async fn run(bind: SocketAddr, registry: SharedRegistry) -> anyhow::Result<(
             pkt.extend_from_slice(&target.seq.to_le_bytes());
             pkt.extend_from_slice(tag.as_slice());
             pkt.extend_from_slice(&buf_ct);
-            if let Err(e) = socket.send_to(&pkt, target.addr).await {
-                warn!(error = %e, "failed to forward audio");
+            match socket.send_to(&pkt, target.addr).await {
+                Ok(sent) => counters.add_tx(sent as u64),
+                Err(e) => warn!(error = %e, "failed to forward audio"),
             }
         }
     }

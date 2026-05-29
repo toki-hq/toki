@@ -33,6 +33,7 @@ use toki_proto::v1::{
 use super::auth::{self, AdminUser};
 use super::watch;
 use super::AppState;
+use crate::audit;
 use crate::server_config::ServerConfig;
 use crate::{signaling, validation};
 
@@ -232,6 +233,19 @@ impl Admin for AdminApi {
             named_channels_enabled = merged.named_channels_enabled,
             "admin updated server config",
         );
+        audit::record(
+            &self.state.audit,
+            "server-config",
+            &admin.0,
+            "",
+            &format!(
+                "name='{}' max_peers={} idle_kick={}s named_channels={}",
+                merged.server_name,
+                merged.max_peers,
+                merged.idle_kick_secs,
+                merged.named_channels_enabled
+            ),
+        );
         Ok(Response::new(config_to_wire(&merged)))
     }
 
@@ -267,6 +281,17 @@ impl Admin for AdminApi {
             admin_user = %admin.0,
             armed = !merged.grpc_password.is_empty(),
             "admin rotated server password",
+        );
+        audit::record(
+            &self.state.audit,
+            "server-config",
+            &admin.0,
+            "",
+            if merged.grpc_password.is_empty() {
+                "disarmed the server password (open mode)"
+            } else {
+                "armed/rotated the server password"
+            },
         );
         Ok(Response::new(pb::SetServerPasswordResponse {}))
     }
@@ -335,6 +360,13 @@ impl Admin for AdminApi {
             other_sessions_invalidated = killed,
             "admin changed password",
         );
+        audit::record(
+            &self.state.audit,
+            "admin-password",
+            &admin.0,
+            "",
+            "changed the admin password",
+        );
         Ok(Response::new(pb::ChangePasswordResponse {}))
     }
 
@@ -393,6 +425,13 @@ impl Admin for AdminApi {
             target_name = %display_name,
             frequency = frequency.as_deref().unwrap_or("(none)"),
             "admin kicked client",
+        );
+        audit::record(
+            &self.state.audit,
+            "kick",
+            &admin.0,
+            frequency.as_deref().unwrap_or(""),
+            &format!("kicked {display_name}"),
         );
 
         let left = Event {
@@ -496,6 +535,18 @@ impl Admin for AdminApi {
             to = %plan.new_freq,
             "admin moved client",
         );
+        audit::record(
+            &self.state.audit,
+            "move",
+            &admin.0,
+            &plan.new_freq,
+            &format!(
+                "moved {} from {} → {}",
+                plan.display_name,
+                plan.old_freq.as_deref().unwrap_or("lobby"),
+                plan.new_freq
+            ),
+        );
 
         for tx in &plan.old_recipients {
             if let Some(ev) = &plan.old_left {
@@ -591,6 +642,13 @@ impl Admin for AdminApi {
             new_name = %new_name,
             "admin renamed client",
         );
+        audit::record(
+            &self.state.audit,
+            "rename",
+            &admin.0,
+            "",
+            &format!("renamed {old_name} → {new_name}"),
+        );
 
         let rename_evt = Event {
             event: Some(event::Event::DisplayNameChanged(DisplayNameChanged {
@@ -643,6 +701,17 @@ impl Admin for AdminApi {
                 admin_user = %admin.0, target_id = %id, "admin revoked priority",
             ),
         }
+        audit::record(
+            &self.state.audit,
+            "priority",
+            &admin.0,
+            bound_freq.as_deref().unwrap_or(""),
+            if bound_freq.is_some() {
+                "granted priority"
+            } else {
+                "revoked priority"
+            },
+        );
         self.push_snapshot().await;
         Ok(Response::new(pb::SetPriorityResponse {}))
     }
@@ -689,6 +758,17 @@ impl Admin for AdminApi {
             frequency = %frequency,
             cleared = name.is_empty(),
             "admin set channel name",
+        );
+        audit::record(
+            &self.state.audit,
+            "channel-name",
+            &admin.0,
+            &frequency,
+            &if name.is_empty() {
+                "cleared the channel name".to_string()
+            } else {
+                format!("named the channel '{name}'")
+            },
         );
 
         // Tell anyone currently on that frequency about the new label.
@@ -748,8 +828,88 @@ impl Admin for AdminApi {
                 let _ = tx.send(evt.clone()).await;
             }
         }
+        audit::record(
+            &self.state.audit,
+            "channel-clear",
+            &admin.0,
+            "",
+            &format!("cleared {} channel name(s)", cleared_freqs.len()),
+        );
         self.push_snapshot().await;
         Ok(Response::new(pb::ClearAllChannelNamesResponse {}))
+    }
+
+    async fn get_metrics(
+        &self,
+        req: Request<pb::MetricsRequest>,
+    ) -> Result<Response<pb::MetricsResponse>, Status> {
+        self.authenticated(&req).await?;
+        let window_secs: i64 = match req.into_inner().window() {
+            pb::MetricsWindow::Hour => 3600,
+            pb::MetricsWindow::Day => 24 * 3600,
+            pb::MetricsWindow::Week => 7 * 24 * 3600,
+        };
+        let since = super::db::now_unix() - window_secs;
+        let rows = self.state.db.load_metrics(since).await.map_err(internal)?;
+        let samples = downsample(rows, 150)
+            .into_iter()
+            .map(|r| pb::MetricSample {
+                ts_unix: r.ts as u64,
+                rx_bytes_per_sec: r.rx_bps,
+                tx_bytes_per_sec: r.tx_bps,
+                users: r.users,
+                transmitting: r.transmitting,
+            })
+            .collect();
+        Ok(Response::new(pb::MetricsResponse { samples }))
+    }
+
+    async fn get_server_health(
+        &self,
+        req: Request<pb::GetServerHealthRequest>,
+    ) -> Result<Response<pb::ServerHealth>, Status> {
+        self.authenticated(&req).await?;
+        let h = crate::metrics::health_snapshot(&self.state.health);
+        Ok(Response::new(pb::ServerHealth {
+            cpu_percent: h.cpu_percent as f64,
+            mem_used_bytes: h.mem_used,
+            mem_total_bytes: h.mem_total,
+            disk_used_bytes: h.disk_used,
+            disk_total_bytes: h.disk_total,
+        }))
+    }
+
+    async fn get_audit_log(
+        &self,
+        req: Request<pb::AuditLogRequest>,
+    ) -> Result<Response<pb::AuditLogResponse>, Status> {
+        self.authenticated(&req).await?;
+        let r = req.into_inner();
+        let kinds: &[&str] = match r.filter() {
+            pb::AuditFilter::All => &[],
+            pb::AuditFilter::Admin => audit::KINDS_ADMIN,
+            pb::AuditFilter::Connections => audit::KINDS_CONNECTIONS,
+            pb::AuditFilter::Security => audit::KINDS_SECURITY,
+        };
+        let limit = if r.limit == 0 { 100 } else { r.limit };
+        let (rows, total) = self
+            .state
+            .db
+            .load_audit(kinds, limit, r.before_id)
+            .await
+            .map_err(internal)?;
+        let entries = rows
+            .into_iter()
+            .map(|a| pb::AuditEntry {
+                id: a.id,
+                ts_unix: a.ts as u64,
+                kind: a.kind,
+                actor: a.actor,
+                frequency: a.frequency,
+                detail: a.detail,
+            })
+            .collect();
+        Ok(Response::new(pb::AuditLogResponse { entries, total }))
     }
 }
 
@@ -772,6 +932,29 @@ struct MovePlan {
 fn internal<E: std::fmt::Debug>(e: E) -> Status {
     tracing::error!(error = ?e, "admin gRPC internal error");
     Status::internal("internal error")
+}
+
+/// Reduce a time-series (oldest→newest) to at most `max` points by
+/// averaging consecutive equal-width buckets. Preserves the overall
+/// shape while bounding the gRPC payload regardless of window length.
+fn downsample(rows: Vec<super::db::MetricRow>, max: usize) -> Vec<super::db::MetricRow> {
+    if max == 0 || rows.len() <= max {
+        return rows;
+    }
+    let bucket = rows.len().div_ceil(max);
+    rows.chunks(bucket)
+        .map(|chunk| {
+            let n = chunk.len() as u64;
+            super::db::MetricRow {
+                // Midpoint timestamp reads naturally on the x-axis.
+                ts: chunk[chunk.len() / 2].ts,
+                rx_bps: chunk.iter().map(|r| r.rx_bps).sum::<u64>() / n,
+                tx_bps: chunk.iter().map(|r| r.tx_bps).sum::<u64>() / n,
+                users: (chunk.iter().map(|r| r.users as u64).sum::<u64>() / n) as u32,
+                transmitting: (chunk.iter().map(|r| r.transmitting as u64).sum::<u64>() / n) as u32,
+            }
+        })
+        .collect()
 }
 
 fn validate_runtime_fields(
@@ -867,6 +1050,8 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            health: crate::metrics::shared_health(),
+            audit: crate::audit::channel().0,
             toml_password_override: toml_override,
         };
         (AdminApi::new(state), token)
@@ -1186,5 +1371,101 @@ mod tests {
             .unwrap();
         assert!(api.state.channel_names.read().await.is_empty());
         assert!(api.state.db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn downsample_passes_through_when_under_cap() {
+        let rows: Vec<super::super::db::MetricRow> = (0..10)
+            .map(|i| super::super::db::MetricRow {
+                ts: i,
+                rx_bps: i as u64,
+                tx_bps: 0,
+                users: 1,
+                transmitting: 0,
+            })
+            .collect();
+        assert_eq!(downsample(rows.clone(), 150).len(), 10);
+    }
+
+    #[test]
+    fn downsample_caps_and_averages() {
+        let rows: Vec<super::super::db::MetricRow> = (0..1000)
+            .map(|i| super::super::db::MetricRow {
+                ts: i,
+                rx_bps: 100,
+                tx_bps: 50,
+                users: 4,
+                transmitting: 1,
+            })
+            .collect();
+        let out = downsample(rows, 150);
+        assert!(out.len() <= 150, "got {}", out.len());
+        // Constant series → averages preserve the value exactly.
+        assert!(out
+            .iter()
+            .all(|r| r.rx_bps == 100 && r.tx_bps == 50 && r.users == 4));
+    }
+
+    #[tokio::test]
+    async fn audit_log_filters_by_category() {
+        let (api, token) = test_api(false).await;
+        let db = &api.state.db;
+        db.insert_audit(1, "kick", "admin", "446.05", "x")
+            .await
+            .unwrap();
+        db.insert_audit(2, "connect", "ALPHA-1", "", "from 1.2.3.4")
+            .await
+            .unwrap();
+        db.insert_audit(3, "auth-fail", "SYSTEM", "", "bad pw")
+            .await
+            .unwrap();
+        db.insert_audit(4, "rename", "admin", "", "A → B")
+            .await
+            .unwrap();
+
+        let all = api
+            .get_audit_log(authed(
+                pb::AuditLogRequest {
+                    filter: pb::AuditFilter::All as i32,
+                    limit: 50,
+                    before_id: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(all.total, 4);
+        // Newest-first ordering.
+        assert_eq!(all.entries.first().unwrap().kind, "rename");
+
+        let admin_only = api
+            .get_audit_log(authed(
+                pb::AuditLogRequest {
+                    filter: pb::AuditFilter::Admin as i32,
+                    limit: 50,
+                    before_id: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(admin_only.total, 2); // kick + rename
+
+        let security = api
+            .get_audit_log(authed(
+                pb::AuditLogRequest {
+                    filter: pb::AuditFilter::Security as i32,
+                    limit: 50,
+                    before_id: 0,
+                },
+                &token,
+            ))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(security.total, 1);
+        assert_eq!(security.entries[0].kind, "auth-fail");
     }
 }

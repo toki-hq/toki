@@ -13,7 +13,7 @@ const Ctx = createContext<ThemeCtx | null>(null);
 
 function readInitial(): Theme {
   const saved = localStorage.getItem(STORAGE_KEY);
-  return saved === "phosphor" || saved === "dashboard" ? saved : "dashboard";
+  return saved === "phosphor" || saved === "dashboard" ? saved : "phosphor";
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {

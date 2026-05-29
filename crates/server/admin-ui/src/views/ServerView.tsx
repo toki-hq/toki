@@ -6,7 +6,9 @@ import { admin } from "@/lib/client";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { useTheme } from "@/components/ThemeProvider";
 
 function err(e: unknown): string {
   return e instanceof ConnectError ? e.rawMessage : e instanceof Error ? e.message : String(e);
@@ -23,8 +25,34 @@ export function ServerView({ info }: { info: ServerInfo | null }) {
         <RuntimeConfig />
         <ServerPassword tomlOverride={info?.tomlPasswordOverride ?? false} />
         <ChangePassword />
+        <Appearance />
       </div>
     </div>
+  );
+}
+
+function Appearance() {
+  const { theme, setTheme } = useTheme();
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Appearance</CardTitle>
+        <CardDescription>Theme is stored in this browser.</CardDescription>
+      </CardHeader>
+      <CardContent className="flex items-center justify-between">
+        <div className="flex flex-col gap-0.5">
+          <span className="text-sm">Phosphor theme</span>
+          <span className="text-xs text-muted-foreground">
+            Terminal palette · {theme === "phosphor" ? "on" : "off (modern dashboard)"}
+          </span>
+        </div>
+        <Switch
+          checked={theme === "phosphor"}
+          onCheckedChange={(on) => setTheme(on ? "phosphor" : "dashboard")}
+          aria-label="Toggle phosphor theme"
+        />
+      </CardContent>
+    </Card>
   );
 }
 

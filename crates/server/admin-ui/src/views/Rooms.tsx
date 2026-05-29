@@ -34,24 +34,38 @@ function err(e: unknown): string {
 
 export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   const rooms = useMemo(() => snapshot?.rooms ?? [], [snapshot]);
+  const activeCount = rooms.filter((r) => r.members.length > 0).length;
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Member | null>(null);
 
-  const visible = rooms.filter((r) => {
+  // The Watch snapshot only carries rooms the server is tracking (i.e. with
+  // members). When "Active only" is off, fill in the rest of the band with
+  // synthetic empty rooms so every channel is reachable.
+  const allRooms = useMemo<Room[]>(() => {
+    if (activeOnly) return rooms;
+    const byFreq = new Map(rooms.map((r) => [r.frequency, r]));
+    return ALL_FREQUENCIES.map(
+      (f) =>
+        byFreq.get(f) ??
+        ({ $typeName: "toki.admin.v1.Room", frequency: f, members: [] } as Room),
+    );
+  }, [rooms, activeOnly]);
+
+  const visible = allRooms.filter((r) => {
     if (activeOnly && r.members.length === 0) return false;
     if (filter && !r.frequency.includes(filter)) return false;
     return true;
   });
 
   const current =
-    rooms.find((r) => r.frequency === selected) ?? visible[0] ?? null;
+    allRooms.find((r) => r.frequency === selected) ?? visible[0] ?? null;
 
   return (
     <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-4">
       <h1 className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
-        02 · Channels — {visible.length} shown · {rooms.length} active
+        02 · Channels — {visible.length} shown · {activeCount} active
       </h1>
       <div className="grid flex-1 grid-cols-[20rem_1fr] gap-4 overflow-hidden">
         {/* Channel list */}

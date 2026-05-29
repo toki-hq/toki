@@ -13,9 +13,7 @@ import { admin } from "@/lib/client";
 import { logout } from "@/lib/auth";
 import type { ServerInfo } from "@/gen/admin_pb";
 import { useWatch } from "@/hooks/useWatch";
-import { useTheme } from "@/components/ThemeProvider";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { cn, formatUptime } from "@/lib/utils";
 import { Login } from "@/views/Login";
 import { Overview } from "@/views/Overview";
@@ -69,7 +67,6 @@ export function App() {
 function Shell({ info, onLoggedOut }: { info: ServerInfo | null; onLoggedOut: () => void }) {
   const [section, setSection] = useState<Section>("overview");
   const { snapshot, connected } = useWatch(onLoggedOut);
-  const { theme, setTheme } = useTheme();
 
   const peers =
     (snapshot?.rooms.reduce((n, r) => n + r.members.length, 0) ?? 0) +
@@ -141,14 +138,6 @@ function Shell({ info, onLoggedOut }: { info: ServerInfo | null; onLoggedOut: ()
               {label}
             </button>
           ))}
-          <div className="mt-auto flex items-center justify-between rounded-md px-3 py-2">
-            <span className="text-xs text-muted-foreground">Phosphor theme</span>
-            <Switch
-              checked={theme === "phosphor"}
-              onCheckedChange={(on) => setTheme(on ? "phosphor" : "dashboard")}
-              aria-label="Toggle phosphor theme"
-            />
-          </div>
         </nav>
 
         {/* Content */}

@@ -1,0 +1,123 @@
+syntax = "proto3";
+
+package toki.admin.v1;
+
+// Admin control-plane service for the Toki server's web panel.
+//
+// Served as gRPC-Web over the admin TLS listener (default :8000), same
+// origin as the React SPA. Authentication is the HttpOnly `toki_admin_session`
+// cookie the browser auto-attaches; a server-side interceptor + per-RPC guard
+// validate it (login/logout remain tiny HTTP endpoints that set/clear the
+// cookie, since gRPC can't ergonomically issue Set-Cookie).
+//
+// `Watch` replaces the old Server-Sent Events stream: the server pushes a
+// fresh Snapshot on subscribe, on a ~1 Hz tick, and immediately after every
+// successful mutation.
+service Admin {
+  // Live registry stream. The first message lands immediately on subscribe.
+  rpc Watch(WatchRequest) returns (stream Snapshot);
+
+  // One-shot reads.
+  rpc GetServerInfo(GetServerInfoRequest) returns (ServerInfo);
+  rpc GetServerConfig(GetServerConfigRequest) returns (ServerConfig);
+
+  // Runtime configuration (persisted to admin.db, hot-applied).
+  rpc UpdateServerConfig(UpdateServerConfigRequest) returns (ServerConfig);
+  // FAILED_PRECONDITION if the gRPC password is pinned in config.toml.
+  rpc SetServerPassword(SetServerPasswordRequest) returns (SetServerPasswordResponse);
+
+  // Admin account.
+  rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
+
+  // Per-client operator actions. NOT_FOUND if the client id is unknown.
+  rpc KickClient(KickClientRequest) returns (KickClientResponse);
+  rpc MoveClient(MoveClientRequest) returns (MoveClientResponse);
+  rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
+  rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
+}
+
+// ── Live state ────────────────────────────────────────────────────
+
+message Snapshot {
+  repeated Room rooms = 1;          // frequency-sorted
+  repeated Member lobby = 2;        // clients on no frequency
+  uint64 generation = 3;            // monotonic; lets the UI detect gaps
+  uint64 server_uptime_secs = 4;
+}
+
+message Room {
+  string frequency = 1;             // canonical "446.05"
+  optional string holder = 2;       // client_id of the current PTT holder
+  repeated Member members = 3;
+}
+
+message Member {
+  string id = 1;                    // client_id (UUID)
+  string display_name = 2;
+  uint64 connected_secs = 3;        // since Register
+  bool priority = 4;                // priority speaker on this room's frequency
+}
+
+// ── Server metadata + config ──────────────────────────────────────
+
+message ServerInfo {
+  string version = 1;
+  string admin_bind = 2;
+  uint64 started_at_unix = 3;
+  bool toml_password_override = 4;  // server password pinned in TOML → SetServerPassword locked
+}
+
+// Runtime-tunable settings. NOTE: `grpc_password` is write-only on the wire —
+// GetServerConfig leaves it blank (never echo the cleartext to the browser);
+// `grpc_password_set` reports whether one is currently armed.
+message ServerConfig {
+  string server_name = 1;
+  uint32 max_peers = 2;
+  uint32 idle_kick_secs = 3;
+  string grpc_password = 4;         // blank in responses; only meaningful on SetServerPassword
+  bool grpc_password_set = 5;       // response-only: is a server password armed?
+}
+
+// ── Requests / responses ──────────────────────────────────────────
+
+message WatchRequest {}
+message GetServerInfoRequest {}
+message GetServerConfigRequest {}
+
+message UpdateServerConfigRequest {
+  string server_name = 1;
+  uint32 max_peers = 2;
+  uint32 idle_kick_secs = 3;
+}
+
+message SetServerPasswordRequest {
+  string password = 1;              // empty disarms (open mode)
+}
+message SetServerPasswordResponse {}
+
+message ChangePasswordRequest {
+  string current = 1;
+  string new_password = 2;
+}
+message ChangePasswordResponse {}
+
+message KickClientRequest { string id = 1; }
+message KickClientResponse {}
+
+message MoveClientRequest {
+  string id = 1;
+  string frequency = 2;
+}
+message MoveClientResponse {}
+
+message RenameClientRequest {
+  string id = 1;
+  string display_name = 2;
+}
+message RenameClientResponse {}
+
+message SetPriorityRequest {
+  string id = 1;
+  bool grant = 2;
+}
+message SetPriorityResponse {}

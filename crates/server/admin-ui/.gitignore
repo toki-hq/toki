@@ -1,0 +1,9 @@
+# Vite build output — generated. We commit only the index.html placeholder
+# (so `cargo build` works without Node); hashed assets are produced by
+# `npm run build` in CI/Docker and locally.
+/dist/assets/
+/dist/*.svg
+/dist/*.png
+/dist/*.ico
+/dist/vite.svg
+node_modules/

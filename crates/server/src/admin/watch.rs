@@ -1,0 +1,206 @@
+//! Periodic registry snapshot broadcaster + the `Watch` stream adapter.
+//!
+//! The broadcaster snapshots the registry every [`SNAPSHOT_INTERVAL`] and
+//! pushes the result (a `toki.admin.v1.Snapshot`) onto a tokio broadcast
+//! channel. The gRPC `Watch` server-stream subscribes to that channel and
+//! re-emits each snapshot to the connected browser. Mutating RPCs also
+//! `send` a fresh snapshot immediately so the UI updates without waiting
+//! for the next tick.
+//!
+//! This replaces the previous Server-Sent Events path; the snapshot
+//! function is shared so a `Watch` open can emit the current state right
+//! away rather than making the client wait a whole interval.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::{Stream, StreamExt};
+use tonic::Status;
+
+use toki_proto::admin::v1 as pb;
+
+use crate::state::SharedRegistry;
+
+/// How often the broadcaster wakes, snapshots the registry, and fans the
+/// result out to `Watch` subscribers. 1 Hz is plenty for an admin
+/// dashboard; per-mutation pushes cover the snappy-feedback case.
+pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Top-level loop: tick, snapshot, broadcast. Never returns under normal
+/// operation. `send` returning `Err(NoReceivers)` (no admin browsers
+/// connected) is ignored — we keep snapshotting so the next subscriber
+/// doesn't wait a whole interval.
+pub async fn run_broadcaster(
+    registry: SharedRegistry,
+    tx: Sender<pb::Snapshot>,
+    started_at: Instant,
+) {
+    let mut ticker = tokio::time::interval(SNAPSHOT_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let snapshot = snapshot_now(&registry, next_generation(), started_at).await;
+        let _ = tx.send(snapshot);
+    }
+}
+
+/// Monotonic snapshot generation counter, shared by the periodic loop and
+/// the per-mutation pushes so the UI can detect gaps/ordering.
+pub fn next_generation() -> u64 {
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    GEN.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// Lock the registry, walk it, and produce a self-contained snapshot.
+/// Shared by the broadcaster, the `Watch` open (immediate first frame),
+/// and the post-mutation pushes.
+pub async fn snapshot_now(
+    registry: &SharedRegistry,
+    generation: u64,
+    started_at: Instant,
+) -> pb::Snapshot {
+    let r = registry.lock().await;
+    let now = Instant::now();
+
+    // Walk the rooms table (not clients) so we render rooms whose members
+    // are stale-but-not-yet-reaped; lobby = clients with no frequency.
+    let mut rooms: Vec<pb::Room> = r
+        .rooms
+        .iter()
+        .map(|(freq, room)| {
+            let members = room
+                .members
+                .iter()
+                .filter_map(|id| r.clients.get(id))
+                .map(|c| pb::Member {
+                    id: c.id.clone(),
+                    display_name: c.display_name.clone(),
+                    connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                    // Priority is per-channel: priority only if the elected
+                    // frequency is the room we're listing them under.
+                    priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                })
+                .collect();
+            pb::Room {
+                frequency: freq.clone(),
+                holder: room.holder.clone(),
+                members,
+            }
+        })
+        .collect();
+    // Stable, frequency-ascending order so the UI doesn't reshuffle.
+    rooms.sort_by(|a, b| a.frequency.cmp(&b.frequency));
+
+    let lobby: Vec<pb::Member> = r
+        .clients
+        .values()
+        .filter(|c| c.current_frequency.is_none())
+        .map(|c| pb::Member {
+            id: c.id.clone(),
+            display_name: c.display_name.clone(),
+            connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+            priority: false,
+        })
+        .collect();
+
+    pb::Snapshot {
+        rooms,
+        lobby,
+        generation,
+        server_uptime_secs: now.saturating_duration_since(started_at).as_secs(),
+    }
+}
+
+/// Adapt a freshly-subscribed broadcast receiver into the `Watch`
+/// server-stream item type. Lagged items (a slow browser fell behind) are
+/// skipped — the next tick is a fresh full snapshot, so the UI never
+/// sticks on a stale view.
+pub fn broadcast_stream(
+    rx: Receiver<pb::Snapshot>,
+) -> impl Stream<Item = Result<pb::Snapshot, Status>> {
+    BroadcastStream::new(rx).filter_map(|res| res.ok().map(Ok))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{Client, Room};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
+        Client {
+            id: id.to_string(),
+            display_name: name.to_string(),
+            audio_token_hash: [0u8; crate::state::TOKEN_HASH_LEN],
+            audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
+            audio_last_seq: 0,
+            audio_outbound_seq: 1,
+            audio_addr: None,
+            events_tx: None,
+            current_frequency: freq.map(str::to_string),
+            last_seen: Instant::now(),
+            connected_at: Instant::now(),
+            priority_freq: None,
+            expected_ip: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_groups_clients_by_frequency() {
+        let mut reg = crate::state::Registry::default();
+        reg.clients
+            .insert("a".into(), mk_client("a", "Alice", Some("446.05")));
+        reg.clients
+            .insert("b".into(), mk_client("b", "Bob", Some("446.05")));
+        reg.clients.insert("c".into(), mk_client("c", "Cara", None));
+        reg.rooms.insert(
+            "446.05".into(),
+            Room {
+                members: vec!["a".into(), "b".into()],
+                holder: Some("a".into()),
+            },
+        );
+        let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+
+        let snap = snapshot_now(&registry, 7, Instant::now()).await;
+        assert_eq!(snap.generation, 7);
+        assert_eq!(snap.rooms.len(), 1);
+        assert_eq!(snap.rooms[0].frequency, "446.05");
+        assert_eq!(snap.rooms[0].holder.as_deref(), Some("a"));
+        assert_eq!(snap.rooms[0].members.len(), 2);
+        assert_eq!(snap.lobby.len(), 1);
+        assert_eq!(snap.lobby[0].id, "c");
+    }
+
+    #[tokio::test]
+    async fn snapshot_marks_priority_only_on_matching_freq() {
+        let mut reg = crate::state::Registry::default();
+        let mut alice = mk_client("a", "Alice", Some("446.05"));
+        alice.priority_freq = Some("446.05".into());
+        let mut bob = mk_client("b", "Bob", Some("446.05"));
+        bob.priority_freq = Some("447.00".into()); // dormant here
+        reg.clients.insert("a".into(), alice);
+        reg.clients.insert("b".into(), bob);
+        reg.rooms.insert(
+            "446.05".into(),
+            Room {
+                members: vec!["a".into(), "b".into()],
+                holder: None,
+            },
+        );
+        let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+
+        let snap = snapshot_now(&registry, 1, Instant::now()).await;
+        let members: HashMap<_, _> = snap.rooms[0]
+            .members
+            .iter()
+            .map(|m| (m.id.clone(), m.priority))
+            .collect();
+        assert_eq!(members["a"], true);
+        assert_eq!(members["b"], false);
+    }
+}

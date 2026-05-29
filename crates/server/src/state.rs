@@ -90,6 +90,16 @@ pub struct Room {
     /// Walkie-talkie lock: client_id of the current PTT holder. At most one
     /// member may transmit at a time. `None` means the room is free.
     pub holder: Option<String>,
+    /// The most recent holder and the instant they released the floor,
+    /// set whenever `holder` transitions to `None`. The audio relay keeps
+    /// forwarding *this* client's packets for a brief grace window after
+    /// release: the PTT-release travels over the reliable gRPC stream and
+    /// clears `holder` before the talker's final UDP voice frames arrive,
+    /// so without a grace those tail frames would be dropped and the end
+    /// of every transmission clipped. Cleared the moment a new holder
+    /// takes the floor, so a fresh (or preempting) talker's audio never
+    /// mixes with the previous holder's residual tail.
+    pub last_released: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Default)]

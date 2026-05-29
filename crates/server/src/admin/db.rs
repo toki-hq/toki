@@ -186,6 +186,15 @@ impl AdminDb {
                 "named_channels_enabled",
                 "INTEGER NOT NULL DEFAULT 0",
             )?;
+            // Upgrade path for the audio-quality dial (added after named
+            // channels). Default 2 = Standard Opus, matching the struct
+            // default so an upgraded db starts compressing.
+            ensure_column_exists(
+                c,
+                "server_config",
+                "audio_quality",
+                "INTEGER NOT NULL DEFAULT 2",
+            )?;
             Ok(())
         })
         .await
@@ -201,7 +210,7 @@ impl AdminDb {
             let row = c
                 .query_row(
                     "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                     named_channels_enabled \
+                     named_channels_enabled, audio_quality \
                      FROM server_config WHERE id = 1",
                     [],
                     |r| {
@@ -211,6 +220,7 @@ impl AdminDb {
                             idle_kick_secs: r.get::<_, i64>(2)? as u32,
                             grpc_password: r.get(3)?,
                             named_channels_enabled: r.get::<_, i64>(4)? != 0,
+                            audio_quality: r.get::<_, i64>(5)? as u32,
                         })
                     },
                 )
@@ -230,7 +240,8 @@ impl AdminDb {
             c.execute(
                 "UPDATE server_config \
                  SET server_name = ?1, max_peers = ?2, idle_kick_secs = ?3, \
-                     grpc_password = ?4, named_channels_enabled = ?5, updated_at = ?6 \
+                     grpc_password = ?4, named_channels_enabled = ?5, \
+                     audio_quality = ?6, updated_at = ?7 \
                  WHERE id = 1",
                 params![
                     cfg.server_name,
@@ -238,6 +249,7 @@ impl AdminDb {
                     cfg.idle_kick_secs as i64,
                     cfg.grpc_password,
                     cfg.named_channels_enabled as i64,
+                    cfg.audio_quality as i64,
                     now,
                 ],
             )?;
@@ -898,6 +910,7 @@ mod tests {
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
+            audio_quality: 1,
         };
         db.save_server_config(&new).await.unwrap();
         let loaded = db.load_server_config().await.unwrap();
@@ -953,6 +966,7 @@ mod tests {
             idle_kick_secs: 7,
             grpc_password: "secret".into(),
             named_channels_enabled: true,
+            audio_quality: 1,
         })
         .await
         .unwrap();

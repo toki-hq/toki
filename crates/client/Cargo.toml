@@ -58,6 +58,11 @@ eframe = "0.32"
 egui = "0.32"
 egui-colorgradient = "0.2"
 cpal = "0.15"
+# Opus voice codec. `audiopus` wraps libopus; `audiopus_sys` builds it
+# from vendored source (needs cmake + a C toolchain at build time), so
+# the client binary is self-contained with no system libopus dependency.
+# The server never links this — it relays opaque Opus payloads.
+audiopus = "0.2"
 global-hotkey = "0.6"
 device_query = "4"
 rustfft = "6"

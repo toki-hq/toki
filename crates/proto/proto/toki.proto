@@ -48,6 +48,14 @@ message RegisterResponse {
   // session (replay). The key never leaves either endpoint after
   // this handshake.
   bytes audio_mac_key = 4;
+
+  // Codec the operator wants this client to send. When false the
+  // client sends raw PCM (the legacy path); when true it Opus-encodes
+  // at `opus_bitrate` bits/sec. Advisory — the server relays whatever
+  // codec arrives and receivers decode per-packet — but honoring it
+  // lets the operator trade bandwidth for quality server-wide.
+  bool opus_enabled = 5;
+  uint32 opus_bitrate = 6;
 }
 
 message JoinRequest {

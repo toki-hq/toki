@@ -55,3 +55,8 @@ design/
 /crates/server/admin.db-*
 /crates/server/tls/
 /data/
+
+# Stray runtime artifacts if a server is ever launched from the admin-ui dir.
+/crates/server/admin-ui/admin.db
+/crates/server/admin-ui/admin.db-*
+/crates/server/admin-ui/tls/

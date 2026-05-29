@@ -96,6 +96,24 @@ async fn register_open_mode_succeeds() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn register_advertises_opus_by_default() {
+    // Default server_config audio_quality = 2 (Standard) → clients are
+    // asked to Opus-encode at ~24 kbps.
+    let mut client = boot(None).await;
+    let resp = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(resp.opus_enabled, "Standard quality advertises Opus");
+    assert_eq!(resp.opus_bitrate, 24_000);
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn register_password_required_rejects_wrong_password() {
     let mut client = boot(Some("hunter2")).await;
     let err = client
@@ -283,6 +301,7 @@ async fn boot_with_passwords(
         idle_kick_secs: 10,
         grpc_password: db_password.to_string(),
         named_channels_enabled: false,
+        audio_quality: 2,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -394,6 +413,7 @@ async fn register_rejected_when_at_max_peers() {
         idle_kick_secs: 10,
         grpc_password: String::new(),
         named_channels_enabled: false,
+        audio_quality: 2,
     })
     .await;
     for i in 0..2 {

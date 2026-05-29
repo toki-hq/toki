@@ -82,7 +82,8 @@ jobs:
             libxi-dev
             libxkbcommon-dev libxkbcommon-x11-dev
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-          version: 1.0
+            libopus-dev
+          version: 1.1
 
       - name: cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -219,12 +220,23 @@ jobs:
     runs-on: macos-latest
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
+    # Build libopus from the audiopus_sys vendored source, statically:
+    # OPUS_NO_PKG skips Homebrew's libopus (a dynamic link would make
+    # Toki.app depend on a dylib absent on end-user machines); OPUS_STATIC
+    # links the freshly-built static lib so the .app is self-contained.
+    env:
+      OPUS_NO_PKG: "1"
+      OPUS_STATIC: "1"
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: install libopus build tools
+        # The vendored libopus uses autotools to configure + build.
+        run: brew install autoconf automake libtool
 
       - name: cache cargo-bundle install
         uses: actions/cache@v4
@@ -273,6 +285,10 @@ jobs:
     runs-on: windows-latest
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
+    # Statically link the bundled MSVC libopus so toki.exe needs no
+    # opus.dll alongside it.
+    env:
+      OPUS_STATIC: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -336,7 +352,8 @@ jobs:
             libxi-dev
             libxkbcommon-dev libxkbcommon-x11-dev
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
-          version: 1.0
+            libopus-dev
+          version: 1.1
 
       - name: derive version from tag
         id: tag

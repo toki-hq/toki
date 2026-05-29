@@ -56,8 +56,14 @@ pub mod wire {
 
     /// Client→server header length (token + version + seq + tag).
     pub const HEADER_LEN_C2S: usize = TOKEN_LEN + 1 + SEQ_LEN + TAG_LEN;
-    /// Server→peer header length (seq + tag, no token, no version byte).
-    pub const HEADER_LEN_S2C: usize = SEQ_LEN + TAG_LEN;
+    /// Server→peer header length (version + seq + tag; no token).
+    ///
+    /// The leading version byte tells the receiver which codec the
+    /// relayed payload uses (PCM vs Opus) so it can pick the right
+    /// decoder + AEAD associated-data. The server stamps it with the
+    /// *sender's* version, so mixed-codec senders and legacy peers
+    /// interoperate per-packet.
+    pub const HEADER_LEN_S2C: usize = 1 + SEQ_LEN + TAG_LEN;
 
     /// Back-compat alias for code that still wants the inbound header
     /// length — kept until call sites migrate to the explicit name.
@@ -74,11 +80,36 @@ pub mod wire {
     /// Raw PCM audio frame, little-endian i16, mono, 48 kHz.
     pub const VERSION_AUDIO_PCM: u8 = 1;
 
+    /// Opus-encoded audio frame, 48 kHz mono, 10 ms. Variable length;
+    /// the server relays the opaque payload (it never decodes Opus).
+    pub const VERSION_AUDIO_OPUS: u8 = 2;
+
     pub const SAMPLE_RATE_HZ: u32 = 48_000;
-    /// 10 ms of mono audio at 48 kHz — keeps each UDP packet well under MTU.
+    /// 10 ms of mono audio at 48 kHz — the PCM frame size and the
+    /// capture/chunking granularity.
     pub const FRAME_SAMPLES: usize = 480;
     pub const FRAME_BYTES: usize = FRAME_SAMPLES * 2;
+
+    /// Opus encodes 10 ms frames (480 samples @ 48 kHz) — one frame per
+    /// captured mic frame, so the outbound path needs no buffering and
+    /// adds no framing latency over the PCM path (the codec still cuts
+    /// bandwidth ~20×). A 20 ms frame would halve the packet rate but
+    /// add ~10 ms of mouth-to-ear delay; 10 ms favours low latency.
+    pub const OPUS_FRAME_SAMPLES: usize = 480;
+    /// Generous cap on a single Opus frame's bytes. At ≤32 kbps/10 ms a
+    /// frame is ~50 bytes; 512 leaves headroom for higher rates / FEC
+    /// while still bounding the per-packet allocation.
+    pub const MAX_OPUS_PAYLOAD: usize = 512;
+
+    /// Largest UDP datagram we ever send/receive. The PCM frame (960 B)
+    /// dominates the Opus payload, so the C2S PCM packet is the ceiling;
+    /// S2C is smaller (no token, +1 version byte). Sized off the larger.
     pub const MAX_AUDIO_PACKET: usize = HEADER_LEN_C2S + FRAME_BYTES;
+
+    /// True for the two forwardable audio codecs (not keepalive).
+    pub fn is_audio(version: u8) -> bool {
+        version == VERSION_AUDIO_PCM || version == VERSION_AUDIO_OPUS
+    }
 
     /// Build the ChaCha20-Poly1305 nonce for a packet with the given
     /// seq. Layout: [0; 4] || seq.to_le_bytes(). Constant prefix

@@ -1222,7 +1222,9 @@ where
 
 /// Append wire-rate (48 kHz) PCM into the playback ring. Caps the queue
 /// at 500 ms to prevent latency from snowballing if we receive faster
-/// than the speaker drains.
+/// than the speaker drains. Used for self-generated audio that must play
+/// out in full (roger beeps, tone previews) — see [`push_voice`] for the
+/// latency-managed path used by incoming voice.
 pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
     let mut guard = buf.lock().unwrap();
     // 500 ms at wire rate.
@@ -1232,6 +1234,36 @@ pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
             guard.pop_front();
         }
         guard.push_back(s);
+    }
+}
+
+/// Soft target backlog for the incoming-voice path: ~60 ms of jitter
+/// cushion at wire rate. After an overflow we trim back to this rather
+/// than leaving the queue deep.
+const VOICE_TARGET_SAMPLES: usize = (SAMPLE_RATE_HZ as usize * 60) / 1000;
+/// Hard ceiling for the voice backlog: ~120 ms. Beyond this, mouth-to-ear
+/// latency is worse than the glitch from skipping ahead, so we catch up.
+const VOICE_MAX_SAMPLES: usize = (SAMPLE_RATE_HZ as usize * 120) / 1000;
+
+/// Append incoming voice into the playback ring with active latency
+/// management. In steady state (matched capture/playback clocks, low
+/// jitter) the backlog stays naturally small. But a scheduling hiccup or
+/// a clump of UDP packets can leave the queue deep — and the plain
+/// [`push_playback`] cap (500 ms) would let that latency *persist* for
+/// the rest of the transmission, since nothing trims it back down. That's
+/// the "delay" you hear once playback falls behind.
+///
+/// Here, when the backlog runs past [`VOICE_MAX_SAMPLES`] we drop the
+/// oldest samples to snap back to [`VOICE_TARGET_SAMPLES`] — a one-time
+/// catch-up skip that keeps voice tight rather than carrying a growing
+/// delay. For half-duplex push-to-talk this is the right trade: a brief
+/// skip during a hiccup beats a permanently laggy channel.
+pub fn push_voice(buf: &PlaybackBuf, samples: &[i16]) {
+    let mut guard = buf.lock().unwrap();
+    guard.extend(samples.iter().copied());
+    if guard.len() > VOICE_MAX_SAMPLES {
+        let drop = guard.len() - VOICE_TARGET_SAMPLES;
+        guard.drain(..drop);
     }
 }
 
@@ -1377,6 +1409,37 @@ mod beep_tests {
     //!   * Preset table lookups.
     use super::*;
     use toki_proto::wire::SAMPLE_RATE_HZ;
+
+    #[test]
+    fn push_voice_keeps_small_backlog_intact() {
+        // Below the cap, nothing is dropped — every sample is preserved.
+        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        push_voice(&buf, &vec![7i16; VOICE_TARGET_SAMPLES]);
+        assert_eq!(buf.lock().unwrap().len(), VOICE_TARGET_SAMPLES);
+    }
+
+    #[test]
+    fn push_voice_trims_to_target_when_backlog_exceeds_cap() {
+        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        // Overflow the hard ceiling in one shot.
+        push_voice(&buf, &vec![1i16; VOICE_MAX_SAMPLES + 5000]);
+        // It snaps back to the target, not just shaves the overflow —
+        // so latency can't sit pinned at the ceiling.
+        assert_eq!(buf.lock().unwrap().len(), VOICE_TARGET_SAMPLES);
+    }
+
+    #[test]
+    fn push_voice_catch_up_drops_oldest_keeps_newest() {
+        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        // Fill near the cap with a marker value, then push fresh audio
+        // that tips it over. The retained window must be the *newest*
+        // audio (the catch-up discards the stale front).
+        push_voice(&buf, &vec![1i16; VOICE_MAX_SAMPLES - 10]);
+        push_voice(&buf, &vec![2i16; 100]);
+        let guard = buf.lock().unwrap();
+        assert_eq!(guard.len(), VOICE_TARGET_SAMPLES);
+        assert_eq!(*guard.back().unwrap(), 2, "freshest sample retained");
+    }
 
     #[test]
     fn beep_pattern_lengths_match_durations() {

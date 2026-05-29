@@ -10,8 +10,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::wire::{
-    build_nonce, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, SEQ_LEN, TAG_LEN,
-    TOKEN_LEN, VERSION_AUDIO_PCM,
+    build_nonce, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
+    MAX_OPUS_PAYLOAD, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM,
 };
 
 use crate::state::{hash_token, SharedRegistry};
@@ -22,6 +22,38 @@ use crate::state::{hash_token, SharedRegistry};
 /// jitter / catch-up without giving an attacker a meaningful
 /// amplification surface.
 const MAX_AUDIO_FPS: u32 = 110;
+
+/// How long after a PTT release the relay keeps forwarding the
+/// just-released holder's audio. The PTT-release rides the reliable gRPC
+/// stream and clears the room's holder before the talker's final UDP
+/// voice frames land; this window lets those tail frames (which can lag
+/// the release by up to ~1 RTT of network + jitter) through so the end
+/// of speech isn't clipped. Only the immediately-previous holder
+/// benefits, and only while the floor is free — a new presser voids it.
+const RELEASE_GRACE: Duration = Duration::from_millis(200);
+
+/// Walkie-talkie relay gate: may we forward an audio packet from
+/// `sender`? `last_released` is the just-released holder and how long
+/// ago they let go (`None` if no one has released since the last grant).
+///
+/// True when the sender holds the floor now, or when the floor is free
+/// and the sender is the most recent holder still inside `grace` — that
+/// second arm carries the talker's final UDP frames, which routinely lag
+/// the reliable PttUp that already cleared the holder. A new holder (a
+/// fresh press or a priority preemption) sets `holder` to `Some(_)` and
+/// clears `last_released`, so a previous holder's tail can never bleed
+/// into someone else's transmission.
+fn should_relay(
+    holder: Option<&str>,
+    last_released: Option<(&str, Duration)>,
+    sender: &str,
+    grace: Duration,
+) -> bool {
+    if holder == Some(sender) {
+        return true;
+    }
+    holder.is_none() && matches!(last_released, Some((id, since)) if id == sender && since < grace)
+}
 
 /// Token bucket window. Counters reset every `RATE_WINDOW`. Smaller
 /// values give tighter shaping but burn more CPU on the HashMap
@@ -88,20 +120,25 @@ pub async fn run(
             .expect("slice has TAG_LEN bytes");
         let ciphertext_in = &buf[HEADER_LEN_C2S..len];
 
-        // Strict shape check for audio frames: legitimate audio packets
-        // are *exactly* HEADER_LEN_C2S + FRAME_BYTES long (ChaCha20 is
-        // a stream cipher, so ciphertext length == plaintext length).
-        // Keepalive packets have zero-length ciphertext. Any other
-        // shape is malformed or hostile.
+        // Per-codec shape checks. ChaCha20 is a stream cipher, so the
+        // ciphertext length equals the plaintext length. PCM frames are
+        // *exactly* FRAME_BYTES; Opus frames are variable but bounded;
+        // keepalives carry no payload. Anything else is malformed/hostile.
         if version == VERSION_AUDIO_PCM && ciphertext_in.len() != FRAME_BYTES {
             debug!(
                 len,
                 expected = HEADER_LEN_C2S + FRAME_BYTES,
-                "audio frame wrong size, dropping"
+                "PCM frame wrong size, dropping"
             );
             continue;
         }
-        if version != VERSION_AUDIO_PCM && !ciphertext_in.is_empty() {
+        if version == VERSION_AUDIO_OPUS
+            && (ciphertext_in.is_empty() || ciphertext_in.len() > MAX_OPUS_PAYLOAD)
+        {
+            debug!(len, "Opus frame out of bounds, dropping");
+            continue;
+        }
+        if !is_audio(version) && !ciphertext_in.is_empty() {
             debug!(len, version, "non-audio packet with payload, dropping");
             continue;
         }
@@ -112,7 +149,7 @@ pub async fn run(
         // mutex contention with legitimate clients. Key is the raw
         // token bytes as a fixed-size array — avoids the per-packet
         // Vec allocation we'd pay with `token.to_vec()`.
-        if version == VERSION_AUDIO_PCM {
+        if is_audio(version) {
             let mut rate_key = [0u8; TOKEN_LEN];
             rate_key.copy_from_slice(token);
             let now = Instant::now();
@@ -220,7 +257,7 @@ pub async fn run(
                 client.last_seen = std::time::Instant::now();
             }
 
-            if version != VERSION_AUDIO_PCM {
+            if !is_audio(version) {
                 // Keepalive: address + seq + heartbeat updated above;
                 // nothing to forward.
                 continue;
@@ -241,7 +278,19 @@ pub async fn run(
                 let Some(room) = registry.rooms.get(&freq) else {
                     continue;
                 };
-                if room.holder.as_deref() != Some(sender_id.as_str()) {
+                // Forward if the sender currently holds the floor, or if
+                // they just released it and we're still inside the grace
+                // window (covers UDP tail frames that lag the reliable
+                // PttUp which already cleared the holder). See RELEASE_GRACE.
+                let allowed = should_relay(
+                    room.holder.as_deref(),
+                    room.last_released
+                        .as_ref()
+                        .map(|(id, at)| (id.as_str(), at.elapsed())),
+                    &sender_id,
+                    RELEASE_GRACE,
+                );
+                if !allowed {
                     continue;
                 }
                 room.members
@@ -281,16 +330,18 @@ pub async fn run(
             let nonce_bytes = build_nonce(target.seq);
             let nonce = Nonce::from_slice(&nonce_bytes);
             let mut buf_ct = plaintext.clone();
-            let tag =
-                match cipher.encrypt_in_place_detached(nonce, &[VERSION_AUDIO_PCM], &mut buf_ct) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        warn!(error = %e, "AEAD encrypt failed for outbound peer");
-                        continue;
-                    }
-                };
-            // S2C layout: seq (8) | tag (16) | ciphertext
+            // AAD = the *sender's* codec version, which we also stamp into
+            // the S2C header so the receiver picks the matching decoder.
+            let tag = match cipher.encrypt_in_place_detached(nonce, &[version], &mut buf_ct) {
+                Ok(t) => t,
+                Err(e) => {
+                    warn!(error = %e, "AEAD encrypt failed for outbound peer");
+                    continue;
+                }
+            };
+            // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
             let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
+            pkt.push(version);
             pkt.extend_from_slice(&target.seq.to_le_bytes());
             pkt.extend_from_slice(tag.as_slice());
             pkt.extend_from_slice(&buf_ct);
@@ -309,4 +360,67 @@ struct PeerTarget {
     addr: SocketAddr,
     key: [u8; toki_proto::wire::MAC_KEY_LEN],
     seq: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const G: Duration = Duration::from_millis(200);
+
+    #[test]
+    fn relays_for_the_current_holder() {
+        assert!(should_relay(Some("a"), None, "a", G));
+    }
+
+    #[test]
+    fn drops_audio_from_a_non_holder() {
+        // Someone else holds the floor — sender "b" is barging in.
+        assert!(!should_relay(Some("a"), None, "b", G));
+    }
+
+    #[test]
+    fn relays_just_released_holder_within_grace() {
+        // Floor free, "a" released 50 ms ago: their UDP tail still flows.
+        assert!(should_relay(
+            None,
+            Some(("a", Duration::from_millis(50))),
+            "a",
+            G
+        ));
+    }
+
+    #[test]
+    fn drops_released_holder_after_grace_expires() {
+        assert!(!should_relay(
+            None,
+            Some(("a", Duration::from_millis(250))),
+            "a",
+            G
+        ));
+    }
+
+    #[test]
+    fn grace_only_helps_the_one_who_released() {
+        // "a" just released, but "b" is the one sending — no free ride.
+        assert!(!should_relay(
+            None,
+            Some(("a", Duration::from_millis(10))),
+            "b",
+            G
+        ));
+    }
+
+    #[test]
+    fn new_holder_voids_a_previous_grace() {
+        // holder is Some(b) (b just grabbed/preempted the floor); a's
+        // residual tail must not be forwarded even though a released
+        // moments ago. The grace arm requires holder.is_none().
+        assert!(!should_relay(
+            Some("b"),
+            Some(("a", Duration::from_millis(10))),
+            "a",
+            G
+        ));
+    }
 }

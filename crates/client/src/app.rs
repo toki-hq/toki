@@ -1709,9 +1709,11 @@ impl TokiApp {
         let channel_name = self.state.lock().unwrap().channel_name.clone();
         if let Some(name) = channel_name {
             if !name.is_empty() {
+                // Vertically centered on `dot_y` so the name's midline
+                // matches the ACT caption + activity dot on the right.
                 let name_region = Rect::from_min_max(
-                    Pos2::new(rect.left() + pad_x, label_y - 6.0),
-                    Pos2::new(dot_x - 26.0, label_y + 6.0),
+                    Pos2::new(rect.left() + pad_x, dot_y - 6.0),
+                    Pos2::new(dot_x - 26.0, dot_y + 6.0),
                 );
                 paint_marquee(
                     painter,

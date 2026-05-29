@@ -200,7 +200,7 @@ mod tests {
             .iter()
             .map(|m| (m.id.clone(), m.priority))
             .collect();
-        assert_eq!(members["a"], true);
-        assert_eq!(members["b"], false);
+        assert!(members["a"]);
+        assert!(!members["b"]);
     }
 }

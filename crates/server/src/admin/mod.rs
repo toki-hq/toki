@@ -1,22 +1,27 @@
 //! Admin web panel.
 //!
-//! A small axum HTTP service exposed on a separate port (default
-//! `8000`), bound to the same process as the gRPC signaling server.
-//! Surfaces the live registry state (clients per frequency, current
-//! PTT holders) over Server-Sent Events and exposes three operator
-//! actions — **kick**, **move to frequency**, **rename callsign** —
-//! that mutate the same `Arc<Mutex<Registry>>` the signaling handlers
-//! use, so admin actions and client-driven lifecycle events stay
-//! consistent.
+//! A React SPA + a gRPC-Web control-plane service, both served on the
+//! admin TLS listener (default `8000`) in the same process as the gRPC
+//! signaling server. The SPA (built by `admin-ui/`, embedded via
+//! rust-embed) talks gRPC-Web to the [`grpc::AdminApi`] service, which
+//! surfaces live registry state over the streaming `Watch` RPC and
+//! exposes operator actions (kick / move / rename / priority) + runtime
+//! config, all mutating the same `Arc<Mutex<Registry>>` the signaling
+//! handlers use.
 //!
-//! # Why HTTP, not gRPC
+//! # Serving
 //!
-//! Browsers can't speak HTTP/2-framed gRPC directly; gRPC-Web works
-//! but requires generated JavaScript stubs (a build step). We picked
-//! "vanilla HTML/JS, embedded, no build pipeline", which is at odds
-//! with that. SSE for one-way server→client pushes + REST/JSON for
-//! mutations is the natural fit for the constraint and is trivial to
-//! implement in axum.
+//! One [`axum::Router`] on the TLS listener: the `GrpcWebLayer`-wrapped
+//! `AdminServer` (mounted at `/toki.admin.v1.Admin/*` via tonic's
+//! `Routes::into_axum_router`), the two cookie endpoints
+//! (`/api/login`, `/api/logout`), and the embedded-SPA fallback.
+//!
+//! # Auth
+//!
+//! Login/logout are plain HTTP because they set/clear the HttpOnly
+//! session cookie. Every gRPC-Web call carries that cookie (same origin);
+//! [`grpc::AuthInterceptor`] + a per-RPC async guard validate it against
+//! the session DB.
 //!
 //! # Auth bootstrap
 //!

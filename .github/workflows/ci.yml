@@ -42,6 +42,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The admin SPA (crates/server/admin-ui) is embedded into the
+      # server binary via rust-embed at *compile* time, so its `dist/`
+      # must exist with real content before any cargo build. Build it
+      # first; `git diff --exit-code src/gen` guards against committed
+      # protobuf stubs drifting from admin.proto.
+      - name: install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/server/admin-ui/package-lock.json
+      - name: build admin UI
+        working-directory: crates/server/admin-ui
+        run: |
+          npm ci
+          npm run gen
+          git diff --exit-code src/gen || (echo "::error::src/gen is stale — run 'npm run gen' and commit" && exit 1)
+          npm run build
+
       - name: install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

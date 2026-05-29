@@ -20,7 +20,7 @@ crates/
 - **Audio** — raw UDP, out of band, **encrypted + authenticated**. Client→server packets are `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, sealed with ChaCha20-Poly1305 under a per-session key from the TLS handshake. Version `0` is a keepalive (refreshes the NAT mapping / UDP source address, not forwarded); version `1` is a 10 ms PCM frame (mono, i16 LE, 48 kHz). The server verifies the tag, enforces a strictly-increasing sequence (replay protection), pins the session to its registering IP, and relays to every other member of the sender's frequency.
 - **Audio I/O** — [cpal] on a dedicated thread, with inline resampling so 44.1/48/96 kHz devices interoperate cleanly. PTT-gated outbound; inbound mixes into a shared playback ring capped at 500 ms to bound latency. Output is opened in stereo so the balance control can pan to either ear.
 - **Client GUI** — [egui] / eframe radio-strip UI: frequency tuner, live roster with talking indicators, configurable global PTT, memory presets, mic/speaker/balance knobs, roger-beep presets, and a settings panel.
-- **Admin panel** — an [axum] web app served over HTTPS on a separate port. Live dashboard over Server-Sent Events plus operator actions (kick / move / rename / priority) and runtime configuration.
+- **Admin panel** — a React (Vite + Tailwind + shadcn/ui) SPA served over HTTPS on a separate port, talking **gRPC-Web** to an embedded `Admin` service. A server-streaming `Watch` RPC drives the live dashboard; unary RPCs handle operator actions (kick / move / rename / priority) and runtime configuration. Two switchable themes (modern + phosphor terminal).
 
 Codec is intentionally raw PCM for the foundation (~780 kbps per stream — fine for LAN/broadband). Swapping in Opus is a localized change around the audio send/receive path and the wire-format version byte.
 
@@ -73,7 +73,7 @@ docker run -p 50051:50051/tcp -p 50051:50051/udp -p 8000:8000 \
 
 Browse to `https://<host>:8000` (self-signed cert → expect a browser warning, or front it with a reverse proxy). Grab the seeded `admin` password from the server's startup log. The panel offers:
 
-- **Live dashboard** (SSE) — members per frequency, current PTT holder, session age.
+- **Live dashboard** (gRPC-Web `Watch` stream) — members per frequency, current PTT holder, session age; updates on a 1 Hz tick and immediately after any admin action.
 - **Operator actions** — kick, move to frequency, rename callsign.
 - **Voice priority** — elect a member as a priority speaker on a channel; their PTT preempts a non-priority holder mid-transmission (the cut-off speaker is bumped, the channel hears a distinct priority roger). First-come among priority members.
 - **Runtime config** — server name, `max_peers`, idle-kick timeout, and the gRPC server password, all hot-reloaded without a restart.

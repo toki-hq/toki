@@ -15,6 +15,10 @@ tokio = { workspace = true }
 # into axum's `Sse::new(stream)`.
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = { workspace = true }
+# gRPC-Web adapter so browsers can call the admin gRPC service over a
+# plain fetch/XHR. `GrpcWebLayer` wraps the generated AdminServer and
+# is merged into the admin axum router (same TLS listener, no new port).
+tonic-web = "0.13"
 prost = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -75,6 +79,17 @@ rand = "0.8"
 # Hex encoding for session token cookies. Keeps the cookie value
 # ASCII-safe without dragging in base64.
 hex = "0.4"
+# The built React admin SPA (Vite `dist/`) is embedded into the binary
+# so the server stays self-contained. In debug builds rust-embed reads
+# from the filesystem at runtime (so `npm run build` is picked up
+# without recompiling); release bakes the bytes in.
+rust-embed = "8"
+# Content-Type guessing for the embedded SPA assets (hashed .js/.css,
+# fonts, index.html).
+mime_guess = "2"
+# Tower is needed at runtime now (not just tests) to layer GrpcWebLayer
+# + the auth interceptor onto the admin gRPC service.
+tower = "0.5"
 
 [dev-dependencies]
 # Used to serialise individual tests that mutate process-global

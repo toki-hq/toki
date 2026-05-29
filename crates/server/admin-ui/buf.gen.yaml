@@ -1,0 +1,11 @@
+version: v2
+clean: true
+plugins:
+  # protobuf-es v2 emits both messages and the service descriptors that
+  # @connectrpc/connect v2 consumes — no separate connect plugin needed.
+  - local: protoc-gen-es
+    out: src/gen
+    opt:
+      - target=ts
+inputs:
+  - directory: ../../proto/proto

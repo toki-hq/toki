@@ -2,6 +2,15 @@ pub mod v1 {
     tonic::include_proto!("toki.v1");
 }
 
+/// Admin control-plane service (gRPC-Web), consumed by the web panel SPA.
+/// Separate package from the signaling `v1` so the two surfaces evolve
+/// independently.
+pub mod admin {
+    pub mod v1 {
+        tonic::include_proto!("toki.admin.v1");
+    }
+}
+
 /// Wire format constants shared by the client and the server's UDP audio relay.
 ///
 /// Every UDP packet is encrypted + authenticated with ChaCha20-Poly1305 AEAD

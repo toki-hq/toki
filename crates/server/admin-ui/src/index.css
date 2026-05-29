@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Toki brand fonts — used by the phosphor theme to match the desktop
+   client's radio identity. Served from the embedded SPA's /fonts/. */
+@font-face {
+  font-family: "Toki UI";
+  src: url("/fonts/ui.ttf") format("truetype");
+  font-weight: 400;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Toki UI";
+  src: url("/fonts/ui-bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Toki Mono";
+  src: url("/fonts/mono.ttf") format("truetype");
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+@layer base {
+  /* ── Dashboard theme (modern, default) ──────────────────────────── */
+  [data-theme="dashboard"] {
+    --background: 222 24% 10%;
+    --foreground: 210 20% 92%;
+    --card: 222 22% 13%;
+    --card-foreground: 210 20% 92%;
+    --popover: 222 24% 12%;
+    --popover-foreground: 210 20% 92%;
+    --primary: 199 89% 56%; /* sky blue */
+    --primary-foreground: 222 47% 11%;
+    --secondary: 222 18% 20%;
+    --secondary-foreground: 210 20% 92%;
+    --muted: 222 16% 18%;
+    --muted-foreground: 215 15% 62%;
+    --accent: 222 18% 22%;
+    --accent-foreground: 210 20% 95%;
+    --destructive: 0 72% 58%;
+    --destructive-foreground: 210 20% 98%;
+    --warning: 38 95% 56%;
+    --warning-foreground: 222 47% 11%;
+    --border: 222 14% 24%;
+    --input: 222 14% 24%;
+    --ring: 199 89% 56%;
+    --radius: 0.6rem;
+    --font-ui: "Geist", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  /* ── Phosphor theme (terminal — the `design/admin` dialect) ───────
+     Cool blue-gray surfaces (#0a0c0e → #1a2127), white hairline borders,
+     flat panels with only small accent-dot glow, soft phosphor accents.
+     Values mirror ADMIN_T in design/admin/admin-shell.jsx. */
+  [data-theme="phosphor"] {
+    --background: 210 17% 5%; /* bg #0a0c0e */
+    --foreground: 120 10% 92%; /* ink #e8ece8 */
+    --card: 210 18% 9%; /* flat panel #12161a */
+    --card-foreground: 120 10% 92%;
+    --popover: 210 18% 10%;
+    --popover-foreground: 120 10% 92%;
+    --primary: 134 100% 75%; /* phosphor green #7fff9a */
+    --primary-foreground: 210 30% 6%;
+    --secondary: 210 20% 13%; /* panelActive #1a2127 */
+    --secondary-foreground: 120 10% 92%;
+    --muted: 210 18% 11%; /* panelHover #161b20 */
+    --muted-foreground: 130 6% 60%; /* inkDim */
+    --accent: 210 20% 13%; /* hover surface */
+    --accent-foreground: 134 100% 80%;
+    --destructive: 0 100% 71%; /* #ff6b6b */
+    --destructive-foreground: 210 30% 6%;
+    --warning: 36 100% 65%; /* amber #ffb84d */
+    --warning-foreground: 210 30% 6%;
+    --border: 0 0% 100% / 0.07; /* white hairline */
+    --input: 0 0% 100% / 0.1; /* borderStrong */
+    --ring: 134 100% 75%;
+    --radius: 0.5rem; /* 8px cards (design dialect) */
+    --font-ui: "Toki UI", "Geist", system-ui, sans-serif;
+    --font-mono: "Toki Mono", "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    font-feature-settings: "tnum" 1;
+  }
+  /* Numeric data should never jitter the layout. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

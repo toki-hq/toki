@@ -1,22 +1,27 @@
 //! Admin web panel.
 //!
-//! A small axum HTTP service exposed on a separate port (default
-//! `8000`), bound to the same process as the gRPC signaling server.
-//! Surfaces the live registry state (clients per frequency, current
-//! PTT holders) over Server-Sent Events and exposes three operator
-//! actions — **kick**, **move to frequency**, **rename callsign** —
-//! that mutate the same `Arc<Mutex<Registry>>` the signaling handlers
-//! use, so admin actions and client-driven lifecycle events stay
-//! consistent.
+//! A React SPA + a gRPC-Web control-plane service, both served on the
+//! admin TLS listener (default `8000`) in the same process as the gRPC
+//! signaling server. The SPA (built by `admin-ui/`, embedded via
+//! rust-embed) talks gRPC-Web to the [`grpc::AdminApi`] service, which
+//! surfaces live registry state over the streaming `Watch` RPC and
+//! exposes operator actions (kick / move / rename / priority) + runtime
+//! config, all mutating the same `Arc<Mutex<Registry>>` the signaling
+//! handlers use.
 //!
-//! # Why HTTP, not gRPC
+//! # Serving
 //!
-//! Browsers can't speak HTTP/2-framed gRPC directly; gRPC-Web works
-//! but requires generated JavaScript stubs (a build step). We picked
-//! "vanilla HTML/JS, embedded, no build pipeline", which is at odds
-//! with that. SSE for one-way server→client pushes + REST/JSON for
-//! mutations is the natural fit for the constraint and is trivial to
-//! implement in axum.
+//! One [`axum::Router`] on the TLS listener: the `GrpcWebLayer`-wrapped
+//! `AdminServer` (mounted at `/toki.admin.v1.Admin/*` via tonic's
+//! `Routes::into_axum_router`), the two cookie endpoints
+//! (`/api/login`, `/api/logout`), and the embedded-SPA fallback.
+//!
+//! # Auth
+//!
+//! Login/logout are plain HTTP because they set/clear the HttpOnly
+//! session cookie. Every gRPC-Web call carries that cookie (same origin);
+//! [`grpc::AuthInterceptor`] + a per-RPC async guard validate it against
+//! the session DB.
 //!
 //! # Auth bootstrap
 //!
@@ -49,6 +54,9 @@ use axum::{
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
+use tonic_web::GrpcWebLayer;
+
+use toki_proto::admin::v1::admin_server::AdminServer;
 
 use crate::config::AdminConfig;
 use crate::server_config::SharedServerConfig;
@@ -58,10 +66,10 @@ use crate::tls::TlsMaterial;
 
 pub mod auth;
 pub mod db;
-pub mod dto;
+pub mod grpc;
 pub mod handlers;
 pub mod routes;
-pub mod sse;
+pub mod watch;
 
 /// Concrete shared state for axum handlers. `Clone` is shallow —
 /// every field is either `Arc`-internal or itself `Clone` — so axum's
@@ -73,11 +81,12 @@ pub struct AppState {
     pub registry: SharedRegistry,
     /// SQLite-backed admin user + session store.
     pub db: db::AdminDb,
-    /// Broadcast channel for `/api/events`. Periodic snapshots are
-    /// fanned out to all connected SSE clients. Lagging consumers
-    /// (slow browsers) drop intermediate snapshots rather than
-    /// blocking the publisher — see [`sse::run_broadcaster`].
-    pub broadcaster: tokio::sync::broadcast::Sender<dto::Snapshot>,
+    /// Broadcast channel feeding the gRPC `Watch` stream. Periodic
+    /// snapshots (1 Hz) plus an immediate push after every mutation are
+    /// fanned out to all connected admin browsers. Lagging consumers
+    /// drop intermediate snapshots rather than blocking the publisher —
+    /// see [`watch::run_broadcaster`] / [`watch::broadcast_stream`].
+    pub broadcaster: tokio::sync::broadcast::Sender<toki_proto::admin::v1::Snapshot>,
     /// How long an issued session cookie is valid. Set once at
     /// startup from `AdminConfig.session_ttl_hours` and carried in
     /// the state so handlers don't have to re-read config.
@@ -167,7 +176,7 @@ pub async fn run(
     // slow consumers fall behind a few seconds at worst before
     // tokio_stream's BroadcastStream emits a `Lagged` they recover
     // from on the next tick.
-    let (tx, _) = tokio::sync::broadcast::channel::<dto::Snapshot>(16);
+    let (tx, _) = tokio::sync::broadcast::channel::<toki_proto::admin::v1::Snapshot>(16);
 
     let started_at = Instant::now();
     let admin_bind = bind.to_string();
@@ -186,9 +195,27 @@ pub async fn run(
     // Periodic snapshot loop. Lives for the lifetime of the admin
     // task; aborted implicitly when this function returns (its tokio
     // task is detached but tied to the runtime, which exits with main).
-    tokio::spawn(sse::run_broadcaster(registry, tx, started_at));
+    tokio::spawn(watch::run_broadcaster(registry, tx, started_at));
 
-    let router = routes::build(state);
+    // Build the gRPC-Web Admin service: the generated server wrapped by
+    // the cookie auth interceptor, exposed as an axum Router (tonic 0.13
+    // `Routes::into_axum_router`), then layered with `GrpcWebLayer` so the
+    // browser can call it over a plain fetch. Its routes live under
+    // `/toki.admin.v1.Admin/*`; merging with the HTTP router is
+    // unambiguous (no path overlap with `/api/*` or the SPA fallback).
+    let admin_grpc =
+        AdminServer::with_interceptor(grpc::AdminApi::new(state.clone()), grpc::AuthInterceptor);
+    let grpc_router = tonic::service::Routes::new(admin_grpc)
+        .into_axum_router()
+        .layer(GrpcWebLayer::new());
+
+    // Merge the cookie endpoints (no fallback) with the gRPC router
+    // (carries tonic's fallback), then set the SPA as the single
+    // fallback on the result. gRPC method routes + `/api/*` match by
+    // path first; everything else lands on the SPA (asset or index.html).
+    let router = routes::build(state)
+        .merge(grpc_router)
+        .fallback(handlers::spa);
 
     // Build a RustlsConfig from the PEM bytes we already have in
     // hand. `from_pem` parses them via `rustls-pemfile`; the result

@@ -147,13 +147,24 @@ pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
         let Ok(raw) = header_val.to_str() else {
             continue;
         };
-        for part in raw.split(';') {
-            let Some((k, v)) = part.trim().split_once('=') else {
-                continue;
-            };
-            if k.trim() == COOKIE_NAME {
-                return Some(v.trim().to_string());
-            }
+        if let Some(v) = parse_session_cookie(raw) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Pull the `toki_admin_session` value out of a single raw `Cookie`
+/// header string (the `;`-separated `name=value` list). Shared by the
+/// HTTP middleware (above) and the gRPC auth interceptor, which reads
+/// the cookie from request metadata rather than an axum `HeaderMap`.
+pub fn parse_session_cookie(raw: &str) -> Option<String> {
+    for part in raw.split(';') {
+        let Some((k, v)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if k.trim() == COOKIE_NAME {
+            return Some(v.trim().to_string());
         }
     }
     None

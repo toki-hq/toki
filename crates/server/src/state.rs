@@ -3,7 +3,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, RwLock};
 
 use toki_proto::v1::Event;
 
@@ -118,6 +118,24 @@ pub type SharedRegistry = Arc<Mutex<Registry>>;
 
 pub fn shared() -> SharedRegistry {
     Arc::new(Mutex::new(Registry::default()))
+}
+
+/// Admin-assigned channel names (canonical frequency → name), shared
+/// between the admin mutation handlers (the writers) and the signaling
+/// service (the reader, on `Join` / `ChangeFrequency`). Loaded from
+/// `admin.db` at startup and kept in sync with the `channel_names`
+/// table by the admin handlers.
+///
+/// A separate `RwLock` rather than living on the `Registry` because
+/// names persist independently of room occupancy (a name outlives the
+/// last member leaving) and reads dominate writes; keeping it off the
+/// registry `Mutex` avoids holding that lock across a name lookup.
+pub type SharedChannelNames = Arc<RwLock<HashMap<String, String>>>;
+
+/// Build a shared channel-name map from an initial snapshot (typically
+/// `AdminDb::load_channel_names` at boot, or empty for headless runs).
+pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNames {
+    Arc::new(RwLock::new(initial))
 }
 
 #[cfg(test)]

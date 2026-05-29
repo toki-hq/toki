@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file admin.proto.
  */
 export const file_admin: GenFile = /*@__PURE__*/
-  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSKEAQoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBCJhCgRSb29tEhEKCWZyZXF1ZW5jeRgBIAEoCRITCgZob2xkZXIYAiABKAlIAIgBARImCgdtZW1iZXJzGAMgAygLMhUudG9raS5hZG1pbi52MS5NZW1iZXJCCQoHX2hvbGRlciJUCgZNZW1iZXISCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJEhYKDmNvbm5lY3RlZF9zZWNzGAMgASgEEhAKCHByaW9yaXR5GAQgASgIImoKClNlcnZlckluZm8SDwoHdmVyc2lvbhgBIAEoCRISCgphZG1pbl9iaW5kGAIgASgJEhcKD3N0YXJ0ZWRfYXRfdW5peBgDIAEoBBIeChZ0b21sX3Bhc3N3b3JkX292ZXJyaWRlGAQgASgIIoABCgxTZXJ2ZXJDb25maWcSEwoLc2VydmVyX25hbWUYASABKAkSEQoJbWF4X3BlZXJzGAIgASgNEhYKDmlkbGVfa2lja19zZWNzGAMgASgNEhUKDWdycGNfcGFzc3dvcmQYBCABKAkSGQoRZ3JwY19wYXNzd29yZF9zZXQYBSABKAgiDgoMV2F0Y2hSZXF1ZXN0IhYKFEdldFNlcnZlckluZm9SZXF1ZXN0IhgKFkdldFNlcnZlckNvbmZpZ1JlcXVlc3QiWwoZVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0iLAoYU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0EhAKCHBhc3N3b3JkGAEgASgJIhsKGVNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2UiPgoVQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0Eg8KB2N1cnJlbnQYASABKAkSFAoMbmV3X3Bhc3N3b3JkGAIgASgJIhgKFkNoYW5nZVBhc3N3b3JkUmVzcG9uc2UiHwoRS2lja0NsaWVudFJlcXVlc3QSCgoCaWQYASABKAkiFAoSS2lja0NsaWVudFJlc3BvbnNlIjIKEU1vdmVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIUChJNb3ZlQ2xpZW50UmVzcG9uc2UiNwoTUmVuYW1lQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiFgoUUmVuYW1lQ2xpZW50UmVzcG9uc2UiLwoSU2V0UHJpb3JpdHlSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhUKE1NldFByaW9yaXR5UmVzcG9uc2Uy6QYKBUFkbWluEj8KBVdhdGNoEhsudG9raS5hZG1pbi52MS5XYXRjaFJlcXVlc3QaFy50b2tpLmFkbWluLnYxLlNuYXBzaG90MAESTwoNR2V0U2VydmVySW5mbxIjLnRva2kuYWRtaW4udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaGS50b2tpLmFkbWluLnYxLlNlcnZlckluZm8SVQoPR2V0U2VydmVyQ29uZmlnEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSWwoSVXBkYXRlU2VydmVyQ29uZmlnEigudG9raS5hZG1pbi52MS5VcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSZgoRU2V0U2VydmVyUGFzc3dvcmQSJy50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBooLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZRJdCg5DaGFuZ2VQYXNzd29yZBIkLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlc3BvbnNlElEKCktpY2tDbGllbnQSIC50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVzcG9uc2USUQoKTW92ZUNsaWVudBIgLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXNwb25zZRJXCgxSZW5hbWVDbGllbnQSIi50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlcXVlc3QaIy50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlc3BvbnNlElQKC1NldFByaW9yaXR5EiEudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlcXVlc3QaIi50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSL7AQoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRozChFDaGFubmVsTmFtZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBImEKBFJvb20SEQoJZnJlcXVlbmN5GAEgASgJEhMKBmhvbGRlchgCIAEoCUgAiAEBEiYKB21lbWJlcnMYAyADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlckIJCgdfaG9sZGVyIlQKBk1lbWJlchIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSFgoOY29ubmVjdGVkX3NlY3MYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiagoKU2VydmVySW5mbxIPCgd2ZXJzaW9uGAEgASgJEhIKCmFkbWluX2JpbmQYAiABKAkSFwoPc3RhcnRlZF9hdF91bml4GAMgASgEEh4KFnRvbWxfcGFzc3dvcmRfb3ZlcnJpZGUYBCABKAgioAEKDFNlcnZlckNvbmZpZxITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SFQoNZ3JwY19wYXNzd29yZBgEIAEoCRIZChFncnBjX3Bhc3N3b3JkX3NldBgFIAEoCBIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAYgASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0InsKGVVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QSEwoLc2VydmVyX25hbWUYASABKAkSEQoJbWF4X3BlZXJzGAIgASgNEhYKDmlkbGVfa2lja19zZWNzGAMgASgNEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBCABKAgiLAoYU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0EhAKCHBhc3N3b3JkGAEgASgJIhsKGVNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2UiPgoVQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0Eg8KB2N1cnJlbnQYASABKAkSFAoMbmV3X3Bhc3N3b3JkGAIgASgJIhgKFkNoYW5nZVBhc3N3b3JkUmVzcG9uc2UiHwoRS2lja0NsaWVudFJlcXVlc3QSCgoCaWQYASABKAkiFAoSS2lja0NsaWVudFJlc3BvbnNlIjIKEU1vdmVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIUChJNb3ZlQ2xpZW50UmVzcG9uc2UiNwoTUmVuYW1lQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiFgoUUmVuYW1lQ2xpZW50UmVzcG9uc2UiLwoSU2V0UHJpb3JpdHlSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhUKE1NldFByaW9yaXR5UmVzcG9uc2UiOAoVU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIhgKFlNldENoYW5uZWxOYW1lUmVzcG9uc2UiHQobQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0Ih4KHENsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2UyuQgKBUFkbWluEj8KBVdhdGNoEhsudG9raS5hZG1pbi52MS5XYXRjaFJlcXVlc3QaFy50b2tpLmFkbWluLnYxLlNuYXBzaG90MAESTwoNR2V0U2VydmVySW5mbxIjLnRva2kuYWRtaW4udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaGS50b2tpLmFkbWluLnYxLlNlcnZlckluZm8SVQoPR2V0U2VydmVyQ29uZmlnEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSWwoSVXBkYXRlU2VydmVyQ29uZmlnEigudG9raS5hZG1pbi52MS5VcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSZgoRU2V0U2VydmVyUGFzc3dvcmQSJy50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBooLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZRJdCg5DaGFuZ2VQYXNzd29yZBIkLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlc3BvbnNlElEKCktpY2tDbGllbnQSIC50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVzcG9uc2USUQoKTW92ZUNsaWVudBIgLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXNwb25zZRJXCgxSZW5hbWVDbGllbnQSIi50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlcXVlc3QaIy50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlc3BvbnNlElQKC1NldFByaW9yaXR5EiEudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlcXVlc3QaIi50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVzcG9uc2USXQoOU2V0Q2hhbm5lbE5hbWUSJC50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVxdWVzdBolLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE5hbWVSZXNwb25zZRJvChRDbGVhckFsbENoYW5uZWxOYW1lcxIqLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0GisudG9raS5hZG1pbi52MS5DbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message toki.admin.v1.Snapshot
@@ -41,6 +41,16 @@ export type Snapshot = Message<"toki.admin.v1.Snapshot"> & {
    * @generated from field: uint64 server_uptime_secs = 4;
    */
   serverUptimeSecs: bigint;
+
+  /**
+   * Admin-assigned channel names, keyed by canonical frequency. Carries
+   * ALL named channels regardless of occupancy (names persist when a
+   * room empties), so the panel can label unoccupied frequencies too.
+   * Absent key = unnamed. Empty unless named_channels_enabled is on.
+   *
+   * @generated from field: map<string, string> channel_names = 5;
+   */
+  channelNames: { [key: string]: string };
 };
 
 /**
@@ -189,6 +199,13 @@ export type ServerConfig = Message<"toki.admin.v1.ServerConfig"> & {
    * @generated from field: bool grpc_password_set = 5;
    */
   grpcPasswordSet: boolean;
+
+  /**
+   * gate the named-channels feature
+   *
+   * @generated from field: bool named_channels_enabled = 6;
+   */
+  namedChannelsEnabled: boolean;
 };
 
 /**
@@ -255,6 +272,11 @@ export type UpdateServerConfigRequest = Message<"toki.admin.v1.UpdateServerConfi
    * @generated from field: uint32 idle_kick_secs = 3;
    */
   idleKickSecs: number;
+
+  /**
+   * @generated from field: bool named_channels_enabled = 4;
+   */
+  namedChannelsEnabled: boolean;
 };
 
 /**
@@ -467,6 +489,71 @@ export const SetPriorityResponseSchema: GenMessage<SetPriorityResponse> = /*@__P
   messageDesc(file_admin, 20);
 
 /**
+ * @generated from message toki.admin.v1.SetChannelNameRequest
+ */
+export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest"> & {
+  /**
+   * canonical "446.05"
+   *
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * ≤16 chars; empty clears the name
+   *
+   * @generated from field: string name = 2;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelNameRequest.
+ * Use `create(SetChannelNameRequestSchema)` to create a new message.
+ */
+export const SetChannelNameRequestSchema: GenMessage<SetChannelNameRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 21);
+
+/**
+ * @generated from message toki.admin.v1.SetChannelNameResponse
+ */
+export type SetChannelNameResponse = Message<"toki.admin.v1.SetChannelNameResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelNameResponse.
+ * Use `create(SetChannelNameResponseSchema)` to create a new message.
+ */
+export const SetChannelNameResponseSchema: GenMessage<SetChannelNameResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 22);
+
+/**
+ * @generated from message toki.admin.v1.ClearAllChannelNamesRequest
+ */
+export type ClearAllChannelNamesRequest = Message<"toki.admin.v1.ClearAllChannelNamesRequest"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.ClearAllChannelNamesRequest.
+ * Use `create(ClearAllChannelNamesRequestSchema)` to create a new message.
+ */
+export const ClearAllChannelNamesRequestSchema: GenMessage<ClearAllChannelNamesRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 23);
+
+/**
+ * @generated from message toki.admin.v1.ClearAllChannelNamesResponse
+ */
+export type ClearAllChannelNamesResponse = Message<"toki.admin.v1.ClearAllChannelNamesResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.ClearAllChannelNamesResponse.
+ * Use `create(ClearAllChannelNamesResponseSchema)` to create a new message.
+ */
+export const ClearAllChannelNamesResponseSchema: GenMessage<ClearAllChannelNamesResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 24);
+
+/**
  * Admin control-plane service for the Toki server's web panel.
  *
  * Served as gRPC-Web over the admin TLS listener (default :8000), same
@@ -573,6 +660,29 @@ export const Admin: GenService<{
     methodKind: "unary";
     input: typeof SetPriorityRequestSchema;
     output: typeof SetPriorityResponseSchema;
+  },
+  /**
+   * Named channels. Assign or clear the human-readable name of a
+   * frequency (empty `name` clears it). FAILED_PRECONDITION when the
+   * feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
+   * longer than 16 chars. Names persist independently of room occupancy.
+   *
+   * @generated from rpc toki.admin.v1.Admin.SetChannelName
+   */
+  setChannelName: {
+    methodKind: "unary";
+    input: typeof SetChannelNameRequestSchema;
+    output: typeof SetChannelNameResponseSchema;
+  },
+  /**
+   * Clear every channel name in one shot.
+   *
+   * @generated from rpc toki.admin.v1.Admin.ClearAllChannelNames
+   */
+  clearAllChannelNames: {
+    methodKind: "unary";
+    input: typeof ClearAllChannelNamesRequestSchema;
+    output: typeof ClearAllChannelNamesResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_admin, 0);

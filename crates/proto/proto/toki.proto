@@ -89,6 +89,13 @@ message Event {
     // subject compares `client_id` against their own id to know
     // whether their topbar callsign needs refreshing.
     DisplayNameChanged display_name_changed = 5;
+    // Sent when the admin-assigned human-readable name of a frequency
+    // changes, or to deliver the current name on Join / ChangeFrequency.
+    // Only emitted while the server's `named_channels_enabled` setting is
+    // on; an empty `name` means the channel has no name (cleared). The
+    // client compares `frequency` against its current tuning before
+    // applying. See `ChannelNameChanged`.
+    ChannelNameChanged channel_name_changed = 6;
   }
 }
 
@@ -108,6 +115,15 @@ message FrequencyChanged {
 message DisplayNameChanged {
   string client_id = 1;
   string display_name = 2;
+}
+
+// The admin-assigned name of a frequency channel (≤16 chars). An empty
+// `name` means the channel is unnamed (e.g. the admin cleared it). Sent
+// on Join/ChangeFrequency backfill and whenever the admin sets or clears
+// a name — but only while the server has named channels enabled.
+message ChannelNameChanged {
+  string frequency = 1;
+  string name = 2;
 }
 
 message PttEvent {

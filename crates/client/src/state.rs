@@ -16,6 +16,12 @@ pub struct ClientState {
     /// Currently-joined frequency room, e.g. `"446.05"`. `None` between
     /// connect and the initial Join, and again after disconnect.
     pub frequency: Option<String>,
+    /// Admin-assigned name of the current channel, delivered by the
+    /// server (`ChannelNameChanged`) on join / change-frequency and on
+    /// live rename. `None` when the channel is unnamed or the server's
+    /// named-channels feature is off; cleared on every frequency change
+    /// so a stale label never sticks to the wrong frequency.
+    pub channel_name: Option<String>,
     /// client_id → display_name for everyone on the current frequency.
     pub members: HashMap<String, String>,
     /// Walkie-talkie lock: client_id of whoever is currently transmitting,

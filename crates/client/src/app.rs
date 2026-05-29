@@ -648,6 +648,61 @@ fn truncate_to_width(painter: &egui::Painter, s: &str, font: FontId, max_w: f32)
     "…".into()
 }
 
+/// Draw `text` left-aligned inside `region`, scrolling horizontally
+/// (marquee) when it's wider than the region; otherwise static. The
+/// text is clipped to `region` so it never bleeds past the edges, and
+/// when scrolling a second copy trails the first by a fixed gap for a
+/// seamless loop. `elapsed` is the app's running wall-clock seconds so
+/// the scroll advances each frame (the GUI already repaints
+/// continuously for its other animations).
+fn paint_marquee(
+    painter: &egui::Painter,
+    region: Rect,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    elapsed: f32,
+) {
+    if text.is_empty() || region.width() <= 1.0 {
+        return;
+    }
+    let galley = painter.layout_no_wrap(text.to_string(), font.clone(), color);
+    let text_w = galley.size().x;
+    let clip = painter.with_clip_rect(region);
+    let y = region.center().y;
+    if text_w <= region.width() {
+        clip.text(
+            Pos2::new(region.left(), y),
+            Align2::LEFT_CENTER,
+            text,
+            font,
+            color,
+        );
+        return;
+    }
+    // Scroll: loop period is the text width plus a gap so the trailing
+    // copy gives a continuous ticker rather than a hard jump.
+    let gap = 28.0_f32;
+    let period = text_w + gap;
+    let speed = 26.0_f32; // px/sec
+    let offset = (elapsed * speed).rem_euclid(period);
+    let x0 = region.left() - offset;
+    clip.text(
+        Pos2::new(x0, y),
+        Align2::LEFT_CENTER,
+        text,
+        font.clone(),
+        color,
+    );
+    clip.text(
+        Pos2::new(x0 + period, y),
+        Align2::LEFT_CENTER,
+        text,
+        font,
+        color,
+    );
+}
+
 /// Map the runtime's `ConnState` to a short user-facing reason line.
 /// Matches the offline-reason vocabulary in `design/behavior-spec.md`
 /// — short enough to fit the 12-char column the spec calls out.
@@ -1644,6 +1699,32 @@ impl TokiApp {
                 T::INK_MUTE
             },
         );
+
+        // ── Channel name marquee (upper-left) ──────────────────────
+        // The admin-assigned name of the current channel, scrolled in
+        // the top-left corner of the OLED. Nothing is drawn when the
+        // channel is unnamed or the feature is off (state.channel_name
+        // is None). Clipped to a region that stops short of the ACT
+        // caption + dot so it never collides with them.
+        let channel_name = self.state.lock().unwrap().channel_name.clone();
+        if let Some(name) = channel_name {
+            if !name.is_empty() {
+                // Vertically centered on `dot_y` so the name's midline
+                // matches the ACT caption + activity dot on the right.
+                let name_region = Rect::from_min_max(
+                    Pos2::new(rect.left() + pad_x, dot_y - 6.0),
+                    Pos2::new(dot_x - 26.0, dot_y + 6.0),
+                );
+                paint_marquee(
+                    painter,
+                    name_region,
+                    &name,
+                    font_mono(10.0),
+                    T::PRIMARY_DIM,
+                    self.elapsed_secs(),
+                );
+            }
+        }
 
         // ── Frequency readout ──────────────────────────────────────
         // Now the only text on this panel, so we let it dominate:

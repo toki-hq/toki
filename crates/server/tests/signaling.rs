@@ -31,6 +31,7 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
         "127.0.0.1:50052".to_string(),
         password.map(|s| s.to_string()),
         server_config::shared_default(),
+        state::shared_channel_names(Default::default()),
     );
 
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -234,7 +235,13 @@ async fn boot_with_config(
     use tokio::sync::RwLock;
     let registry = state::shared();
     let server_config = Arc::new(RwLock::new(cfg));
-    let svc = SignalingSvc::new(registry, "127.0.0.1:50052".to_string(), None, server_config);
+    let svc = SignalingSvc::new(
+        registry,
+        "127.0.0.1:50052".to_string(),
+        None,
+        server_config,
+        state::shared_channel_names(Default::default()),
+    );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         let _ = tonic::transport::Server::builder()
@@ -273,6 +280,7 @@ async fn boot_with_passwords(
         max_peers: 256,
         idle_kick_secs: 10,
         grpc_password: db_password.to_string(),
+        named_channels_enabled: false,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -280,6 +288,7 @@ async fn boot_with_passwords(
         "127.0.0.1:50052".to_string(),
         toml_password.map(|s| s.to_string()),
         server_config,
+        state::shared_channel_names(Default::default()),
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
@@ -381,6 +390,7 @@ async fn register_rejected_when_at_max_peers() {
         max_peers: 2,
         idle_kick_secs: 10,
         grpc_password: String::new(),
+        named_channels_enabled: false,
     })
     .await;
     for i in 0..2 {

@@ -9,13 +9,13 @@ use uuid::Uuid;
 use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
-    ChangeFrequencyRequest, ChangeFrequencyResponse, Event, FrequencyChanged, JoinRequest,
-    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest,
-    RegisterResponse,
+    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelNameChanged, Event, FrequencyChanged,
+    JoinRequest, LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PttAck, PttEvent,
+    RegisterRequest, RegisterResponse,
 };
 
 use crate::server_config::SharedServerConfig;
-use crate::state::{hash_token, Client, Registry, SharedRegistry};
+use crate::state::{hash_token, Client, Registry, SharedChannelNames, SharedRegistry};
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
@@ -36,8 +36,14 @@ pub struct SignalingSvc {
     /// Live handle on the runtime-mutable server settings. Read on
     /// every Register call to honor the operator's current
     /// `max_peers` ceiling and `grpc_password` (when no TOML
-    /// override) without requiring a restart on change.
+    /// override) without requiring a restart on change. Also gates
+    /// the named-channels feature (`named_channels_enabled`).
     server_config: SharedServerConfig,
+    /// Admin-assigned channel names (frequency → name), shared with
+    /// the admin panel which writes them. Consulted on `Join` /
+    /// `ChangeFrequency` to deliver the current name to the client —
+    /// but only while `server_config.named_channels_enabled` is on.
+    channel_names: SharedChannelNames,
 }
 
 impl SignalingSvc {
@@ -46,6 +52,7 @@ impl SignalingSvc {
         audio_endpoint: String,
         toml_password: Option<String>,
         server_config: SharedServerConfig,
+        channel_names: SharedChannelNames,
     ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
             registry,
@@ -53,6 +60,32 @@ impl SignalingSvc {
             toml_password,
             throttle: IpThrottle::new(),
             server_config,
+            channel_names,
+        })
+    }
+
+    /// Build a `ChannelNameChanged` event for `frequency` if the
+    /// named-channels feature is enabled, returning `None` when the
+    /// feature is off (so callers simply skip the send). An enabled
+    /// feature with no stored name yields an event with an empty
+    /// `name` — an explicit "this channel is unnamed" signal the
+    /// client uses to clear any stale label.
+    async fn channel_name_event(&self, frequency: &str) -> Option<Event> {
+        if !self.server_config.read().await.named_channels_enabled {
+            return None;
+        }
+        let name = self
+            .channel_names
+            .read()
+            .await
+            .get(frequency)
+            .cloned()
+            .unwrap_or_default();
+        Some(Event {
+            event: Some(event::Event::ChannelNameChanged(ChannelNameChanged {
+                frequency: frequency.to_string(),
+                name,
+            })),
         })
     }
 }
@@ -345,6 +378,13 @@ impl Signaling for SignalingSvc {
             }
         }
 
+        // Deliver the channel's name (when the feature is on) so the
+        // joiner's UI labels the frequency immediately. Empty name =
+        // "unnamed"; skipped entirely while the feature is off.
+        if let Some(name_evt) = self.channel_name_event(&frequency).await {
+            let _ = tx.send(name_evt).await;
+        }
+
         // Announce the new joiner to existing members of this freq.
         for id in other_ids {
             if let Some(other) = registry.clients.get(&id) {
@@ -537,6 +577,12 @@ impl Signaling for SignalingSvc {
                     })),
                 })
                 .await;
+            // Label the new channel (when the feature is on). Sent right
+            // after FrequencyChanged so the client applies it to the freq
+            // it just confirmed it moved to.
+            if let Some(name_evt) = self.channel_name_event(&new_freq).await {
+                let _ = tx.send(name_evt).await;
+            }
             // Snapshot the new roster's members + names without holding
             // the lock across awaits.
             let new_members: Vec<(String, String)> = {

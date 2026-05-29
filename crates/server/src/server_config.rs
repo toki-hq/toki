@@ -76,6 +76,16 @@ pub struct ServerConfig {
     /// and the admin db is already chmod-0600 with operator-only
     /// access. Argon2 here would only break the comparison.
     pub grpc_password: String,
+
+    /// Master switch for the named-channels feature. When `false`
+    /// (the default on a fresh deployment) the server never delivers
+    /// channel names to clients and the admin panel disables its name
+    /// editor — stored names, if any, stay dormant. When `true`, the
+    /// signaling service emits `ChannelNameChanged` on join / change-
+    /// frequency and the admin can set/clear names. Gating the whole
+    /// feature behind one flag keeps the default behaviour identical
+    /// to pre-feature builds.
+    pub named_channels_enabled: bool,
 }
 
 impl Default for ServerConfig {
@@ -89,6 +99,7 @@ impl Default for ServerConfig {
             max_peers: 256,
             idle_kick_secs: 10,
             grpc_password: String::new(),
+            named_channels_enabled: false,
         }
     }
 }
@@ -119,6 +130,10 @@ mod tests {
         assert_eq!(d.idle_kick_secs, 10);
         assert_eq!(d.server_name, "");
         assert_eq!(d.grpc_password, "", "default to open mode");
+        assert!(
+            !d.named_channels_enabled,
+            "named channels off by default (gated feature)"
+        );
     }
 
     #[test]
@@ -130,16 +145,22 @@ mod tests {
             max_peers: 1024,
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
+            named_channels_enabled: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
         assert!(json.contains("\"maxPeers\":1024"));
         assert!(json.contains("\"idleKickSecs\":30"));
         assert!(json.contains("\"grpcPassword\":\"hunter2\""));
+        assert!(json.contains("\"namedChannelsEnabled\":true"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);
         assert_eq!(parsed.idle_kick_secs, original.idle_kick_secs);
         assert_eq!(parsed.grpc_password, original.grpc_password);
+        assert_eq!(
+            parsed.named_channels_enabled,
+            original.named_channels_enabled
+        );
     }
 }

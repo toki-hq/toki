@@ -26,7 +26,8 @@ use tonic::{Request, Response, Status};
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, DisplayNameChanged, Event, FrequencyChanged, MemberJoined, MemberLeft, PttEvent,
+    event, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged, MemberJoined,
+    MemberLeft, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -104,11 +105,28 @@ impl AdminApi {
     async fn push_snapshot(&self) {
         let snap = watch::snapshot_now(
             &self.state.registry,
+            &self.state.channel_names,
             watch::next_generation(),
             self.state.started_at,
         )
         .await;
         let _ = self.state.broadcaster.send(snap);
+    }
+
+    /// Event senders for every client currently in `frequency`'s room.
+    /// Empty when the room doesn't exist (no one tuned there) — used by
+    /// the channel-name RPCs to push a `ChannelNameChanged` to occupants.
+    async fn room_recipients(&self, frequency: &str) -> Vec<mpsc::Sender<Event>> {
+        let registry = self.state.registry.lock().await;
+        registry
+            .rooms
+            .get(frequency)
+            .map(|r| r.members.clone())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|m| registry.clients.get(m))
+            .filter_map(|c| c.events_tx.clone())
+            .collect()
     }
 }
 
@@ -122,6 +140,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         idle_kick_secs: cfg.idle_kick_secs,
         grpc_password: String::new(),
         grpc_password_set: !cfg.grpc_password.is_empty(),
+        named_channels_enabled: cfg.named_channels_enabled,
     }
 }
 
@@ -141,6 +160,7 @@ impl Admin for AdminApi {
         let rx = self.state.broadcaster.subscribe();
         let first = watch::snapshot_now(
             &self.state.registry,
+            &self.state.channel_names,
             watch::next_generation(),
             self.state.started_at,
         )
@@ -194,6 +214,7 @@ impl Admin for AdminApi {
                 max_peers,
                 idle_kick_secs,
                 grpc_password: current.grpc_password,
+                named_channels_enabled: body.named_channels_enabled,
             }
         };
         self.state
@@ -208,6 +229,7 @@ impl Admin for AdminApi {
             server_name = %merged.server_name,
             max_peers = merged.max_peers,
             idle_kick_secs = merged.idle_kick_secs,
+            named_channels_enabled = merged.named_channels_enabled,
             "admin updated server config",
         );
         Ok(Response::new(config_to_wire(&merged)))
@@ -624,6 +646,111 @@ impl Admin for AdminApi {
         self.push_snapshot().await;
         Ok(Response::new(pb::SetPriorityResponse {}))
     }
+
+    async fn set_channel_name(
+        &self,
+        req: Request<pb::SetChannelNameRequest>,
+    ) -> Result<Response<pb::SetChannelNameResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        if !self.state.server_config.read().await.named_channels_enabled {
+            return Err(Status::failed_precondition(
+                "named channels are disabled; enable them in server settings first",
+            ));
+        }
+        let pb::SetChannelNameRequest { frequency, name } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+        let name = validate_channel_name(&name).map_err(Status::invalid_argument)?;
+
+        // Persist + update the shared map in lockstep. Empty name clears
+        // it (delete the row); otherwise upsert.
+        if name.is_empty() {
+            self.state
+                .db
+                .clear_channel_name(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.channel_names.write().await.remove(&frequency);
+        } else {
+            self.state
+                .db
+                .set_channel_name(&frequency, &name)
+                .await
+                .map_err(internal)?;
+            self.state
+                .channel_names
+                .write()
+                .await
+                .insert(frequency.clone(), name.clone());
+        }
+
+        tracing::info!(
+            admin_user = %admin.0,
+            frequency = %frequency,
+            cleared = name.is_empty(),
+            "admin set channel name",
+        );
+
+        // Tell anyone currently on that frequency about the new label.
+        let evt = Event {
+            event: Some(event::Event::ChannelNameChanged(ChannelNameChanged {
+                frequency: frequency.clone(),
+                name,
+            })),
+        };
+        for tx in self.room_recipients(&frequency).await {
+            let _ = tx.send(evt.clone()).await;
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelNameResponse {}))
+    }
+
+    async fn clear_all_channel_names(
+        &self,
+        req: Request<pb::ClearAllChannelNamesRequest>,
+    ) -> Result<Response<pb::ClearAllChannelNamesResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        if !self.state.server_config.read().await.named_channels_enabled {
+            return Err(Status::failed_precondition(
+                "named channels are disabled; enable them in server settings first",
+            ));
+        }
+
+        // Capture the set of previously-named frequencies (so we can tell
+        // their occupants the name is gone), then clear table + map.
+        let cleared_freqs: Vec<String> = {
+            let mut map = self.state.channel_names.write().await;
+            let freqs = map.keys().cloned().collect();
+            map.clear();
+            freqs
+        };
+        self.state
+            .db
+            .clear_all_channel_names()
+            .await
+            .map_err(internal)?;
+
+        tracing::info!(
+            admin_user = %admin.0,
+            count = cleared_freqs.len(),
+            "admin cleared all channel names",
+        );
+
+        // Broadcast an empty-name event to each cleared frequency's room.
+        for freq in &cleared_freqs {
+            let evt = Event {
+                event: Some(event::Event::ChannelNameChanged(ChannelNameChanged {
+                    frequency: freq.clone(),
+                    name: String::new(),
+                })),
+            };
+            for tx in self.room_recipients(freq).await {
+                let _ = tx.send(evt.clone()).await;
+            }
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::ClearAllChannelNamesResponse {}))
+    }
 }
 
 /// Internal data carried out of the registry-locked section of
@@ -679,6 +806,21 @@ fn validate_grpc_password(raw: &str) -> Result<String, String> {
     Ok(trimmed)
 }
 
+/// Validate an admin-supplied channel name. Trims surrounding
+/// whitespace; an empty result is allowed and means "clear the name".
+/// Caps at 16 *characters* (not bytes) to match the contract the client
+/// renders against, and rejects control characters.
+fn validate_channel_name(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().to_string();
+    if trimmed.chars().count() > 16 {
+        return Err("channel name must be at most 16 characters".into());
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err("channel name contains control characters".into());
+    }
+    Ok(trimmed)
+}
+
 fn validate_new_password(pw: &str) -> Result<(), String> {
     if pw.len() < 8 {
         return Err("new password must be at least 8 characters".into());
@@ -724,9 +866,19 @@ mod tests {
             admin_bind: "127.0.0.1:0".into(),
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
+            channel_names: crate::state::shared_channel_names(Default::default()),
             toml_password_override: toml_override,
         };
         (AdminApi::new(state), token)
+    }
+
+    /// Variant that flips the named-channels feature on (and optionally
+    /// seeds a stored name) so the channel-name RPC tests don't trip the
+    /// FAILED_PRECONDITION guard.
+    async fn test_api_named() -> (AdminApi, String) {
+        let (api, token) = test_api(false).await;
+        api.state.server_config.write().await.named_channels_enabled = true;
+        (api, token)
     }
 
     /// Build an authenticated request: inject the session token the way
@@ -836,6 +988,7 @@ mod tests {
                     server_name: "ok".into(),
                     max_peers: 0,
                     idle_kick_secs: 10,
+                    named_channels_enabled: false,
                 },
                 &token,
             ))
@@ -918,5 +1071,120 @@ mod tests {
         assert!(api.state.registry.lock().await.clients["cara"]
             .priority_freq
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn set_channel_name_disabled_is_failed_precondition() {
+        let (api, token) = test_api(false).await; // feature off
+        let err = api
+            .set_channel_name(authed(
+                pb::SetChannelNameRequest {
+                    frequency: "446.05".into(),
+                    name: "Ops".into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn set_channel_name_rejects_overlong() {
+        let (api, token) = test_api_named().await;
+        let err = api
+            .set_channel_name(authed(
+                pb::SetChannelNameRequest {
+                    frequency: "446.05".into(),
+                    name: "x".repeat(17),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn set_channel_name_rejects_bad_frequency() {
+        let (api, token) = test_api_named().await;
+        let err = api
+            .set_channel_name(authed(
+                pb::SetChannelNameRequest {
+                    frequency: "999.99".into(),
+                    name: "Nope".into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn set_then_clear_channel_name_roundtrips_map_and_db() {
+        let (api, token) = test_api_named().await;
+        // Set.
+        api.set_channel_name(authed(
+            pb::SetChannelNameRequest {
+                frequency: "446.05".into(),
+                name: "  Ops Net  ".into(), // trimmed server-side
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            api.state
+                .channel_names
+                .read()
+                .await
+                .get("446.05")
+                .map(String::as_str),
+            Some("Ops Net")
+        );
+        assert_eq!(
+            api.state
+                .db
+                .load_channel_names()
+                .await
+                .unwrap()
+                .get("446.05")
+                .map(String::as_str),
+            Some("Ops Net")
+        );
+        // Clear via empty name.
+        api.set_channel_name(authed(
+            pb::SetChannelNameRequest {
+                frequency: "446.05".into(),
+                name: "".into(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.channel_names.read().await.contains_key("446.05"));
+        assert!(api.state.db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_all_channel_names_wipes_everything() {
+        let (api, token) = test_api_named().await;
+        for (f, n) in [("446.05", "A"), ("447.00", "B")] {
+            api.set_channel_name(authed(
+                pb::SetChannelNameRequest {
+                    frequency: f.into(),
+                    name: n.into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap();
+        }
+        api.clear_all_channel_names(authed(pb::ClearAllChannelNamesRequest {}, &token))
+            .await
+            .unwrap();
+        assert!(api.state.channel_names.read().await.is_empty());
+        assert!(api.state.db.load_channel_names().await.unwrap().is_empty());
     }
 }

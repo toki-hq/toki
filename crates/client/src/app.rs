@@ -56,6 +56,11 @@ enum KnobKind {
     /// unmute reflects the user's chosen level — but does *not* call
     /// `audio_gains.set_output`, which would defeat the mute.
     Speaker,
+    /// Stereo playback balance in `[-1, 1]`, centred at 0. Routes
+    /// received audio toward the left or right ear — a mono-earpiece
+    /// effect for walkie-talkie listening. Unlike the gain knobs its
+    /// detent sits at 12 o'clock (centre), not full-left.
+    Balance,
 }
 
 impl RadioState {
@@ -250,6 +255,7 @@ impl TokiApp {
             config.audio.output_device.clone(),
             config.audio.input_gain,
             config.audio.output_gain,
+            config.audio.balance,
         )
         .expect("audio init failed");
         let audio::AudioHandle {
@@ -2429,11 +2435,21 @@ impl TokiApp {
             Pos2::new(mic_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
             Vec2::splat(T::KNOB_D),
         );
+        // Third knob: stereo balance (L↔R) for the mono-earpiece effect.
+        let bal_rect = Rect::from_center_size(
+            Pos2::new(spk_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
+            Vec2::splat(T::KNOB_D),
+        );
         self.paint_knob(ui, painter, mic_rect, KnobKind::Mic);
         self.paint_knob(ui, painter, spk_rect, KnobKind::Speaker);
-        // Captions — 3-letter shorthand so both fit cleanly under
+        self.paint_knob(ui, painter, bal_rect, KnobKind::Balance);
+        // Captions — short labels so they fit cleanly under the
         // 42 px knobs at 8 px mono.
-        for (r, label) in [(mic_rect, "MIC VOL"), (spk_rect, "SPK VOL")] {
+        for (r, label) in [
+            (mic_rect, "MIC VOL"),
+            (spk_rect, "SPK VOL"),
+            (bal_rect, "BALANCE"),
+        ] {
             painter.text(
                 Pos2::new(r.center().x, r.bottom() + 8.0),
                 Align2::CENTER_CENTER,
@@ -2445,7 +2461,7 @@ impl TokiApp {
 
         // PTT button (or Reconnect button when transport is down) —
         // fills the rest of the row.
-        let ptt_x = spk_rect.right() + T::GAP_BOTTOM;
+        let ptt_x = bal_rect.right() + T::GAP_BOTTOM;
         let ptt_rect = Rect::from_min_size(
             Pos2::new(ptt_x, rect.center().y - T::PTT_H / 2.0),
             Vec2::new(rect.right() - ptt_x, T::PTT_H),
@@ -2781,14 +2797,18 @@ impl TokiApp {
             let dx = ui.input(|i| i.pointer.delta().x);
             if dx != 0.0 {
                 let increment = dx / 250.0;
+                // All three knobs operate on a normalized [0..1] unit.
+                // Gains map unit→[0,2]; balance maps unit→[-1,1] so its
+                // detent is the 12 o'clock centre.
                 let current_unit = match kind {
                     KnobKind::Mic => self.config.audio.input_gain / 2.0,
                     KnobKind::Speaker => self.config.audio.output_gain / 2.0,
+                    KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
                 };
                 let new_unit = (current_unit + increment).clamp(0.0, 1.0);
-                let gain = new_unit * 2.0;
                 match kind {
                     KnobKind::Mic => {
+                        let gain = new_unit * 2.0;
                         self.config.audio.input_gain = gain;
                         // Mic gain is independent of mute (which
                         // gates the *output* side) — apply
@@ -2796,6 +2816,7 @@ impl TokiApp {
                         self.audio_gains.set_input(gain);
                     }
                     KnobKind::Speaker => {
+                        let gain = new_unit * 2.0;
                         self.config.audio.output_gain = gain;
                         if self.muted {
                             // Stage the post-mute target — applying
@@ -2805,6 +2826,16 @@ impl TokiApp {
                             self.audio_gains.set_output(gain);
                         }
                     }
+                    KnobKind::Balance => {
+                        // Snap to dead-centre when within ~3% so the
+                        // user can reliably re-centre by dragging back.
+                        let mut balance = new_unit * 2.0 - 1.0;
+                        if balance.abs() < 0.03 {
+                            balance = 0.0;
+                        }
+                        self.config.audio.balance = balance;
+                        self.audio_gains.set_balance(balance);
+                    }
                 }
             }
         }
@@ -2812,10 +2843,13 @@ impl TokiApp {
             self.config.save();
         }
 
-        // Map current gain [0..2] → display value [0..1].
+        // Map the bound value → display unit [0..1]. Gains are [0,2];
+        // balance is [-1,1] (centre 0 → unit 0.5, so the indicator
+        // points straight up at dead-centre).
         let v = match kind {
             KnobKind::Mic => self.config.audio.input_gain / 2.0,
             KnobKind::Speaker => self.config.audio.output_gain / 2.0,
+            KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
         }
         .clamp(0.0, 1.0);
         let angle_deg = -135.0 + v * 270.0;

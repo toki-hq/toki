@@ -82,13 +82,20 @@ pub struct AudioHandle {
 pub struct AudioGains {
     input: Arc<AtomicU32>,
     output: Arc<AtomicU32>,
+    /// Stereo balance for playback, in `[-1.0, 1.0]`: `-1` = full
+    /// left, `0` = centered, `+1` = full right. Lets the operator
+    /// route received audio entirely into one ear to mimic a mono
+    /// walkie-talkie earpiece. Only meaningful on 2-channel output
+    /// devices; ignored for mono / >2-channel outputs.
+    balance: Arc<AtomicU32>,
 }
 
 impl AudioGains {
-    fn new(input: f32, output: f32) -> Self {
+    fn new(input: f32, output: f32, balance: f32) -> Self {
         Self {
             input: Arc::new(AtomicU32::new(input.to_bits())),
             output: Arc::new(AtomicU32::new(output.to_bits())),
+            balance: Arc::new(AtomicU32::new(balance.to_bits())),
         }
     }
 
@@ -100,12 +107,22 @@ impl AudioGains {
         self.output.store(gain.to_bits(), Ordering::Relaxed);
     }
 
+    /// Set the playback balance. Clamped to `[-1.0, 1.0]`.
+    pub fn set_balance(&self, balance: f32) {
+        self.balance
+            .store(balance.clamp(-1.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
     fn input_atomic(&self) -> Arc<AtomicU32> {
         self.input.clone()
     }
 
     fn output_atomic(&self) -> Arc<AtomicU32> {
         self.output.clone()
+    }
+
+    fn balance_atomic(&self) -> Arc<AtomicU32> {
+        self.balance.clone()
     }
 }
 
@@ -590,6 +607,7 @@ pub fn spawn(
     initial_output: Option<String>,
     initial_input_gain: f32,
     initial_output_gain: f32,
+    initial_balance: f32,
 ) -> Result<AudioHandle> {
     let (mic_tx, mic_rx) = unbounded_channel::<Vec<i16>>();
     // Pre-size the playback ring for ~500 ms of wire-rate audio so we
@@ -601,7 +619,7 @@ pub fn spawn(
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
 
-    let gains = AudioGains::new(initial_input_gain, initial_output_gain);
+    let gains = AudioGains::new(initial_input_gain, initial_output_gain, initial_balance);
     let levels = AudioLevels::new();
     let spectrum = AudioSpectrum::new();
 
@@ -609,6 +627,7 @@ pub fn spawn(
     let playback_for_thread = playback.clone();
     let in_gain_for_thread = gains.input_atomic();
     let out_gain_for_thread = gains.output_atomic();
+    let out_balance_for_thread = gains.balance_atomic();
     let in_level_for_thread = levels.input_atomic();
     let out_level_for_thread = levels.output_atomic();
     let in_spec_for_thread = spectrum.input_buf();
@@ -633,6 +652,7 @@ pub fn spawn(
                 initial_output.as_deref(),
                 &playback_for_thread,
                 &out_gain_for_thread,
+                &out_balance_for_thread,
                 &out_level_for_thread,
                 &out_spec_for_thread,
             );
@@ -664,6 +684,7 @@ pub fn spawn(
                             name.as_deref(),
                             &playback_for_thread,
                             &out_gain_for_thread,
+                            &out_balance_for_thread,
                             &out_level_for_thread,
                             &out_spec_for_thread,
                         );
@@ -772,6 +793,7 @@ fn open_output_for(
     name: Option<&str>,
     playback: &PlaybackBuf,
     gain: &Arc<AtomicU32>,
+    balance: &Arc<AtomicU32>,
     level: &Arc<AtomicU32>,
     spectrum: &Arc<Mutex<VecDeque<f32>>>,
 ) -> Option<cpal::Stream> {
@@ -781,6 +803,7 @@ fn open_output_for(
         &device,
         playback.clone(),
         gain.clone(),
+        balance.clone(),
         level.clone(),
         spectrum.clone(),
     ) {
@@ -879,6 +902,7 @@ fn open_output(
     dev: &cpal::Device,
     playback: PlaybackBuf,
     gain: Arc<AtomicU32>,
+    balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
     spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream> {
@@ -888,6 +912,7 @@ fn open_output(
         1,
         playback.clone(),
         gain.clone(),
+        balance.clone(),
         level.clone(),
         spectrum.clone(),
     ) {
@@ -912,15 +937,15 @@ fn open_output(
     // rate (48 kHz) to the device rate on the fly.
 
     match format {
-        cpal::SampleFormat::F32 => {
-            build_output_stream::<f32>(dev, &cfg, channels, playback, gain, level, spectrum)
-        }
-        cpal::SampleFormat::I16 => {
-            build_output_stream::<i16>(dev, &cfg, channels, playback, gain, level, spectrum)
-        }
-        cpal::SampleFormat::U16 => {
-            build_output_stream::<u16>(dev, &cfg, channels, playback, gain, level, spectrum)
-        }
+        cpal::SampleFormat::F32 => build_output_stream::<f32>(
+            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+        ),
+        cpal::SampleFormat::I16 => build_output_stream::<i16>(
+            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+        ),
+        cpal::SampleFormat::U16 => build_output_stream::<u16>(
+            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+        ),
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
     }
 }
@@ -1072,12 +1097,14 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn build_output_stream<T>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,
     channels: u16,
     playback: PlaybackBuf,
     gain: Arc<AtomicU32>,
+    balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
     spectrum: Arc<Mutex<VecDeque<f32>>>,
 ) -> Result<cpal::Stream>
@@ -1102,6 +1129,16 @@ where
         cfg,
         move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
             let g = f32::from_bits(gain.load(Ordering::Relaxed));
+            // Equal-power stereo pan from balance ∈ [-1, 1]. At center
+            // both channels get ~0.707 (so perceived loudness stays
+            // constant across the sweep); at the extremes one channel
+            // reaches unity and the other silence — a full mono-earpiece
+            // pan. Only applied on 2-channel devices; mono / >2-ch
+            // outputs replicate the sample as before (`bal` unused).
+            let bal = f32::from_bits(balance.load(Ordering::Relaxed)).clamp(-1.0, 1.0);
+            let pan_angle = (bal + 1.0) * (std::f32::consts::FRAC_PI_4); // 0..π/2
+            let (l_gain, r_gain) = (pan_angle.cos(), pan_angle.sin());
+            let stereo = ch == 2;
             let frames_needed = data.len() / ch;
 
             // Refill `ready` from the wire-rate playback ring, resampling
@@ -1143,9 +1180,18 @@ where
                     peak = abs;
                 }
                 spec_samples.push(f);
-                let s: T = T::from_sample(f);
-                for slot in frame.iter_mut() {
-                    *slot = s;
+                if stereo {
+                    // Channel 0 = left, 1 = right. Balance only touches
+                    // the stereo case; the meter/spectrum keep tracking
+                    // the pre-pan mono level so they read the same
+                    // regardless of where the audio is panned.
+                    frame[0] = T::from_sample(f * l_gain);
+                    frame[1] = T::from_sample(f * r_gain);
+                } else {
+                    let s: T = T::from_sample(f);
+                    for slot in frame.iter_mut() {
+                        *slot = s;
+                    }
                 }
             }
             blend_level(&level, peak);

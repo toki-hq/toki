@@ -316,6 +316,22 @@ mod tests {
     }
 
     #[test]
+    fn audio_balance_defaults_centered_and_round_trips() {
+        // Default config is centered.
+        assert_eq!(AudioConfig::default().balance, 0.0);
+        // Missing key parses to the default (centered).
+        let cfg: Config = toml::from_str("[audio]\n").unwrap();
+        assert_eq!(cfg.audio.balance, 0.0);
+        // A set value survives a round-trip.
+        let raw = "[audio]\nbalance = -1.0\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.audio.balance, -1.0);
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert_eq!(back.audio.balance, -1.0);
+    }
+
+    #[test]
     fn freq_hotkeys_round_trip() {
         use crate::hotkey::Input;
         let mut hk = HotkeyConfig::default();
@@ -423,10 +439,20 @@ pub struct AudioConfig {
     pub input_gain: f32,
     #[serde(default = "default_gain")]
     pub output_gain: f32,
+    /// Stereo playback balance in `[-1.0, 1.0]`: `-1` = full left,
+    /// `0` = centered, `+1` = full right. Lets the operator route
+    /// received audio into a single ear to mimic a mono walkie-talkie
+    /// earpiece. Default `0.0` (centered). No effect on mono outputs.
+    #[serde(default = "default_balance")]
+    pub balance: f32,
 }
 
 fn default_gain() -> f32 {
     1.0
+}
+
+fn default_balance() -> f32 {
+    0.0
 }
 
 impl Default for AudioConfig {
@@ -436,6 +462,7 @@ impl Default for AudioConfig {
             output_device: None,
             input_gain: 1.0,
             output_gain: 1.0,
+            balance: 0.0,
         }
     }
 }

@@ -30,6 +30,14 @@ message RegisterRequest {
   // Servers comparing the password do so in constant time and reject
   // mismatches with gRPC status `UNAUTHENTICATED`.
   string password = 2;
+  // The client's own semantic version (`CARGO_PKG_VERSION`, e.g.
+  // "0.3.1"). The server requires the same MAJOR.MINOR as itself —
+  // patch differences are fine — and rejects a mismatch with gRPC
+  // status `FAILED_PRECONDITION` so the user gets a clear "please
+  // update" instead of silently broken audio (the UDP wire format can
+  // change across minor versions). Empty / unparseable is treated as
+  // incompatible (pre-gate clients predate the matching wire format).
+  string client_version = 3;
 }
 
 message RegisterResponse {

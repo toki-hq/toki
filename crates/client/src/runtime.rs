@@ -501,6 +501,10 @@ impl Session {
             .register(RegisterRequest {
                 display_name: display_name.into(),
                 password: password.into(),
+                // The server rejects a MAJOR.MINOR mismatch up front
+                // (see toki_proto::version) so an out-of-date client gets
+                // a clear "please update" instead of silently broken audio.
+                client_version: env!("CARGO_PKG_VERSION").into(),
             })
             .await?
             .into_inner();

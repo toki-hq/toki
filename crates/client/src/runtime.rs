@@ -128,6 +128,12 @@ async fn run(
     beeps: BeepParams,
 ) {
     let mut session: Option<Session> = None;
+    // Tracks the confirmed-talking state across mic frames so we can
+    // detect the talk→silent edge (PTT release) and flush the encoder's
+    // trailing partial frame exactly once. The mic stream runs
+    // continuously regardless of PTT, so a frame always arrives shortly
+    // after release to carry the flush.
+    let mut was_talking = false;
 
     loop {
         tokio::select! {
@@ -144,9 +150,18 @@ async fn run(
             frame = mic_rx.recv() => {
                 let Some(frame) = frame else { break; };
                 if let Some(s) = &session {
-                    if s.ptt.load(Ordering::Relaxed) {
+                    let talking = s.ptt.load(Ordering::Relaxed);
+                    if talking {
                         s.send_audio(&frame).await;
+                    } else if was_talking {
+                        // Just released: flush the encoder tail so the
+                        // end of speech isn't clipped and the buffer is
+                        // clear for the next transmission.
+                        s.flush_audio().await;
                     }
+                    was_talking = talking;
+                } else {
+                    was_talking = false;
                 }
             }
         }
@@ -350,6 +365,40 @@ impl AudioEncoder {
                     }
                 }
                 out
+            }
+        }
+    }
+
+    /// Flush the encoder at the end of a transmission (PTT release).
+    ///
+    /// The Opus path buffers mic frames until it has a full 20 ms
+    /// (960-sample) frame; on release the trailing partial frame would
+    /// otherwise be silently dropped (clipping the end of speech) *and*
+    /// linger in the buffer to be prepended to the next transmission
+    /// (garbling its start). We pad the remainder to a full frame with
+    /// silence, encode it once, and clear the buffer so the next PTT
+    /// starts clean. PCM carries no buffer, so this is a no-op.
+    fn flush(&mut self) -> Vec<(u8, Vec<u8>)> {
+        match self {
+            Self::Pcm => Vec::new(),
+            Self::Opus { enc, buf } => {
+                if buf.is_empty() {
+                    return Vec::new();
+                }
+                // push() drains every whole frame, so buf is always a
+                // partial (< 960) frame here. Pad to 20 ms with silence.
+                buf.resize(OPUS_FRAME_SAMPLES, 0);
+                // Take the whole padded frame, leaving `buf` empty so the
+                // next transmission starts clean (no stale-tail leak).
+                let frame: Vec<i16> = std::mem::take(buf);
+                let mut encoded = [0u8; MAX_OPUS_PAYLOAD];
+                match enc.encode(&frame, &mut encoded) {
+                    Ok(n) => vec![(VERSION_AUDIO_OPUS, encoded[..n].to_vec())],
+                    Err(e) => {
+                        warn!(error = %e, "Opus flush encode failed, dropping tail");
+                        Vec::new()
+                    }
+                }
             }
         }
     }
@@ -994,6 +1043,25 @@ impl Session {
         }
     }
 
+    /// Flush the outbound encoder's trailing partial frame on PTT
+    /// release so the end of speech isn't clipped and the next
+    /// transmission starts from a clean buffer. See [`AudioEncoder::flush`].
+    async fn flush_audio(&self) {
+        let packets = self.encode.lock().unwrap().flush();
+        for (version, payload) in packets {
+            let pkt = build_authenticated_packet(
+                &self.audio_token,
+                version,
+                &self.audio_mac_key,
+                &self.udp_seq,
+                &payload,
+            );
+            if let Err(e) = self.udp.send(&pkt).await {
+                warn!(error = %e, "udp flush send failed");
+            }
+        }
+    }
+
     async fn close(mut self) {
         let _ = self
             .signaling
@@ -1328,6 +1396,30 @@ mod tests {
         );
         let out = decode_opus(&mut dec, &pkts[0].1);
         assert_eq!(out.len(), OPUS_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn opus_flush_emits_partial_tail_then_clears() {
+        let mut enc = AudioEncoder::new(true, 24_000);
+        // One 10 ms frame buffers (half of a 20 ms frame), nothing sent.
+        assert!(enc.push(&vec![1000i16; 480]).is_empty());
+        // Releasing PTT flushes the buffered tail as one padded frame.
+        let pkts = enc.flush();
+        assert_eq!(pkts.len(), 1, "partial tail should flush on release");
+        assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
+        // Buffer is now clear: a second flush is a no-op, and a fresh
+        // 10 ms frame buffers again (no stale samples leaked through).
+        assert!(enc.flush().is_empty(), "buffer cleared after flush");
+        assert!(
+            enc.push(&vec![1000i16; 480]).is_empty(),
+            "next transmission starts from an empty buffer"
+        );
+    }
+
+    #[test]
+    fn pcm_flush_is_a_noop() {
+        let mut enc = AudioEncoder::new(false, 0);
+        assert!(enc.flush().is_empty(), "PCM carries no buffer to flush");
     }
 
     #[test]

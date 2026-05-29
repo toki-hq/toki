@@ -76,12 +76,13 @@ Browse to `https://<host>:8000` (self-signed cert → expect a browser warning, 
 - **Live dashboard** (gRPC-Web `Watch` stream) — members per frequency, current PTT holder, session age; updates on a 1 Hz tick and immediately after any admin action.
 - **Operator actions** — kick, move to frequency, rename callsign.
 - **Voice priority** — elect a member as a priority speaker on a channel; their PTT preempts a non-priority holder mid-transmission (the cut-off speaker is bumped, the channel hears a distinct priority roger). First-come among priority members.
-- **Runtime config** — server name, `max_peers`, idle-kick timeout, and the gRPC server password, all hot-reloaded without a restart.
+- **Named channels** — give any frequency a human-readable name (≤16 chars) that clients see beside their tuner. Names persist across emptiness and update live; clear one channel's name or wipe them all. Gated by a Settings toggle (off by default) — while off, clients never receive names and the editor is disabled.
+- **Runtime config** — server name, `max_peers`, idle-kick timeout, the named-channels toggle, and the gRPC server password, all hot-reloaded without a restart.
 - **Account** — change the admin password (revokes other sessions).
 
 ## Client features
 
-- **Tuner** — step through the 41-channel band with the ◀ ▶ chevrons.
+- **Tuner** — step through the 41-channel band with the ◀ ▶ chevrons; shows the channel's admin-assigned name under the frequency when the server has named channels enabled.
 - **Memory presets (M1–M4)** — left-click to save/recall a frequency, left-hold to overwrite, right-hold to free; colour-coded (green when you're parked on it, amber when stored).
 - **Global hotkeys** (Settings) — PTT (any key or mouse button, default backtick), recall M1–M4, and tune up/down.
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio + beeps toward one ear for a mono-earpiece feel).

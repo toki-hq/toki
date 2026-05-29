@@ -219,6 +219,7 @@ async fn handle_cmd(
                 st.holder = None;
                 st.self_id = None;
                 st.frequency = None;
+                st.channel_name = None;
                 st.log("disconnected");
             }
         }
@@ -578,6 +579,10 @@ impl Session {
                             }
                             st.holder = None;
                             st.frequency = Some(fc.frequency.clone());
+                            // Drop any name from the old channel; the new
+                            // room's ChannelNameChanged (if named + feature
+                            // on) lands right after this event.
+                            st.channel_name = None;
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
                         Some(Ev::DisplayNameChanged(dnc)) => {
@@ -607,6 +612,26 @@ impl Session {
                                 st.log(format!("✏️ peer renamed to {}", dnc.display_name));
                             }
                         }
+                        Some(Ev::ChannelNameChanged(cnc)) => {
+                            // Label (or relabel/clear) the current channel.
+                            // Ignore stale events for a frequency we've
+                            // since left. Defensively trim + cap at 16
+                            // chars even though the server enforces it.
+                            let mut st = state_for_events.lock().unwrap();
+                            if st.frequency.as_deref() == Some(cnc.frequency.as_str()) {
+                                let trimmed = cnc.name.trim();
+                                let name: Option<String> = if trimmed.is_empty() {
+                                    None
+                                } else {
+                                    Some(trimmed.chars().take(16).collect())
+                                };
+                                match &name {
+                                    Some(n) => st.log(format!("🏷 channel “{n}”")),
+                                    None => st.log("🏷 channel name cleared"),
+                                }
+                                st.channel_name = name;
+                            }
+                        }
                         None => {}
                     },
                     Err(e) => {
@@ -632,6 +657,7 @@ impl Session {
             st.members.clear();
             st.holder = None;
             st.frequency = None;
+            st.channel_name = None;
             st.log("⚠ disconnected by server");
         });
 
@@ -774,6 +800,7 @@ impl Session {
         }
         st.holder = None;
         st.frequency = None;
+        st.channel_name = None;
     }
 
     /// Ask the server to move us to a new frequency. The server emits

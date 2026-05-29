@@ -21,7 +21,7 @@ use tonic::Status;
 
 use toki_proto::admin::v1 as pb;
 
-use crate::state::SharedRegistry;
+use crate::state::{SharedChannelNames, SharedRegistry};
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
 /// result out to `Watch` subscribers. 1 Hz is plenty for an admin
@@ -34,6 +34,7 @@ pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 /// doesn't wait a whole interval.
 pub async fn run_broadcaster(
     registry: SharedRegistry,
+    channel_names: SharedChannelNames,
     tx: Sender<pb::Snapshot>,
     started_at: Instant,
 ) {
@@ -41,7 +42,7 @@ pub async fn run_broadcaster(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         ticker.tick().await;
-        let snapshot = snapshot_now(&registry, next_generation(), started_at).await;
+        let snapshot = snapshot_now(&registry, &channel_names, next_generation(), started_at).await;
         let _ = tx.send(snapshot);
     }
 }
@@ -58,9 +59,13 @@ pub fn next_generation() -> u64 {
 /// and the post-mutation pushes.
 pub async fn snapshot_now(
     registry: &SharedRegistry,
+    channel_names: &SharedChannelNames,
     generation: u64,
     started_at: Instant,
 ) -> pb::Snapshot {
+    // Snapshot the name map up front (its own lock, held only here) so
+    // the registry lock below never overlaps it.
+    let names = channel_names.read().await.clone();
     let r = registry.lock().await;
     let now = Instant::now();
 
@@ -110,6 +115,12 @@ pub async fn snapshot_now(
         lobby,
         generation,
         server_uptime_secs: now.saturating_duration_since(started_at).as_secs(),
+        // Carry every named channel regardless of occupancy so the panel
+        // can label unoccupied frequencies too. This reflects the stored
+        // names even while the feature is off (they go dormant, not
+        // deleted) — the admin still sees them; the toggle only gates
+        // delivery to clients and whether the editor is writable.
+        channel_names: names,
     }
 }
 
@@ -165,8 +176,9 @@ mod tests {
             },
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+        let names = crate::state::shared_channel_names(Default::default());
 
-        let snap = snapshot_now(&registry, 7, Instant::now()).await;
+        let snap = snapshot_now(&registry, &names, 7, Instant::now()).await;
         assert_eq!(snap.generation, 7);
         assert_eq!(snap.rooms.len(), 1);
         assert_eq!(snap.rooms[0].frequency, "446.05");
@@ -193,8 +205,9 @@ mod tests {
             },
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+        let names = crate::state::shared_channel_names(Default::default());
 
-        let snap = snapshot_now(&registry, 1, Instant::now()).await;
+        let snap = snapshot_now(&registry, &names, 1, Instant::now()).await;
         let members: HashMap<_, _> = snap.rooms[0]
             .members
             .iter()
@@ -202,5 +215,37 @@ mod tests {
             .collect();
         assert!(members["a"]);
         assert!(!members["b"]);
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_channel_names_for_all_named_freqs() {
+        // Names cover unoccupied frequencies too: "447.00" has a name
+        // but no room/members, and it must still surface in the map.
+        let mut reg = crate::state::Registry::default();
+        reg.clients
+            .insert("a".into(), mk_client("a", "Alice", Some("446.05")));
+        reg.rooms.insert(
+            "446.05".into(),
+            Room {
+                members: vec!["a".into()],
+                holder: None,
+            },
+        );
+        let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+        let mut seed = HashMap::new();
+        seed.insert("446.05".to_string(), "Ops Net".to_string());
+        seed.insert("447.00".to_string(), "Backup".to_string());
+        let names = crate::state::shared_channel_names(seed);
+
+        let snap = snapshot_now(&registry, &names, 1, Instant::now()).await;
+        assert_eq!(
+            snap.channel_names.get("446.05").map(String::as_str),
+            Some("Ops Net")
+        );
+        assert_eq!(
+            snap.channel_names.get("447.00").map(String::as_str),
+            Some("Backup")
+        );
+        assert_eq!(snap.channel_names.len(), 2);
     }
 }

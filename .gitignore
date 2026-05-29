@@ -46,3 +46,12 @@ design/
 /admin.db-journal
 /admin.db-wal
 /admin.db-shm
+
+# Same runtime artifacts, but produced when the server is launched
+# with its CWD inside the crate (e.g. `cargo run -p toki-server` from
+# crates/server) or with a `TOKI_DATA_DIR` of `./data`. All operator-
+# local state — never version-controlled.
+/crates/server/admin.db
+/crates/server/admin.db-*
+/crates/server/tls/
+/data/

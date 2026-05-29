@@ -89,6 +89,13 @@ async fn main() -> anyhow::Result<()> {
 
     let registry = state::shared();
 
+    // Admin-assigned channel names. Starts empty; the admin task, if
+    // enabled, loads the persisted names from sqlite right after it
+    // opens the db (same bootstrap dance as `server_config` below).
+    // Headless deployments keep it empty — and with named channels
+    // off by default, the signaling path never consults it anyway.
+    let channel_names = state::shared_channel_names(std::collections::HashMap::new());
+
     // Runtime-mutable server settings. Starts at hardcoded defaults
     // (same values the code shipped before this lived in the db);
     // the admin task, if enabled, will overwrite from sqlite right
@@ -134,6 +141,7 @@ async fn main() -> anyhow::Result<()> {
         registry.clone(),
         tls_material.clone(),
         server_config.clone(),
+        channel_names.clone(),
         toml_password_override,
     ));
 
@@ -153,8 +161,14 @@ async fn main() -> anyhow::Result<()> {
     let grpc = Server::builder()
         .tls_config(tls_config)?
         .add_service(
-            SignalingSvc::new(registry, advertised_audio, password, server_config.clone())
-                .max_decoding_message_size(8 * 1024),
+            SignalingSvc::new(
+                registry,
+                advertised_audio,
+                password,
+                server_config.clone(),
+                channel_names,
+            )
+            .max_decoding_message_size(8 * 1024),
         )
         .serve(grpc_addr);
 

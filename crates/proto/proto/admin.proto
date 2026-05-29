@@ -34,6 +34,14 @@ service Admin {
   rpc MoveClient(MoveClientRequest) returns (MoveClientResponse);
   rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
   rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
+
+  // Named channels. Assign or clear the human-readable name of a
+  // frequency (empty `name` clears it). FAILED_PRECONDITION when the
+  // feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
+  // longer than 16 chars. Names persist independently of room occupancy.
+  rpc SetChannelName(SetChannelNameRequest) returns (SetChannelNameResponse);
+  // Clear every channel name in one shot.
+  rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
 }
 
 // ── Live state ────────────────────────────────────────────────────
@@ -43,6 +51,11 @@ message Snapshot {
   repeated Member lobby = 2;        // clients on no frequency
   uint64 generation = 3;            // monotonic; lets the UI detect gaps
   uint64 server_uptime_secs = 4;
+  // Admin-assigned channel names, keyed by canonical frequency. Carries
+  // ALL named channels regardless of occupancy (names persist when a
+  // room empties), so the panel can label unoccupied frequencies too.
+  // Absent key = unnamed. Empty unless named_channels_enabled is on.
+  map<string, string> channel_names = 5;
 }
 
 message Room {
@@ -76,6 +89,7 @@ message ServerConfig {
   uint32 idle_kick_secs = 3;
   string grpc_password = 4;         // blank in responses; only meaningful on SetServerPassword
   bool grpc_password_set = 5;       // response-only: is a server password armed?
+  bool named_channels_enabled = 6;  // gate the named-channels feature
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -88,6 +102,7 @@ message UpdateServerConfigRequest {
   string server_name = 1;
   uint32 max_peers = 2;
   uint32 idle_kick_secs = 3;
+  bool named_channels_enabled = 4;
 }
 
 message SetServerPasswordRequest {
@@ -121,3 +136,12 @@ message SetPriorityRequest {
   bool grant = 2;
 }
 message SetPriorityResponse {}
+
+message SetChannelNameRequest {
+  string frequency = 1;             // canonical "446.05"
+  string name = 2;                  // ≤16 chars; empty clears the name
+}
+message SetChannelNameResponse {}
+
+message ClearAllChannelNamesRequest {}
+message ClearAllChannelNamesResponse {}

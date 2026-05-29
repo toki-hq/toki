@@ -129,6 +129,17 @@ impl AdminDb {
                     updated_at      INTEGER NOT NULL DEFAULT 0
                 );
                 INSERT OR IGNORE INTO server_config (id) VALUES (1);
+
+                -- Admin-assigned channel names, keyed by canonical
+                -- frequency string. Rows persist independently of room
+                -- occupancy (a name outlives the last member leaving).
+                -- Absence of a row = unnamed. Gated at runtime by
+                -- server_config.named_channels_enabled.
+                CREATE TABLE IF NOT EXISTS channel_names (
+                    frequency  TEXT PRIMARY KEY NOT NULL,
+                    name       TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL DEFAULT 0
+                );
                 "#,
             )?;
             // Upgrade path: a db that pre-dates the grpc_password
@@ -142,6 +153,14 @@ impl AdminDb {
                 "server_config",
                 "grpc_password",
                 "TEXT NOT NULL DEFAULT ''",
+            )?;
+            // Upgrade path for the named-channels toggle (added after
+            // the grpc_password column). Same idempotent ALTER dance.
+            ensure_column_exists(
+                c,
+                "server_config",
+                "named_channels_enabled",
+                "INTEGER NOT NULL DEFAULT 0",
             )?;
             Ok(())
         })
@@ -157,7 +176,8 @@ impl AdminDb {
         self.with_conn(|c| {
             let row = c
                 .query_row(
-                    "SELECT server_name, max_peers, idle_kick_secs, grpc_password \
+                    "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
+                     named_channels_enabled \
                      FROM server_config WHERE id = 1",
                     [],
                     |r| {
@@ -166,6 +186,7 @@ impl AdminDb {
                             max_peers: r.get::<_, i64>(1)? as u32,
                             idle_kick_secs: r.get::<_, i64>(2)? as u32,
                             grpc_password: r.get(3)?,
+                            named_channels_enabled: r.get::<_, i64>(4)? != 0,
                         })
                     },
                 )
@@ -185,16 +206,75 @@ impl AdminDb {
             c.execute(
                 "UPDATE server_config \
                  SET server_name = ?1, max_peers = ?2, idle_kick_secs = ?3, \
-                     grpc_password = ?4, updated_at = ?5 \
+                     grpc_password = ?4, named_channels_enabled = ?5, updated_at = ?6 \
                  WHERE id = 1",
                 params![
                     cfg.server_name,
                     cfg.max_peers as i64,
                     cfg.idle_kick_secs as i64,
                     cfg.grpc_password,
+                    cfg.named_channels_enabled as i64,
                     now,
                 ],
             )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load every channel name into a `frequency → name` map. Called
+    /// once at startup to seed the in-memory [`SharedChannelNames`];
+    /// the admin mutation handlers keep that map and the table in sync
+    /// thereafter, so this is never on a hot path.
+    pub async fn load_channel_names(&self) -> Result<std::collections::HashMap<String, String>> {
+        self.with_conn(|c| {
+            let mut stmt = c.prepare("SELECT frequency, name FROM channel_names")?;
+            let rows =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            let mut map = std::collections::HashMap::new();
+            for row in rows {
+                let (freq, name) = row?;
+                map.insert(freq, name);
+            }
+            Ok(map)
+        })
+        .await
+    }
+
+    /// Upsert a single channel name (caller has already validated the
+    /// frequency is canonical and the name is ≤16 chars).
+    pub async fn set_channel_name(&self, frequency: &str, name: &str) -> Result<()> {
+        let frequency = frequency.to_string();
+        let name = name.to_string();
+        let now = now_unix();
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO channel_names (frequency, name, updated_at) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(frequency) DO UPDATE SET name = ?2, updated_at = ?3",
+                params![frequency, name, now],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Delete a single channel name (clearing it). No-op if absent.
+    pub async fn clear_channel_name(&self, frequency: &str) -> Result<()> {
+        let frequency = frequency.to_string();
+        self.with_conn(move |c| {
+            c.execute(
+                "DELETE FROM channel_names WHERE frequency = ?1",
+                params![frequency],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Delete every channel name in one statement.
+    pub async fn clear_all_channel_names(&self) -> Result<()> {
+        self.with_conn(|c| {
+            c.execute("DELETE FROM channel_names", [])?;
             Ok(())
         })
         .await
@@ -617,6 +697,7 @@ mod tests {
             max_peers: 1024,
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
+            named_channels_enabled: true,
         };
         db.save_server_config(&new).await.unwrap();
         let loaded = db.load_server_config().await.unwrap();
@@ -624,6 +705,7 @@ mod tests {
         assert_eq!(loaded.max_peers, 1024);
         assert_eq!(loaded.idle_kick_secs, 30);
         assert_eq!(loaded.grpc_password, "hunter2");
+        assert!(loaded.named_channels_enabled);
     }
 
     #[tokio::test]
@@ -670,11 +752,15 @@ mod tests {
             max_peers: 128,
             idle_kick_secs: 7,
             grpc_password: "secret".into(),
+            named_channels_enabled: true,
         })
         .await
         .unwrap();
         let loaded = db.load_server_config().await.unwrap();
         assert_eq!(loaded.grpc_password, "secret");
+        // The named_channels_enabled column was added by the same
+        // upgrade path and round-trips too.
+        assert!(loaded.named_channels_enabled);
         // Running migrate() again must remain idempotent (no error,
         // no second ALTER fail).
         db.migrate().await.unwrap();
@@ -696,6 +782,30 @@ mod tests {
             })
             .await;
         assert!(err.is_err(), "second row should be rejected by CHECK");
+    }
+
+    #[tokio::test]
+    async fn channel_names_crud_roundtrips() {
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_channel_names().await.unwrap().is_empty());
+
+        db.set_channel_name("446.05", "Ops Net").await.unwrap();
+        db.set_channel_name("447.00", "Backup").await.unwrap();
+        // Upsert: re-setting the same freq replaces, doesn't duplicate.
+        db.set_channel_name("446.05", "Dispatch").await.unwrap();
+        let names = db.load_channel_names().await.unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names.get("446.05").map(String::as_str), Some("Dispatch"));
+        assert_eq!(names.get("447.00").map(String::as_str), Some("Backup"));
+
+        db.clear_channel_name("446.05").await.unwrap();
+        let names = db.load_channel_names().await.unwrap();
+        assert_eq!(names.len(), 1);
+        assert!(!names.contains_key("446.05"));
+
+        db.clear_all_channel_names().await.unwrap();
+        assert!(db.load_channel_names().await.unwrap().is_empty());
     }
 
     #[cfg(unix)]

@@ -1747,6 +1747,27 @@ impl TokiApp {
         // warning rather than reorder the block.
         let _ = baseline_y;
 
+        // ── Channel name (admin-assigned) ──────────────────────────
+        // A small label under the frequency digits when the channel
+        // carries a name and we're on the wire. Pixel-truncated so a
+        // 16-char name can't bleed past the OLED pads (the server caps
+        // the length, but the OLED is narrow at small widths).
+        let channel_name = self.state.lock().unwrap().channel_name.clone();
+        if let Some(name) = channel_name {
+            if !offline_view && !name.is_empty() {
+                let name_font = font_mono(12.0);
+                let name_y = (center_y + font_size * 0.5 + 11.0).min(band_bot - 1.0);
+                let shown = truncate_to_width(painter, &name, name_font.clone(), available_w);
+                painter.text(
+                    Pos2::new(rect.center().x, name_y),
+                    Align2::CENTER_CENTER,
+                    &shown,
+                    name_font,
+                    T::PRIMARY_DIM,
+                );
+            }
+        }
+
         // ── Chevron row (no label between them) ────────────────────
         let chev_w = 56.0;
         let left_chev = Rect::from_min_size(

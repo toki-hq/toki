@@ -40,6 +40,7 @@ async fn boot() -> (axum::Router, &'static str) {
         admin_bind: "127.0.0.1:0".to_string(),
         login_throttle: Arc::new(IpThrottle::new()),
         server_config: server_config::shared_default(),
+        channel_names: toki_server::state::shared_channel_names(Default::default()),
         toml_password_override: false,
     };
     // Tests drive the HTTP router standalone (no gRPC merge), so append

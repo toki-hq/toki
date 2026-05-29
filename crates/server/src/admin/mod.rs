@@ -60,7 +60,7 @@ use toki_proto::admin::v1::admin_server::AdminServer;
 
 use crate::config::AdminConfig;
 use crate::server_config::SharedServerConfig;
-use crate::state::SharedRegistry;
+use crate::state::{SharedChannelNames, SharedRegistry};
 use crate::throttle::IpThrottle;
 use crate::tls::TlsMaterial;
 
@@ -114,6 +114,12 @@ pub struct AppState {
     /// this in lockstep with the sqlite row so the new value takes
     /// effect immediately on every subsystem.
     pub server_config: SharedServerConfig,
+    /// Admin-assigned channel names (frequency → name). Shared with the
+    /// signaling service (the reader). The name RPCs write both this
+    /// map and the `channel_names` sqlite table in lockstep, and the
+    /// broadcaster folds it into each `Snapshot` so the panel can label
+    /// every frequency — occupied or not.
+    pub channel_names: SharedChannelNames,
     /// `true` when `config.toml` set a `password`. The TOML value
     /// takes precedence at the signaling layer (see `SignalingSvc`)
     /// and we surface this flag to the UI so the server-password
@@ -142,6 +148,7 @@ pub async fn run(
     registry: SharedRegistry,
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
+    channel_names: SharedChannelNames,
     toml_password_override: bool,
 ) -> Result<()> {
     let bind: SocketAddr = format!("{}:{}", cfg.bind, cfg.port)
@@ -167,6 +174,18 @@ pub async fn run(
         *server_config.write().await = loaded;
     }
 
+    // Hydrate the in-memory channel-name map from sqlite for the same
+    // reason: main.rs handed us an empty map; the table may hold names
+    // an operator set in a previous run. Signaling reads this map on
+    // join, so it must reflect the persisted state from request #1.
+    {
+        let loaded = db
+            .load_channel_names()
+            .await
+            .context("load channel_names from admin db")?;
+        *channel_names.write().await = loaded;
+    }
+
     // Seed `admin` user if the store is empty. We log the generated
     // password once at WARN level — this is the operator's only
     // chance to capture it.
@@ -189,13 +208,19 @@ pub async fn run(
         admin_bind,
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
+        channel_names: channel_names.clone(),
         toml_password_override,
     };
 
     // Periodic snapshot loop. Lives for the lifetime of the admin
     // task; aborted implicitly when this function returns (its tokio
     // task is detached but tied to the runtime, which exits with main).
-    tokio::spawn(watch::run_broadcaster(registry, tx, started_at));
+    tokio::spawn(watch::run_broadcaster(
+        registry,
+        channel_names,
+        tx,
+        started_at,
+    ));
 
     // Build the gRPC-Web Admin service: the generated server wrapped by
     // the cookie auth interceptor, exposed as an axum Router (tonic 0.13

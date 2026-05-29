@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIjkKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkiaQoQUmVnaXN0ZXJSZXNwb25zZRIRCgljbGllbnRfaWQYASABKAkSEwoLYXVkaW9fdG9rZW4YAiABKAwSFgoOYXVkaW9fZW5kcG9pbnQYAyABKAkSFQoNYXVkaW9fbWFjX2tleRgEIAEoDCIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2Ui9QEKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIAEIHCgVldmVudCI3CgxNZW1iZXJKb2luZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIfCgpNZW1iZXJMZWZ0EhEKCWNsaWVudF9pZBgBIAEoCSIlChBGcmVxdWVuY3lDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCSI9ChJEaXNwbGF5TmFtZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSJSCghQdHRFdmVudBIRCgljbGllbnRfaWQYASABKAkSDwoHcHJlc3NlZBgCIAEoCBIQCghzZXF1ZW5jZRgDIAEoBBIQCghwcmlvcml0eRgEIAEoCCIICgZQdHRBY2syvgIKCVNpZ25hbGluZxI/CghSZWdpc3RlchIYLnRva2kudjEuUmVnaXN0ZXJSZXF1ZXN0GhkudG9raS52MS5SZWdpc3RlclJlc3BvbnNlEi4KBEpvaW4SFC50b2tpLnYxLkpvaW5SZXF1ZXN0Gg4udG9raS52MS5FdmVudDABEjYKBUxlYXZlEhUudG9raS52MS5MZWF2ZVJlcXVlc3QaFi50b2tpLnYxLkxlYXZlUmVzcG9uc2USVAoPQ2hhbmdlRnJlcXVlbmN5Eh8udG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0GiAudG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXNwb25zZRIyCgpQdXNoVG9UYWxrEhEudG9raS52MS5QdHRFdmVudBoPLnRva2kudjEuUHR0QWNrKAFiBnByb3RvMw");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIjkKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkiaQoQUmVnaXN0ZXJSZXNwb25zZRIRCgljbGllbnRfaWQYASABKAkSEwoLYXVkaW9fdG9rZW4YAiABKAwSFgoOYXVkaW9fZW5kcG9pbnQYAyABKAkSFQoNYXVkaW9fbWFjX2tleRgEIAEoDCIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2UisgIKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIlIKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIIggKBlB0dEFjazK+AgoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soAWIGcHJvdG8z");
 
 /**
  * @generated from message toki.v1.RegisterRequest
@@ -228,6 +228,19 @@ export type Event = Message<"toki.v1.Event"> & {
      */
     value: DisplayNameChanged;
     case: "displayNameChanged";
+  } | {
+    /**
+     * Sent when the admin-assigned human-readable name of a frequency
+     * changes, or to deliver the current name on Join / ChangeFrequency.
+     * Only emitted while the server's `named_channels_enabled` setting is
+     * on; an empty `name` means the channel has no name (cleared). The
+     * client compares `frequency` against its current tuning before
+     * applying. See `ChannelNameChanged`.
+     *
+     * @generated from field: toki.v1.ChannelNameChanged channel_name_changed = 6;
+     */
+    value: ChannelNameChanged;
+    case: "channelNameChanged";
   } | { case: undefined; value?: undefined };
 };
 
@@ -317,6 +330,33 @@ export const DisplayNameChangedSchema: GenMessage<DisplayNameChanged> = /*@__PUR
   messageDesc(file_toki, 11);
 
 /**
+ * The admin-assigned name of a frequency channel (≤16 chars). An empty
+ * `name` means the channel is unnamed (e.g. the admin cleared it). Sent
+ * on Join/ChangeFrequency backfill and whenever the admin sets or clears
+ * a name — but only while the server has named channels enabled.
+ *
+ * @generated from message toki.v1.ChannelNameChanged
+ */
+export type ChannelNameChanged = Message<"toki.v1.ChannelNameChanged"> & {
+  /**
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: string name = 2;
+   */
+  name: string;
+};
+
+/**
+ * Describes the message toki.v1.ChannelNameChanged.
+ * Use `create(ChannelNameChangedSchema)` to create a new message.
+ */
+export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 12);
+
+/**
  * @generated from message toki.v1.PttEvent
  */
 export type PttEvent = Message<"toki.v1.PttEvent"> & {
@@ -355,7 +395,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 12);
+  messageDesc(file_toki, 13);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -368,7 +408,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 13);
+  messageDesc(file_toki, 14);
 
 /**
  * Signaling service for the Toki walkie-talkie network.

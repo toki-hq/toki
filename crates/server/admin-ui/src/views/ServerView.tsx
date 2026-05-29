@@ -93,6 +93,7 @@ function RuntimeConfig() {
   const [name, setName] = useState("");
   const [maxPeers, setMaxPeers] = useState("");
   const [idleKick, setIdleKick] = useState("");
+  const [namedChannels, setNamedChannels] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -103,6 +104,7 @@ function RuntimeConfig() {
         setName(c.serverName);
         setMaxPeers(String(c.maxPeers));
         setIdleKick(String(c.idleKickSecs));
+        setNamedChannels(c.namedChannelsEnabled);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
   }, []);
@@ -111,7 +113,8 @@ function RuntimeConfig() {
     cfg !== null &&
     (name !== cfg.serverName ||
       maxPeers !== String(cfg.maxPeers) ||
-      idleKick !== String(cfg.idleKickSecs));
+      idleKick !== String(cfg.idleKickSecs) ||
+      namedChannels !== cfg.namedChannelsEnabled);
 
   async function save() {
     setBusy(true);
@@ -120,6 +123,7 @@ function RuntimeConfig() {
         serverName: name,
         maxPeers: Number(maxPeers),
         idleKickSecs: Number(idleKick),
+        namedChannelsEnabled: namedChannels,
       });
       setCfg(updated);
       toast.success("Server config saved");
@@ -160,6 +164,19 @@ function RuntimeConfig() {
             className="font-mono tabular"
           />
         </Field>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Named channels</span>
+            <span className="text-xs text-muted-foreground">
+              Let operators label frequencies; clients see the name.
+            </span>
+          </div>
+          <Switch
+            checked={namedChannels}
+            onCheckedChange={setNamedChannels}
+            aria-label="Toggle named channels"
+          />
+        </div>
         <Button className="mt-1 self-start" disabled={!dirty || busy} onClick={() => void save()}>
           {busy ? "Saving…" : "Save"}
         </Button>

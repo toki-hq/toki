@@ -1,6 +1,15 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
-import { MoreHorizontal, Pencil, ArrowLeftRight, Zap, Power } from "lucide-react";
+import {
+  MoreHorizontal,
+  Pencil,
+  ArrowLeftRight,
+  Zap,
+  Power,
+  Tag,
+  Eraser,
+  Check,
+} from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
 import { admin } from "@/lib/client";
@@ -35,10 +44,34 @@ function err(e: unknown): string {
 export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   const rooms = useMemo(() => snapshot?.rooms ?? [], [snapshot]);
   const activeCount = rooms.filter((r) => r.members.length > 0).length;
+  // Admin-assigned names live in the snapshot's channelNames map (all
+  // named frequencies, occupied or not). Names persist even while the
+  // feature is off, so the toggle is fetched separately to gate editing.
+  const names = snapshot?.channelNames ?? {};
+  const [namedEnabled, setNamedEnabled] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Member | null>(null);
+
+  useEffect(() => {
+    // One-shot on mount (the section remounts on each visit, so a
+    // toggle flipped in Settings is reflected when you return here).
+    admin
+      .getServerConfig({})
+      .then((c) => setNamedEnabled(c.namedChannelsEnabled))
+      .catch(() => setNamedEnabled(false));
+  }, []);
+
+  async function clearAll() {
+    if (!confirm("Clear the names of ALL channels? This can't be undone.")) return;
+    try {
+      await admin.clearAllChannelNames({});
+      toast.success("All channel names cleared");
+    } catch (e) {
+      toast.error(`Clear all failed: ${err(e)}`);
+    }
+  }
 
   // The Watch snapshot only carries rooms the server is tracking (i.e. with
   // members). When "Active only" is off, fill in the rest of the band with
@@ -64,9 +97,16 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
 
   return (
     <div className="flex h-[calc(100vh-7.5rem)] flex-col gap-4">
-      <h1 className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
-        02 · Channels — {visible.length} shown · {activeCount} active
-      </h1>
+      <div className="flex items-center justify-between gap-3">
+        <h1 className="font-mono text-xs uppercase tracking-widest text-muted-foreground">
+          02 · Channels — {visible.length} shown · {activeCount} active
+        </h1>
+        {namedEnabled && Object.keys(names).length > 0 && (
+          <Button variant="outline" size="sm" onClick={() => void clearAll()}>
+            <Eraser /> Clear all names
+          </Button>
+        )}
+      </div>
       <div className="grid flex-1 grid-cols-[20rem_1fr] gap-4 overflow-hidden">
         {/* Channel list */}
         <Card className="flex flex-col overflow-hidden">
@@ -92,6 +132,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               <ChannelRow
                 key={r.frequency}
                 room={r}
+                name={names[r.frequency]}
                 selected={current?.frequency === r.frequency}
                 onSelect={() => setSelected(r.frequency)}
               />
@@ -105,7 +146,12 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
         {/* Detail */}
         <Card className="flex flex-col overflow-hidden">
           {current ? (
-            <ChannelDetail room={current} onRename={setRenaming} />
+            <ChannelDetail
+              room={current}
+              name={names[current.frequency]}
+              namedEnabled={namedEnabled}
+              onRename={setRenaming}
+            />
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
               Select a channel.
@@ -123,10 +169,12 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
 
 function ChannelRow({
   room,
+  name,
   selected,
   onSelect,
 }: {
   room: Room;
+  name?: string;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -141,7 +189,10 @@ function ChannelRow({
       <span className="w-6 font-mono text-xs text-muted-foreground tabular">
         {String(channelNumber(room.frequency)).padStart(2, "0")}
       </span>
-      <span className="flex-1 font-mono text-sm tabular">{room.frequency}</span>
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="font-mono text-sm tabular">{room.frequency}</span>
+        {name && <span className="truncate text-xs text-primary/80">{name}</span>}
+      </span>
       {room.holder && (
         <span className="size-2 rounded-full bg-warning shadow-[0_0_6px] shadow-warning" />
       )}
@@ -152,9 +203,13 @@ function ChannelRow({
 
 function ChannelDetail({
   room,
+  name,
+  namedEnabled,
   onRename,
 }: {
   room: Room;
+  name?: string;
+  namedEnabled: boolean;
   onRename: (m: Member) => void;
 }) {
   return (
@@ -164,10 +219,12 @@ function ChannelDetail({
           {room.frequency}
         </span>
         <span className="text-xs text-muted-foreground">MHz · CH {channelNumber(room.frequency)}</span>
+        {name && <span className="font-mono text-sm text-primary/90">“{name}”</span>}
         <span className="ml-auto font-mono text-sm text-muted-foreground tabular">
           {room.members.length} members
         </span>
       </div>
+      <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
       <div className="flex-1 overflow-y-auto">
         {room.members.length === 0 && (
           <p className="p-4 text-sm text-muted-foreground">No members on this frequency.</p>
@@ -218,6 +275,97 @@ function ChannelDetail({
         })}
       </div>
     </>
+  );
+}
+
+function NameEditor({
+  frequency,
+  name,
+  enabled,
+}: {
+  frequency: string;
+  name?: string;
+  enabled: boolean;
+}) {
+  const [value, setValue] = useState(name ?? "");
+  const [busy, setBusy] = useState(false);
+
+  // Re-sync when the selected channel changes or a live rename arrives
+  // via the Watch stream (so the field tracks the authoritative name).
+  useEffect(() => {
+    setValue(name ?? "");
+  }, [frequency, name]);
+
+  const dirty = value.trim() !== (name ?? "");
+
+  async function save() {
+    setBusy(true);
+    try {
+      await admin.setChannelName({ frequency, name: value.trim() });
+      toast.success(
+        value.trim() ? `Named ${frequency} “${value.trim()}”` : `Cleared name on ${frequency}`,
+      );
+    } catch (e) {
+      toast.error(`Save failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function clear() {
+    setBusy(true);
+    try {
+      await admin.setChannelName({ frequency, name: "" });
+      setValue("");
+      toast.success(`Cleared name on ${frequency}`);
+    } catch (e) {
+      toast.error(`Clear failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-border bg-card/40 p-3">
+      <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Tag className="size-3" /> Channel name
+      </Label>
+      {enabled ? (
+        <div className="flex items-center gap-2">
+          <Input
+            value={value}
+            maxLength={16}
+            placeholder="unnamed"
+            disabled={busy}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && dirty && void save()}
+            className="font-mono"
+          />
+          <span className="w-10 text-right font-mono text-xs text-muted-foreground tabular">
+            {value.length}/16
+          </span>
+          <Button size="sm" disabled={!dirty || busy} onClick={() => void save()}>
+            <Check /> Save
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || !name}
+            onClick={() => void clear()}
+          >
+            <Eraser /> Clear
+          </Button>
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {name ? (
+            <>
+              Currently <span className="font-mono text-primary/80">“{name}”</span> (dormant).{" "}
+            </>
+          ) : null}
+          Enable <span className="font-medium">Named channels</span> in Server settings to edit.
+        </p>
+      )}
+    </div>
   );
 }
 

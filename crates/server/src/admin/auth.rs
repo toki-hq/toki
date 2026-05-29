@@ -134,14 +134,26 @@ pub async fn seed_admin_if_empty(db: &AdminDb) -> Result<()> {
 /// than pulling in the `cookie` crate — one cookie, one place to
 /// read it.
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
-    for part in raw.split(';') {
-        let part = part.trim();
-        let Some((k, v)) = part.split_once('=') else {
+    // A request can carry more than one `Cookie` header (HTTP permits
+    // it, and some proxies split them), and each header packs several
+    // `;`-separated `name=value` pairs. Scan every header and every
+    // pair, returning our session value as soon as the key appears —
+    // unrelated cookies on the same origin (analytics, a reverse
+    // proxy's own session, etc.) must never shadow it. `headers.get`
+    // would only see the *first* header; `get_all` covers them all.
+    // A header value that isn't valid UTF-8 is skipped rather than
+    // aborting the whole lookup.
+    for header_val in headers.get_all(header::COOKIE) {
+        let Ok(raw) = header_val.to_str() else {
             continue;
         };
-        if k == COOKIE_NAME {
-            return Some(v.to_string());
+        for part in raw.split(';') {
+            let Some((k, v)) = part.trim().split_once('=') else {
+                continue;
+            };
+            if k.trim() == COOKIE_NAME {
+                return Some(v.trim().to_string());
+            }
         }
     }
     None
@@ -302,6 +314,41 @@ mod tests {
         // Cookie header without our key.
         h.insert(header::COOKIE, "other=value".parse().unwrap());
         assert!(extract_session_cookie(&h).is_none());
+    }
+
+    #[test]
+    fn extract_cookie_scans_multiple_cookie_headers() {
+        // A client/proxy may split cookies across several `Cookie`
+        // headers. `headers.get` would only see the first (here without
+        // our key); we must scan them all and still find the session.
+        let mut h = HeaderMap::new();
+        h.append(
+            header::COOKIE,
+            "analytics=xyz; ph_session=1".parse().unwrap(),
+        );
+        h.append(
+            header::COOKIE,
+            "toki_admin_session=tok42; theme=dark".parse().unwrap(),
+        );
+        assert_eq!(extract_session_cookie(&h).as_deref(), Some("tok42"));
+    }
+
+    #[test]
+    fn extract_cookie_finds_session_in_any_position() {
+        // First, middle, and last positions among other fields.
+        for raw in [
+            "toki_admin_session=tok; a=1; b=2",
+            "a=1; toki_admin_session=tok; b=2",
+            "a=1; b=2; toki_admin_session=tok",
+        ] {
+            let mut h = HeaderMap::new();
+            h.insert(header::COOKIE, raw.parse().unwrap());
+            assert_eq!(
+                extract_session_cookie(&h).as_deref(),
+                Some("tok"),
+                "failed for: {raw}"
+            );
+        }
     }
 
     #[tokio::test]

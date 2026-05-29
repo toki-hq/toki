@@ -25,6 +25,38 @@ pub struct Config {
     pub beeps: BeepConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub update: UpdateConfig,
+}
+
+/// Auto-update checker preferences. The checker is notify-only — it
+/// surfaces a newer GitHub release and opens the download page; it never
+/// replaces the binary itself.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UpdateConfig {
+    /// Check GitHub for a newer release on launch and periodically.
+    /// On by default; the manual "Check for updates" button works
+    /// regardless of this setting.
+    #[serde(default = "default_true")]
+    pub auto_check: bool,
+    /// A version the user explicitly dismissed ("skip this version") so
+    /// the banner stops nagging until something newer ships. Absent when
+    /// nothing is skipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_version: Option<String>,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            skip_version: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Four quick-recall frequency presets (M1–M4), persisted across

@@ -85,3 +85,14 @@ tokio-rustls = "0.26"
 hyper-util = "0.1"
 tower = "0.5"
 http = "1"
+# Update checker: a blocking HTTPS GET to the GitHub Releases API on a
+# dedicated thread (off the egui + gRPC/audio runtimes). `tls` selects
+# ureq's rustls backend — reusing the rustls/ring stack already linked
+# for gRPC, so no openssl / C toolchain is pulled in. We parse the JSON
+# ourselves via serde_json rather than `into_json` so the same path is
+# unit-testable against a captured fixture.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+serde_json = "1"
+# Pure-Rust semver comparison for the version check (handles pre-release
+# / build metadata correctly, unlike a naive string/tuple compare).
+semver = "1"

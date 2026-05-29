@@ -6,7 +6,7 @@ members = ["crates/proto", "crates/server", "crates/client"]
 version = "0.1.4"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/coton/toki"
+repository = "https://github.com/toki-hq/toki"
 
 [workspace.dependencies]
 toki-proto = { path = "crates/proto" }

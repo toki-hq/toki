@@ -18,6 +18,7 @@ mod hotkey;
 mod runtime;
 mod state;
 mod theme;
+mod update;
 
 use eframe::egui;
 use tracing_subscriber::EnvFilter;
@@ -101,7 +102,9 @@ fn main() -> eframe::Result<()> {
             // a single frame in Ubuntu-Light then snap to the brand
             // face on frame 2.
             app::register_fonts(&cc.egui_ctx);
-            Ok(Box::new(TokiApp::new()))
+            // Hand the app a Context clone so the update checker's worker
+            // thread can request a repaint when a check completes.
+            Ok(Box::new(TokiApp::new(cc.egui_ctx.clone())))
         }),
     )
 }

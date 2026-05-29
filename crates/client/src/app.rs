@@ -27,6 +27,7 @@ use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
 use crate::theme as T;
+use crate::update;
 
 /// Logical UI state derived from the runtime snapshot + local hold flag.
 /// Mirrors the six states in `design/behavior-spec.md` — `offline` and
@@ -203,6 +204,14 @@ pub struct TokiApp {
     /// 0..4. Latched so a single-frame flicker of egui's hit-test
     /// (see the PTT button's note) doesn't reset an in-progress hold.
     mem_press: [MemPress; 4],
+
+    /// Shared state for the notify-only update checker (current phase +
+    /// last-check time). Written by a background worker thread; read by
+    /// the topbar pill and the Settings → UPDATES section.
+    update_state: update::UpdateShared,
+    /// A `Context` clone handed to the update worker so it can request a
+    /// repaint when a check finishes (workers have no `Ui`/frame access).
+    egui_ctx: egui::Context,
 }
 
 /// In-flight press gesture on a single memory button. A short left
@@ -246,7 +255,7 @@ enum RecordTarget {
 }
 
 impl TokiApp {
-    pub fn new() -> Self {
+    pub fn new(egui_ctx: egui::Context) -> Self {
         let state = state::shared();
         let config = config::Config::load();
 
@@ -319,11 +328,21 @@ impl TokiApp {
             });
         }
 
+        // Notify-only update checker. Fire a check on launch when the
+        // user hasn't opted out; the worker runs off-thread and repaints
+        // via the Context clone when it lands.
+        let update_state = update::shared();
+        if config.update.auto_check {
+            update::spawn_check(update_state.clone(), egui_ctx.clone());
+        }
+
         Self {
             state,
             cmd_tx,
             config,
             hotkey: installed,
+            update_state,
+            egui_ctx,
             recording: false,
             recording_target: RecordTarget::Ptt,
             audio_devices: devices,
@@ -493,6 +512,29 @@ impl TokiApp {
         // 33 ms ≈ 30 fps — fast enough that waveform scrolls smoothly
         // and the TX countdown ticks visibly.
         ctx.request_repaint_after(Duration::from_millis(33));
+    }
+
+    /// Periodic auto-update re-check. With auto-check on, fire a fresh
+    /// check once the last completed one is older than the re-check
+    /// interval (or once, if auto-check was enabled mid-session and no
+    /// check has run yet). Just a timestamp compare each frame;
+    /// `spawn_check` itself no-ops while a check is already in flight.
+    fn tick_update_check(&mut self) {
+        if !self.config.update.auto_check {
+            return;
+        }
+        let due = {
+            let st = self.update_state.lock().unwrap();
+            match st.last_checked {
+                Some(t) => t.elapsed() >= update::RECHECK_INTERVAL,
+                // No check yet: only fire if we're truly idle (the
+                // startup check, if any, already set phase to Checking).
+                None => matches!(st.phase, update::UpdatePhase::Idle),
+            }
+        };
+        if due {
+            update::spawn_check(self.update_state.clone(), self.egui_ctx.clone());
+        }
     }
 
     /// Count of members on the current frequency (us + others), read
@@ -1212,6 +1254,7 @@ fn glow_dot(painter: &egui::Painter, center: Pos2, radius: f32, color: Color32, 
 impl eframe::App for TokiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ensure_min_one_frame(ctx);
+        self.tick_update_check();
 
         let snap = self.snapshot();
         let st = self.radio_state(&snap);
@@ -1515,6 +1558,10 @@ impl TokiApp {
             ConnState::Disconnected => "OFFLINE".into(),
             ConnState::Failed(_) => "FAILED".into(),
         };
+        let callsign_w = painter
+            .layout_no_wrap(callsign.clone(), font_mono(10.0), T::INK_DIM)
+            .size()
+            .x;
         painter.text(
             Pos2::new(divider_x + 10.0, y_mid),
             Align2::LEFT_CENTER,
@@ -1522,6 +1569,62 @@ impl TokiApp {
             font_mono(10.0),
             T::INK_DIM,
         );
+
+        // ── Update-available pill ──────────────────────────────────
+        // Non-modal nudge: when a newer release is known (and not
+        // skipped), show a small clickable amber pill after the callsign
+        // that opens the release page. Drawn in the topbar so it's always
+        // visible without opening Settings, but never interrupts the UI.
+        let pill = {
+            let us = self.update_state.lock().unwrap();
+            match &us.phase {
+                update::UpdatePhase::Available(info)
+                    if self.config.update.skip_version.as_deref() != Some(info.latest.as_str()) =>
+                {
+                    Some((format!("↑ UPDATE v{}", info.latest), info.html_url.clone()))
+                }
+                _ => None,
+            }
+        };
+        if let Some((label, url)) = pill {
+            let font = font_mono(9.0);
+            let text_w = painter
+                .layout_no_wrap(label.clone(), font.clone(), T::WARN)
+                .size()
+                .x;
+            let pill_pad = 7.0;
+            let pill_h = 16.0;
+            let pill_rect = Rect::from_min_size(
+                Pos2::new(divider_x + 10.0 + callsign_w + 10.0, y_mid - pill_h / 2.0),
+                Vec2::new(text_w + 2.0 * pill_pad, pill_h),
+            );
+            let resp = ui.allocate_rect(pill_rect, Sense::click());
+            let hover_bg = if resp.hovered() {
+                Color32::from_rgba_unmultiplied(255, 184, 77, 28)
+            } else {
+                Color32::TRANSPARENT
+            };
+            painter.rect(
+                pill_rect,
+                CornerRadius::same(3),
+                hover_bg,
+                Stroke::new(1.0, T::WARN),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                pill_rect.center(),
+                Align2::CENTER_CENTER,
+                &label,
+                font,
+                T::WARN,
+            );
+            if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            if resp.clicked() {
+                update::open_release_page(&url);
+            }
+        }
 
         // ── Right cluster: status chip + mute + settings ───────────
         let mut x = rect.right();
@@ -3494,6 +3597,57 @@ impl TokiApp {
             }
             if ui.button("CLEARED").clicked() {
                 let _ = self.cmd_tx.send(Cmd::TestBeep(runtime::BeepKind::Release));
+            }
+        });
+
+        ui.add_space(14.0);
+        section_header(ui, "UPDATES");
+
+        settings_row(ui, "VERSION", |ui| {
+            ui.label(
+                egui::RichText::new(format!("v{}", update::current_version()))
+                    .color(T::INK)
+                    .monospace()
+                    .size(10.0),
+            );
+        });
+
+        // Snapshot the phase once for the status + action rows below.
+        let phase = self.update_state.lock().unwrap().phase.clone();
+
+        settings_row(ui, "STATUS", |ui| {
+            let (text, color) = match &phase {
+                update::UpdatePhase::Idle => ("—".to_string(), T::INK_DIM),
+                update::UpdatePhase::Checking => ("checking…".to_string(), T::INK_DIM),
+                update::UpdatePhase::UpToDate => ("up to date".to_string(), T::PRIMARY_DIM),
+                update::UpdatePhase::Available(info) => {
+                    (format!("v{} available", info.latest), T::WARN)
+                }
+                update::UpdatePhase::Error(e) => (e.clone(), T::WARN),
+            };
+            ui.label(egui::RichText::new(text).color(color).monospace().size(9.0));
+        });
+
+        settings_row(ui, "", |ui| {
+            if ui.button("CHECK NOW").clicked() {
+                update::spawn_check(self.update_state.clone(), self.egui_ctx.clone());
+            }
+            if let update::UpdatePhase::Available(info) = &phase {
+                if ui.button("OPEN PAGE").clicked() {
+                    update::open_release_page(&info.html_url);
+                }
+                if ui.button("SKIP").clicked() {
+                    self.config.update.skip_version = Some(info.latest.clone());
+                    self.config.save();
+                }
+            }
+        });
+
+        settings_row(ui, "AUTO-CHECK", |ui| {
+            let mut v = self.config.update.auto_check;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.update.auto_check = v;
+                self.config.save();
             }
         });
     }

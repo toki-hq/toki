@@ -4400,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "toki-client"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4437,7 +4437,7 @@ dependencies = [
 
 [[package]]
 name = "toki-proto"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "prost",
  "tonic",
@@ -4446,7 +4446,7 @@ dependencies = [
 
 [[package]]
 name = "toki-server"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "argon2",

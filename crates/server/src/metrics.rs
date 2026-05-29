@@ -46,6 +46,22 @@ pub fn shared_counters() -> SharedByteCounters {
     Arc::new(ByteCounters::default())
 }
 
+/// Latest *instantaneous* voice-relay throughput (bytes/sec), recomputed
+/// each ~1 s by the snapshot broadcaster from [`ByteCounters`] deltas.
+/// Folded into every `Watch` snapshot so the dashboard can draw a live
+/// bandwidth trace without waiting on the 1-minute persisted series.
+#[derive(Default)]
+pub struct LiveRate {
+    pub rx: AtomicU64,
+    pub tx: AtomicU64,
+}
+
+pub type SharedLiveRate = Arc<LiveRate>;
+
+pub fn shared_live_rate() -> SharedLiveRate {
+    Arc::new(LiveRate::default())
+}
+
 /// Latest host-health snapshot, refreshed by [`run_sampler`].
 #[derive(Clone, Copy, Default)]
 pub struct Health {

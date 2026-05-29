@@ -68,6 +68,11 @@ message Snapshot {
   // room empties), so the panel can label unoccupied frequencies too.
   // Absent key = unnamed. Empty unless named_channels_enabled is on.
   map<string, string> channel_names = 5;
+  // Live voice-relay throughput over the last ~1 s tick, bytes/sec. Lets
+  // the dashboard draw a real-time bandwidth trace off the Watch stream
+  // (the persisted GetMetrics series is 1-minute granularity).
+  uint64 rx_bytes_per_sec = 6;
+  uint64 tx_bytes_per_sec = 7;
 }
 
 message Room {

@@ -9,7 +9,7 @@ import type {
 import { MetricsWindow, AuditFilter } from "@/gen/admin_pb";
 import { admin } from "@/lib/client";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { AreaChart } from "@/components/AreaChart";
+import { ChartWithAxes } from "@/components/AreaChart";
 import {
   ALL_FREQUENCIES,
   channelNumber,
@@ -24,11 +24,27 @@ import { auditTone, auditIcon } from "@/lib/audit";
 const PRIMARY = "hsl(var(--primary))";
 const WARNING = "hsl(var(--warning))";
 
-const WINDOWS: { id: MetricsWindow; label: string }[] = [
-  { id: MetricsWindow.HOUR, label: "1H" },
-  { id: MetricsWindow.DAY, label: "24H" },
-  { id: MetricsWindow.WEEK, label: "7D" },
+/** A point in the client-side live buffer (1 Hz, off the Watch stream). */
+interface LivePoint {
+  rx: number;
+  tx: number;
+  users: number;
+}
+/** ~3 min of 1 Hz live history. */
+const LIVE_CAP = 180;
+
+type Win = "live" | "hour" | "day" | "week";
+const WINDOWS: { id: Win; label: string }[] = [
+  { id: "live", label: "LIVE" },
+  { id: "hour", label: "1H" },
+  { id: "day", label: "24H" },
+  { id: "week", label: "7D" },
 ];
+const WIN_ENUM: Record<Exclude<Win, "live">, MetricsWindow> = {
+  hour: MetricsWindow.HOUR,
+  day: MetricsWindow.DAY,
+  week: MetricsWindow.WEEK,
+};
 
 export function Overview({
   snapshot,
@@ -49,17 +65,38 @@ export function Overview({
     .slice(0, 8);
   const maxMembers = Math.max(1, ...busiest.map((r) => r.members.length));
 
-  // ── Polled data: metrics (windowed), health, recent audit ──────
-  const [window, setWindow] = useState<MetricsWindow>(MetricsWindow.HOUR);
+  // ── Data: live buffer (Watch stream), windowed history, health, audit ──
+  const [window, setWindow] = useState<Win>("live");
   const [samples, setSamples] = useState<MetricSample[]>([]);
+  const [live, setLive] = useState<LivePoint[]>([]);
   const [health, setHealth] = useState<ServerHealth | null>(null);
   const [recent, setRecent] = useState<AuditEntry[]>([]);
 
+  // Append a point to the live ring on every Watch snapshot (~1 Hz). This
+  // is the real-time bandwidth source — no polling lag.
   useEffect(() => {
+    if (!snapshot) return;
+    const u = rooms.reduce((n, r) => n + r.members.length, 0) + lobby.length;
+    setLive((prev) =>
+      [
+        ...prev,
+        {
+          rx: Number(snapshot.rxBytesPerSec),
+          tx: Number(snapshot.txBytesPerSec),
+          users: u,
+        },
+      ].slice(-LIVE_CAP),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshot]);
+
+  // Historical windows poll the persisted 1-minute series; LIVE doesn't.
+  useEffect(() => {
+    if (window === "live") return;
     let alive = true;
     const load = () =>
       admin
-        .getMetrics({ window })
+        .getMetrics({ window: WIN_ENUM[window] })
         .then((r) => alive && setSamples(r.samples))
         .catch(() => {});
     void load();
@@ -100,10 +137,34 @@ export function Overview({
     };
   }, []);
 
-  const rx = samples.map((s) => Number(s.rxBytesPerSec));
-  const tx = samples.map((s) => Number(s.txBytesPerSec));
-  const users = samples.map((s) => s.users);
-  const last = samples.at(-1);
+  const isLive = window === "live";
+  const rx = isLive ? live.map((p) => p.rx) : samples.map((s) => Number(s.rxBytesPerSec));
+  const tx = isLive ? live.map((p) => p.tx) : samples.map((s) => Number(s.txBytesPerSec));
+  const usersSeries = isLive ? live.map((p) => p.users) : samples.map((s) => s.users);
+  const nowRx = isLive ? (live.at(-1)?.rx ?? 0) : Number(samples.at(-1)?.rxBytesPerSec ?? 0);
+  const nowTx = isLive ? (live.at(-1)?.tx ?? 0) : Number(samples.at(-1)?.txBytesPerSec ?? 0);
+  const nowUsers = isLive ? (live.at(-1)?.users ?? peers) : (samples.at(-1)?.users ?? peers);
+
+  // X-axis labels (oldest → newest). LIVE counts seconds back from now;
+  // historical uses sample clock times (or dates for the 7-day window).
+  const xLabels: string[] = (() => {
+    if (isLive) {
+      const n = live.length;
+      if (n < 2) return [];
+      return [`-${n}s`, `-${Math.floor(n / 2)}s`, "now"];
+    }
+    if (samples.length < 2) return [];
+    const at = (i: number) => Number(samples[i].tsUnix);
+    const mid = Math.floor(samples.length / 2);
+    const fmt =
+      window === "week"
+        ? (ts: number) => {
+            const d = new Date(ts * 1000);
+            return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+          }
+        : formatClock;
+    return [fmt(at(0)), fmt(at(mid)), fmt(at(samples.length - 1))];
+  })();
 
   return (
     <div className="flex flex-col gap-6">
@@ -131,17 +192,21 @@ export function Overview({
             <WindowPicker value={window} onChange={setWindow} />
           </CardHeader>
           <CardContent>
-            <AreaChart
+            <ChartWithAxes
               height={150}
+              yFormat={formatRate}
+              xLabels={xLabels}
               series={[
                 { values: rx, color: PRIMARY, label: "ingress" },
                 { values: tx, color: WARNING, label: "egress" },
               ]}
             />
             <div className="mt-3 flex gap-5 border-t border-border pt-3 font-mono text-xs">
-              <Legend color={PRIMARY} label={`IN  ${formatRate(last ? Number(last.rxBytesPerSec) : 0)}`} />
-              <Legend color={WARNING} label={`OUT ${formatRate(last ? Number(last.txBytesPerSec) : 0)}`} />
-              <span className="ml-auto text-muted-foreground">UDP audio only</span>
+              <Legend color={PRIMARY} label={`IN  ${formatRate(nowRx)}`} />
+              <Legend color={WARNING} label={`OUT ${formatRate(nowTx)}`} />
+              <span className="ml-auto text-muted-foreground">
+                {isLive ? "live · 1 s" : "UDP audio only"}
+              </span>
             </div>
           </CardContent>
         </Card>
@@ -152,16 +217,16 @@ export function Overview({
             <WindowPicker value={window} onChange={setWindow} />
           </CardHeader>
           <CardContent>
-            <AreaChart
+            <ChartWithAxes
               height={150}
-              series={[{ values: users, color: PRIMARY, label: "users" }]}
+              yFormat={(v) => String(Math.round(v))}
+              xLabels={xLabels}
+              series={[{ values: usersSeries, color: PRIMARY, label: "users" }]}
             />
             <div className="mt-3 flex gap-5 border-t border-border pt-3 font-mono text-xs">
-              <Legend color={PRIMARY} label={`NOW ${last?.users ?? peers}`} />
-              <span className="text-muted-foreground">PEAK {Math.max(0, ...users)}</span>
-              <span className="ml-auto text-muted-foreground">
-                TX peak {Math.max(0, ...samples.map((s) => s.transmitting))}
-              </span>
+              <Legend color={PRIMARY} label={`NOW ${nowUsers}`} />
+              <span className="text-muted-foreground">PEAK {Math.max(0, ...usersSeries)}</span>
+              <span className="ml-auto font-mono text-muted-foreground">users</span>
             </div>
           </CardContent>
         </Card>
@@ -232,10 +297,7 @@ export function Overview({
                   : undefined
               }
             />
-            <HealthRow
-              label="NET I/O"
-              value={last ? `${formatRate(Number(last.rxBytesPerSec))} · ${formatRate(Number(last.txBytesPerSec))}` : "—"}
-            />
+            <HealthRow label="NET I/O" value={`${formatRate(nowRx)} · ${formatRate(nowTx)}`} />
           </CardContent>
         </Card>
       </div>
@@ -285,8 +347,8 @@ function WindowPicker({
   value,
   onChange,
 }: {
-  value: MetricsWindow;
-  onChange: (w: MetricsWindow) => void;
+  value: Win;
+  onChange: (w: Win) => void;
 }) {
   return (
     <div className="flex gap-1 rounded-md border border-border p-0.5">

@@ -1,4 +1,5 @@
 import { useId } from "react";
+import { cn } from "@/lib/utils";
 
 export interface ChartSeries {
   values: number[];
@@ -87,5 +88,56 @@ export function AreaChart({
         </g>
       ))}
     </svg>
+  );
+}
+
+/**
+ * AreaChart wrapped with axes: a left gutter of y-tick labels (max · mid ·
+ * 0, formatted by `yFormat`) and a bottom row of x labels spread left→
+ * right. Labels are HTML (not SVG text) so they never distort when the
+ * chart stretches to its container width.
+ */
+export function ChartWithAxes({
+  series,
+  height = 150,
+  yFormat,
+  xLabels,
+}: {
+  series: ChartSeries[];
+  height?: number;
+  yFormat: (v: number) => string;
+  /** 2–4 labels, ordered oldest → newest, spread across the x-axis. */
+  xLabels: string[];
+}) {
+  const max = Math.max(1, ...series.flatMap((s) => s.values));
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="flex gap-2">
+        <div
+          className="flex w-14 shrink-0 flex-col justify-between py-1 text-right font-mono text-[9px] text-muted-foreground tabular"
+          style={{ height }}
+        >
+          <span>{yFormat(max)}</span>
+          <span>{yFormat(max / 2)}</span>
+          <span>{yFormat(0)}</span>
+        </div>
+        <div className="min-w-0 flex-1">
+          <AreaChart series={series} height={height} yMax={max} />
+        </div>
+      </div>
+      {xLabels.length > 0 && (
+        <div className="flex justify-between pl-16 font-mono text-[9px] text-muted-foreground tabular">
+          {xLabels.map((l, i) => (
+            <span
+              key={i}
+              className={cn(i === 0 && "text-left", i === xLabels.length - 1 && "text-right")}
+            >
+              {l}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

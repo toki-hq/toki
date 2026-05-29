@@ -21,6 +21,7 @@ use tonic::Status;
 
 use toki_proto::admin::v1 as pb;
 
+use crate::metrics::{SharedByteCounters, SharedLiveRate};
 use crate::state::{SharedChannelNames, SharedRegistry};
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
@@ -35,14 +36,44 @@ pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 pub async fn run_broadcaster(
     registry: SharedRegistry,
     channel_names: SharedChannelNames,
+    counters: SharedByteCounters,
+    live_rate: SharedLiveRate,
     tx: Sender<pb::Snapshot>,
     started_at: Instant,
 ) {
     let mut ticker = tokio::time::interval(SNAPSHOT_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_rx = counters.rx.load(Ordering::Relaxed);
+    let mut last_tx = counters.tx.load(Ordering::Relaxed);
+    let mut last_tick = Instant::now();
     loop {
         ticker.tick().await;
-        let snapshot = snapshot_now(&registry, &channel_names, next_generation(), started_at).await;
+        // Recompute instantaneous throughput from the counter deltas over
+        // the real elapsed interval (robust to a skipped/late tick), and
+        // publish it so every snapshot source reflects the latest rate.
+        let rx = counters.rx.load(Ordering::Relaxed);
+        let tx_bytes = counters.tx.load(Ordering::Relaxed);
+        let elapsed = last_tick.elapsed().as_secs_f64().max(0.001);
+        live_rate.rx.store(
+            (rx.saturating_sub(last_rx) as f64 / elapsed).round() as u64,
+            Ordering::Relaxed,
+        );
+        live_rate.tx.store(
+            (tx_bytes.saturating_sub(last_tx) as f64 / elapsed).round() as u64,
+            Ordering::Relaxed,
+        );
+        last_rx = rx;
+        last_tx = tx_bytes;
+        last_tick = Instant::now();
+
+        let snapshot = snapshot_now(
+            &registry,
+            &channel_names,
+            &live_rate,
+            next_generation(),
+            started_at,
+        )
+        .await;
         let _ = tx.send(snapshot);
     }
 }
@@ -60,6 +91,7 @@ pub fn next_generation() -> u64 {
 pub async fn snapshot_now(
     registry: &SharedRegistry,
     channel_names: &SharedChannelNames,
+    live_rate: &SharedLiveRate,
     generation: u64,
     started_at: Instant,
 ) -> pb::Snapshot {
@@ -121,6 +153,9 @@ pub async fn snapshot_now(
         // deleted) — the admin still sees them; the toggle only gates
         // delivery to clients and whether the editor is writable.
         channel_names: names,
+        // Latest 1 Hz throughput, for the dashboard's live bandwidth trace.
+        rx_bytes_per_sec: live_rate.rx.load(Ordering::Relaxed),
+        tx_bytes_per_sec: live_rate.tx.load(Ordering::Relaxed),
     }
 }
 
@@ -177,8 +212,9 @@ mod tests {
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
         let names = crate::state::shared_channel_names(Default::default());
+        let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, 7, Instant::now()).await;
+        let snap = snapshot_now(&registry, &names, &lr, 7, Instant::now()).await;
         assert_eq!(snap.generation, 7);
         assert_eq!(snap.rooms.len(), 1);
         assert_eq!(snap.rooms[0].frequency, "446.05");
@@ -206,8 +242,9 @@ mod tests {
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
         let names = crate::state::shared_channel_names(Default::default());
+        let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, 1, Instant::now()).await;
+        let snap = snapshot_now(&registry, &names, &lr, 1, Instant::now()).await;
         let members: HashMap<_, _> = snap.rooms[0]
             .members
             .iter()
@@ -236,8 +273,9 @@ mod tests {
         seed.insert("446.05".to_string(), "Ops Net".to_string());
         seed.insert("447.00".to_string(), "Backup".to_string());
         let names = crate::state::shared_channel_names(seed);
+        let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, 1, Instant::now()).await;
+        let snap = snapshot_now(&registry, &names, &lr, 1, Instant::now()).await;
         assert_eq!(
             snap.channel_names.get("446.05").map(String::as_str),
             Some("Ops Net")

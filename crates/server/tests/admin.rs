@@ -42,6 +42,7 @@ async fn boot() -> (axum::Router, &'static str) {
         server_config: server_config::shared_default(),
         channel_names: toki_server::state::shared_channel_names(Default::default()),
         health: toki_server::metrics::shared_health(),
+        live_rate: toki_server::metrics::shared_live_rate(),
         audit: toki_server::audit::channel().0,
         toml_password_override: false,
     };

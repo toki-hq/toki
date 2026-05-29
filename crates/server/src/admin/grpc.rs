@@ -107,6 +107,7 @@ impl AdminApi {
         let snap = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
         )
@@ -162,6 +163,7 @@ impl Admin for AdminApi {
         let first = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
         )
@@ -1051,6 +1053,7 @@ mod tests {
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
             health: crate::metrics::shared_health(),
+            live_rate: crate::metrics::shared_live_rate(),
             audit: crate::audit::channel().0,
             toml_password_override: toml_override,
         };

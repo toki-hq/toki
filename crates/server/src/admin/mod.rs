@@ -60,7 +60,7 @@ use toki_proto::admin::v1::admin_server::AdminServer;
 
 use crate::audit::AuditSink;
 use crate::config::AdminConfig;
-use crate::metrics::{SharedByteCounters, SharedHealth};
+use crate::metrics::{SharedByteCounters, SharedHealth, SharedLiveRate};
 use crate::server_config::SharedServerConfig;
 use crate::state::{SharedChannelNames, SharedRegistry};
 use crate::throttle::IpThrottle;
@@ -125,6 +125,9 @@ pub struct AppState {
     /// Latest host-health snapshot (CPU / memory / disk), refreshed by
     /// the metrics sampler. `GetServerHealth` clones it out.
     pub health: SharedHealth,
+    /// Latest 1 Hz voice throughput, written by the snapshot broadcaster
+    /// and folded into each `Watch` snapshot for the live bandwidth trace.
+    pub live_rate: SharedLiveRate,
     /// Audit-log sink. Admin RPCs push their actions here; the writer
     /// task drains it to sqlite. Login (auth-ok / auth-fail) uses it too.
     pub audit: AuditSink,
@@ -213,6 +216,8 @@ pub async fn run(
     // Shared host-health snapshot, written by the metrics sampler and
     // read by `GetServerHealth`.
     let health = crate::metrics::shared_health();
+    // Live throughput, written by the broadcaster, read into snapshots.
+    let live_rate = crate::metrics::shared_live_rate();
 
     let started_at = Instant::now();
     let admin_bind = bind.to_string();
@@ -227,6 +232,7 @@ pub async fn run(
         server_config,
         channel_names: channel_names.clone(),
         health: health.clone(),
+        live_rate: live_rate.clone(),
         audit,
         toml_password_override,
     };
@@ -238,7 +244,7 @@ pub async fn run(
     // Metrics sampler: refreshes host health + persists the 1-minute
     // bandwidth/users time-series, pruning past the retention window.
     tokio::spawn(crate::metrics::run_sampler(
-        byte_counters,
+        byte_counters.clone(),
         registry.clone(),
         db,
         health,
@@ -251,6 +257,8 @@ pub async fn run(
     tokio::spawn(watch::run_broadcaster(
         registry,
         channel_names,
+        byte_counters,
+        live_rate,
         tx,
         started_at,
     ));

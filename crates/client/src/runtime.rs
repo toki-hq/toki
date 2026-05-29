@@ -305,15 +305,18 @@ async fn handle_cmd(
 const PTT_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Outbound voice encoder. `Pcm` passes each 10 ms mic frame straight
-/// through (raw i16 LE, the legacy path). `Opus` buffers two 10 ms
-/// frames into a 20 ms frame, encodes it, and emits a small
-/// variable-length payload. Codec is chosen at connect time from the
-/// server's `RegisterResponse` advertisement.
+/// through (raw i16 LE, the legacy path). `Opus` encodes each 10 ms
+/// (480-sample) mic frame into one small variable-length packet — same
+/// cadence as the mic, so there's no buffering and no added framing
+/// latency, just ~20× less bandwidth. Codec is chosen at connect time
+/// from the server's `RegisterResponse` advertisement.
 enum AudioEncoder {
     Pcm,
     Opus {
         enc: audiopus::coder::Encoder,
-        /// Samples not yet forming a full 20 ms (960-sample) frame.
+        /// Carries any samples short of a full 10 ms (480-sample) frame.
+        /// Empty in steady state — the mic delivers exactly 480-sample
+        /// frames — but tolerates odd-sized inputs without losing audio.
         buf: Vec<i16>,
     },
 }
@@ -371,12 +374,13 @@ impl AudioEncoder {
 
     /// Flush the encoder at the end of a transmission (PTT release).
     ///
-    /// The Opus path buffers mic frames until it has a full 20 ms
-    /// (960-sample) frame; on release the trailing partial frame would
-    /// otherwise be silently dropped (clipping the end of speech) *and*
-    /// linger in the buffer to be prepended to the next transmission
-    /// (garbling its start). We pad the remainder to a full frame with
-    /// silence, encode it once, and clear the buffer so the next PTT
+    /// In steady state the mic delivers exactly 10 ms (480-sample)
+    /// frames, so the Opus buffer is empty between frames and this does
+    /// nothing. But if a final odd-sized frame leaves a partial remainder
+    /// it would otherwise be silently dropped (clipping the end of speech)
+    /// *and* linger in the buffer to be prepended to the next transmission
+    /// (garbling its start). We pad the remainder to a full 10 ms frame
+    /// with silence, encode it once, and clear the buffer so the next PTT
     /// starts clean. PCM carries no buffer, so this is a no-op.
     fn flush(&mut self) -> Vec<(u8, Vec<u8>)> {
         match self {
@@ -386,7 +390,7 @@ impl AudioEncoder {
                     return Vec::new();
                 }
                 // push() drains every whole frame, so buf is always a
-                // partial (< 960) frame here. Pad to 20 ms with silence.
+                // partial (< 480) frame here. Pad to 10 ms with silence.
                 buf.resize(OPUS_FRAME_SAMPLES, 0);
                 // Take the whole padded frame, leaving `buf` empty so the
                 // next transmission starts clean (no stale-tail leak).
@@ -1026,8 +1030,8 @@ impl Session {
 
     async fn send_audio(&self, samples: &[i16]) {
         // Encode under the lock (fast, no await), then seal + send each
-        // resulting packet. PCM yields one packet per 10 ms frame; Opus
-        // yields one per buffered 20 ms frame (so often zero this call).
+        // resulting packet. Both codecs yield one packet per 10 ms mic
+        // frame (Opus just makes it ~20× smaller).
         let packets = self.encode.lock().unwrap().push(samples);
         for (version, payload) in packets {
             let pkt = build_authenticated_packet(
@@ -1315,9 +1319,10 @@ fn pcm_from_bytes(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-/// Decode one Opus packet to 48 kHz mono i16. Output buffer has 60 ms of
-/// headroom (we only ever send 20 ms frames). Returns empty on a decoder
-/// error or when the decoder is unavailable — playback treats it as loss.
+/// Decode one Opus packet to 48 kHz mono i16. Output buffer has plenty of
+/// headroom (we only ever send 10 ms frames, but Opus reports the true
+/// length per packet). Returns empty on a decoder error or when the
+/// decoder is unavailable — playback treats it as loss.
 fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) -> Vec<i16> {
     let Some(dec) = decoder.as_mut() else {
         return Vec::new();
@@ -1373,14 +1378,10 @@ mod tests {
     }
 
     #[test]
-    fn opus_buffers_to_20ms_then_encodes_and_decodes() {
+    fn opus_emits_one_packet_per_10ms_frame_and_decodes() {
         let mut enc = AudioEncoder::new(true, 24_000);
-        // A single 10 ms frame buffers — not yet a full 20 ms frame.
-        assert!(
-            enc.push(&vec![1000i16; 480]).is_empty(),
-            "first 10ms frame should buffer"
-        );
-        // The second completes 20 ms → exactly one Opus packet.
+        // Each 10 ms (480-sample) mic frame yields exactly one Opus
+        // packet — same cadence as the mic, no buffering.
         let pkts = enc.push(&vec![1000i16; 480]);
         assert_eq!(pkts.len(), 1);
         assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
@@ -1389,7 +1390,7 @@ mod tests {
             "opus payload bounded, got {}",
             pkts[0].1.len()
         );
-        // And it decodes back to a full 20 ms (960-sample) frame.
+        // And it decodes back to a full 10 ms (480-sample) frame.
         let mut dec = Some(
             audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
                 .unwrap(),
@@ -1401,17 +1402,20 @@ mod tests {
     #[test]
     fn opus_flush_emits_partial_tail_then_clears() {
         let mut enc = AudioEncoder::new(true, 24_000);
-        // One 10 ms frame buffers (half of a 20 ms frame), nothing sent.
-        assert!(enc.push(&vec![1000i16; 480]).is_empty());
+        // A short, odd-sized frame leaves a partial remainder buffered.
+        assert!(
+            enc.push(&vec![1000i16; 200]).is_empty(),
+            "sub-frame input buffers, nothing emitted"
+        );
         // Releasing PTT flushes the buffered tail as one padded frame.
         let pkts = enc.flush();
         assert_eq!(pkts.len(), 1, "partial tail should flush on release");
         assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
         // Buffer is now clear: a second flush is a no-op, and a fresh
-        // 10 ms frame buffers again (no stale samples leaked through).
+        // sub-frame buffers again (no stale samples leaked through).
         assert!(enc.flush().is_empty(), "buffer cleared after flush");
         assert!(
-            enc.push(&vec![1000i16; 480]).is_empty(),
+            enc.push(&vec![1000i16; 200]).is_empty(),
             "next transmission starts from an empty buffer"
         );
     }

@@ -80,7 +80,7 @@ pub mod wire {
     /// Raw PCM audio frame, little-endian i16, mono, 48 kHz.
     pub const VERSION_AUDIO_PCM: u8 = 1;
 
-    /// Opus-encoded audio frame, 48 kHz mono, 20 ms. Variable length;
+    /// Opus-encoded audio frame, 48 kHz mono, 10 ms. Variable length;
     /// the server relays the opaque payload (it never decodes Opus).
     pub const VERSION_AUDIO_OPUS: u8 = 2;
 
@@ -90,11 +90,14 @@ pub mod wire {
     pub const FRAME_SAMPLES: usize = 480;
     pub const FRAME_BYTES: usize = FRAME_SAMPLES * 2;
 
-    /// Opus encodes 20 ms frames (960 samples @ 48 kHz) — half the
-    /// packet rate of the 10 ms PCM path, less header/crypto overhead.
-    pub const OPUS_FRAME_SAMPLES: usize = 960;
-    /// Generous cap on a single Opus frame's bytes. At ≤32 kbps/20 ms a
-    /// frame is ~80 bytes; 512 leaves headroom for higher rates / FEC
+    /// Opus encodes 10 ms frames (480 samples @ 48 kHz) — one frame per
+    /// captured mic frame, so the outbound path needs no buffering and
+    /// adds no framing latency over the PCM path (the codec still cuts
+    /// bandwidth ~20×). A 20 ms frame would halve the packet rate but
+    /// add ~10 ms of mouth-to-ear delay; 10 ms favours low latency.
+    pub const OPUS_FRAME_SAMPLES: usize = 480;
+    /// Generous cap on a single Opus frame's bytes. At ≤32 kbps/10 ms a
+    /// frame is ~50 bytes; 512 leaves headroom for higher rates / FEC
     /// while still bounding the per-packet allocation.
     pub const MAX_OPUS_PAYLOAD: usize = 512;
 

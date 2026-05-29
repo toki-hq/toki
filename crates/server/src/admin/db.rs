@@ -140,6 +140,30 @@ impl AdminDb {
                     name       TEXT NOT NULL,
                     updated_at INTEGER NOT NULL DEFAULT 0
                 );
+
+                -- Time-series metrics, one row per minute (see metrics.rs).
+                -- `ts` is unix seconds; rx/tx are bytes/sec averaged over
+                -- the sample interval. Pruned past the retention window.
+                CREATE TABLE IF NOT EXISTS metrics_samples (
+                    ts           INTEGER PRIMARY KEY NOT NULL,
+                    rx_bps       INTEGER NOT NULL,
+                    tx_bps       INTEGER NOT NULL,
+                    users        INTEGER NOT NULL,
+                    transmitting INTEGER NOT NULL
+                );
+
+                -- Audit log: admin actions, security/auth events, and peer
+                -- connect/disconnect. Append-only; paged newest-first by id.
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts        INTEGER NOT NULL,
+                    kind      TEXT NOT NULL,
+                    actor     TEXT NOT NULL,
+                    frequency TEXT NOT NULL DEFAULT '',
+                    detail    TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS audit_log_id_idx ON audit_log(id);
+                CREATE INDEX IF NOT EXISTS metrics_ts_idx ON metrics_samples(ts);
                 "#,
             )?;
             // Upgrade path: a db that pre-dates the grpc_password
@@ -275,6 +299,161 @@ impl AdminDb {
     pub async fn clear_all_channel_names(&self) -> Result<()> {
         self.with_conn(|c| {
             c.execute("DELETE FROM channel_names", [])?;
+            Ok(())
+        })
+        .await
+    }
+
+    // ── Metrics time-series ───────────────────────────────────────
+
+    /// Append one metrics sample (1-minute cadence). `INSERT OR REPLACE`
+    /// keeps the `ts` PK unique if two ticks ever land in the same second.
+    pub async fn insert_metric_sample(
+        &self,
+        ts: i64,
+        rx_bps: u64,
+        tx_bps: u64,
+        users: u32,
+        transmitting: u32,
+    ) -> Result<()> {
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT OR REPLACE INTO metrics_samples (ts, rx_bps, tx_bps, users, transmitting) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    ts,
+                    rx_bps as i64,
+                    tx_bps as i64,
+                    users as i64,
+                    transmitting as i64
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Load samples with `ts >= since`, oldest-first.
+    pub async fn load_metrics(&self, since: i64) -> Result<Vec<MetricRow>> {
+        self.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT ts, rx_bps, tx_bps, users, transmitting FROM metrics_samples \
+                 WHERE ts >= ?1 ORDER BY ts ASC",
+            )?;
+            let rows = stmt.query_map(params![since], |r| {
+                Ok(MetricRow {
+                    ts: r.get(0)?,
+                    rx_bps: r.get::<_, i64>(1)? as u64,
+                    tx_bps: r.get::<_, i64>(2)? as u64,
+                    users: r.get::<_, i64>(3)? as u32,
+                    transmitting: r.get::<_, i64>(4)? as u32,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Delete metrics rows older than `cutoff` (unix seconds).
+    pub async fn prune_metrics(&self, cutoff: i64) -> Result<()> {
+        self.with_conn(move |c| {
+            c.execute("DELETE FROM metrics_samples WHERE ts < ?1", params![cutoff])?;
+            Ok(())
+        })
+        .await
+    }
+
+    // ── Audit log ─────────────────────────────────────────────────
+
+    /// Append an audit entry. Caller supplies the unix timestamp so the
+    /// recorder controls clock semantics.
+    pub async fn insert_audit(
+        &self,
+        ts: i64,
+        kind: &str,
+        actor: &str,
+        frequency: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let (kind, actor, frequency, detail) = (
+            kind.to_string(),
+            actor.to_string(),
+            frequency.to_string(),
+            detail.to_string(),
+        );
+        self.with_conn(move |c| {
+            c.execute(
+                "INSERT INTO audit_log (ts, kind, actor, frequency, detail) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![ts, kind, actor, frequency, detail],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Page the audit log newest-first. `kinds` is the set of allowed
+    /// `kind` values for the active filter (empty = no filter / ALL).
+    /// `before_id` of 0 means the newest page; otherwise rows with
+    /// `id < before_id`. Returns `(rows, total_matching)`.
+    pub async fn load_audit(
+        &self,
+        kinds: &[&str],
+        limit: u32,
+        before_id: u64,
+    ) -> Result<(Vec<AuditRow>, u64)> {
+        // Build the optional `kind IN (...)` clause from a fixed, code-
+        // supplied vocabulary (never user input) — safe to interpolate.
+        let kind_list: Vec<String> = kinds.iter().map(|k| format!("'{k}'")).collect();
+        let kind_clause = if kind_list.is_empty() {
+            String::new()
+        } else {
+            format!(" AND kind IN ({})", kind_list.join(","))
+        };
+        let before_clause = if before_id > 0 {
+            format!(" AND id < {before_id}")
+        } else {
+            String::new()
+        };
+        let limit = limit.clamp(1, 500);
+        self.with_conn(move |c| {
+            let total: i64 = c.query_row(
+                &format!("SELECT COUNT(*) FROM audit_log WHERE 1=1{kind_clause}"),
+                [],
+                |r| r.get(0),
+            )?;
+            let sql = format!(
+                "SELECT id, ts, kind, actor, frequency, detail FROM audit_log \
+                 WHERE 1=1{kind_clause}{before_clause} ORDER BY id DESC LIMIT {limit}"
+            );
+            let mut stmt = c.prepare(&sql)?;
+            let rows = stmt.query_map([], |r| {
+                Ok(AuditRow {
+                    id: r.get::<_, i64>(0)? as u64,
+                    ts: r.get(1)?,
+                    kind: r.get(2)?,
+                    actor: r.get(3)?,
+                    frequency: r.get(4)?,
+                    detail: r.get(5)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            Ok((out, total as u64))
+        })
+        .await
+    }
+
+    /// Delete audit rows older than `cutoff` (unix seconds).
+    pub async fn prune_audit(&self, cutoff: i64) -> Result<()> {
+        self.with_conn(move |c| {
+            c.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff])?;
             Ok(())
         })
         .await
@@ -465,6 +644,27 @@ impl AdminDb {
 pub struct SessionRow {
     pub username: String,
     pub expires_at: i64,
+}
+
+/// One metrics time-series row (see [`AdminDb::load_metrics`]).
+#[derive(Debug, Clone)]
+pub struct MetricRow {
+    pub ts: i64,
+    pub rx_bps: u64,
+    pub tx_bps: u64,
+    pub users: u32,
+    pub transmitting: u32,
+}
+
+/// One audit-log row (see [`AdminDb::load_audit`]).
+#[derive(Debug, Clone)]
+pub struct AuditRow {
+    pub id: u64,
+    pub ts: i64,
+    pub kind: String,
+    pub actor: String,
+    pub frequency: String,
+    pub detail: String,
 }
 
 /// Idempotently add a column to a table. SQLite has no
@@ -806,6 +1006,63 @@ mod tests {
 
         db.clear_all_channel_names().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn metrics_insert_load_prune() {
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        for ts in [100, 200, 300] {
+            db.insert_metric_sample(ts, ts as u64, (ts / 2) as u64, 3, 1)
+                .await
+                .unwrap();
+        }
+        let all = db.load_metrics(0).await.unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].ts, 100); // oldest-first
+        assert_eq!(all[2].rx_bps, 300);
+        // since-filter
+        assert_eq!(db.load_metrics(250).await.unwrap().len(), 1);
+        // prune drops rows strictly older than the cutoff
+        db.prune_metrics(200).await.unwrap();
+        let kept = db.load_metrics(0).await.unwrap();
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].ts, 200);
+    }
+
+    #[tokio::test]
+    async fn audit_insert_load_filter_page_prune() {
+        let db = AdminDb::open_in_memory().unwrap();
+        db.migrate().await.unwrap();
+        db.insert_audit(10, "connect", "A", "", "").await.unwrap();
+        db.insert_audit(20, "kick", "admin", "446.05", "")
+            .await
+            .unwrap();
+        db.insert_audit(30, "auth-fail", "SYSTEM", "", "")
+            .await
+            .unwrap();
+
+        // No filter (ALL), newest-first.
+        let (rows, total) = db.load_audit(&[], 50, 0).await.unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(rows[0].kind, "auth-fail");
+
+        // Category filter.
+        let (rows, total) = db.load_audit(&["kick", "rename"], 50, 0).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].kind, "kick");
+
+        // Paging via before_id (id of the newest row is 3).
+        let newest_id = db.load_audit(&[], 1, 0).await.unwrap().0[0].id;
+        let (page2, _) = db.load_audit(&[], 50, newest_id).await.unwrap();
+        assert_eq!(page2.len(), 2);
+        assert!(page2.iter().all(|r| r.id < newest_id));
+
+        // Prune older than 25 → drops the two oldest.
+        db.prune_audit(25).await.unwrap();
+        let (rows, total) = db.load_audit(&[], 50, 0).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(rows[0].kind, "auth-fail");
     }
 
     #[cfg(unix)]

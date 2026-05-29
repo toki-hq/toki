@@ -32,6 +32,7 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
         password.map(|s| s.to_string()),
         server_config::shared_default(),
         state::shared_channel_names(Default::default()),
+        toki_server::audit::channel().0,
     );
 
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -241,6 +242,7 @@ async fn boot_with_config(
         None,
         server_config,
         state::shared_channel_names(Default::default()),
+        toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
@@ -289,6 +291,7 @@ async fn boot_with_passwords(
         toml_password.map(|s| s.to_string()),
         server_config,
         state::shared_channel_names(Default::default()),
+        toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {

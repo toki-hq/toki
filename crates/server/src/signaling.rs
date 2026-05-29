@@ -14,6 +14,7 @@ use toki_proto::v1::{
     RegisterRequest, RegisterResponse,
 };
 
+use crate::audit::{self, AuditSink};
 use crate::server_config::SharedServerConfig;
 use crate::state::{hash_token, Client, Registry, SharedChannelNames, SharedRegistry};
 use crate::throttle::{IpThrottle, ThrottleReject};
@@ -44,6 +45,9 @@ pub struct SignalingSvc {
     /// `ChangeFrequency` to deliver the current name to the client —
     /// but only while `server_config.named_channels_enabled` is on.
     channel_names: SharedChannelNames,
+    /// Audit-log sink. Records peer connects (on `Register`), explicit
+    /// disconnects (on `Leave`), and failed password attempts.
+    audit: AuditSink,
 }
 
 impl SignalingSvc {
@@ -53,6 +57,7 @@ impl SignalingSvc {
         toml_password: Option<String>,
         server_config: SharedServerConfig,
         channel_names: SharedChannelNames,
+        audit: AuditSink,
     ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
             registry,
@@ -61,6 +66,7 @@ impl SignalingSvc {
             throttle: IpThrottle::new(),
             server_config,
             channel_names,
+            audit,
         })
     }
 
@@ -190,6 +196,16 @@ impl Signaling for SignalingSvc {
                     name = %display_name,
                     "register rejected: bad password"
                 );
+                audit::record(
+                    &self.audit,
+                    "auth-fail",
+                    audit::SYSTEM_ACTOR,
+                    "",
+                    &format!(
+                        "bad server password from {} (callsign {display_name})",
+                        peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+                    ),
+                );
                 return Err(Status::unauthenticated("invalid password"));
             }
         }
@@ -279,6 +295,16 @@ impl Signaling for SignalingSvc {
             name = %display_name,
             total_clients = total,
             "client registered",
+        );
+        audit::record(
+            &self.audit,
+            "connect",
+            &display_name,
+            "",
+            &format!(
+                "from {}",
+                peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+            ),
         );
 
         Ok(Response::new(RegisterResponse {
@@ -439,6 +465,7 @@ impl Signaling for SignalingSvc {
             members = remaining,
             "client left frequency",
         );
+        audit::record(&self.audit, "disconnect", &display_name, &frequency, "left");
 
         for tx in &recipients {
             let _ = tx.send(left_event.clone()).await;

@@ -74,6 +74,8 @@ docker run -p 50051:50051/tcp -p 50051:50051/udp -p 8000:8000 \
 Browse to `https://<host>:8000` (self-signed cert → expect a browser warning, or front it with a reverse proxy). Grab the seeded `admin` password from the server's startup log. The panel offers:
 
 - **Live dashboard** (gRPC-Web `Watch` stream) — members per frequency, current PTT holder, session age; updates on a 1 Hz tick and immediately after any admin action.
+- **Metrics & KPIs** — time-series charts of voice-relay **bandwidth (ingress/egress)** and **users over time** (selectable 1h / 24h / 7d window), plus uptime / peers / transmitting / busiest-channel KPIs and a host-health card (CPU, memory, disk via `sysinfo`). Samples persist to `admin.db` at 1-minute resolution (7-day retention); the UDP relay's byte counters feed the bandwidth series.
+- **Audit log** — persistent record of admin actions (kick / move / rename / priority / channel-name / config / passwords), security events (admin + client auth success/failure), and peer connect/disconnect. Filter by category, page back through history, and export JSONL. Retained 30 days.
 - **Operator actions** — kick, move to frequency, rename callsign.
 - **Voice priority** — elect a member as a priority speaker on a channel; their PTT preempts a non-priority holder mid-transmission (the cut-off speaker is bumped, the channel hears a distinct priority roger). First-come among priority members.
 - **Named channels** — give any frequency a human-readable name (≤16 chars) that clients see beside their tuner. Names persist across emptiness and update live; clear one channel's name or wipe them all. Gated by a Settings toggle (off by default) — while off, clients never receive names and the editor is disabled.

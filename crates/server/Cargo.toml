@@ -90,6 +90,10 @@ mime_guess = "2"
 # Tower is needed at runtime now (not just tests) to layer GrpcWebLayer
 # + the auth interceptor onto the admin gRPC service.
 tower = "0.5"
+# Host-health metrics (CPU / memory / disk) for the admin dashboard.
+# `default-features = false` + only the components we read keeps the
+# build surface (and platform syscalls) minimal; pure-Rust, no C deps.
+sysinfo = { version = "0.32", default-features = false, features = ["system", "disk"] }
 
 [dev-dependencies]
 # Used to serialise individual tests that mutate process-global

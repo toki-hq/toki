@@ -22,6 +22,7 @@ use tracing::info;
 
 use toki_proto::v1::{event, Event, MemberLeft, PttEvent};
 
+use crate::audit::{self, AuditSink};
 use crate::server_config::SharedServerConfig;
 use crate::state::SharedRegistry;
 
@@ -32,7 +33,7 @@ use crate::state::SharedRegistry;
 /// almost never want anything other than ~2 s.
 pub const INTERVAL: Duration = Duration::from_secs(2);
 
-pub async fn run(registry: SharedRegistry, server_config: SharedServerConfig) {
+pub async fn run(registry: SharedRegistry, server_config: SharedServerConfig, audit: AuditSink) {
     info!(interval = ?INTERVAL, "heartbeat reaper running");
     let mut ticker = tokio::time::interval(INTERVAL);
     ticker.tick().await; // consume the immediate first tick
@@ -43,11 +44,11 @@ pub async fn run(registry: SharedRegistry, server_config: SharedServerConfig) {
         // — at the cost of one extra RwLock read every 2 s, which is
         // unmeasurable.
         let timeout = Duration::from_secs(server_config.read().await.idle_kick_secs as u64);
-        reap_once(&registry, timeout).await;
+        reap_once(&registry, timeout, &audit).await;
     }
 }
 
-async fn reap_once(registry: &SharedRegistry, timeout: Duration) {
+async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSink) {
     // Do all the registry mutation in a single critical section, and
     // collect the broadcast work to do once the lock is released. tx.send
     // on an mpsc channel can in principle .await on a full buffer, which
@@ -69,6 +70,17 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration) {
                 continue;
             };
             r.tokens.remove(&client.audio_token_hash);
+
+            // Audit every eviction as a disconnect (incl. clients that
+            // never joined a room). The sink is an unbounded channel, so
+            // this send is synchronous and safe under the registry lock.
+            audit::record(
+                audit,
+                "disconnect",
+                &client.display_name,
+                client.current_frequency.as_deref().unwrap_or(""),
+                "idle timeout",
+            );
 
             // Pull them out of their frequency room (if any). Mirror
             // of `Signaling::leave`'s cleanup, minus the explicit RPC.

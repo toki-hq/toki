@@ -191,7 +191,14 @@ function ChannelRow({
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="font-mono text-sm tabular">{room.frequency}</span>
-        {name && <span className="truncate text-xs text-primary/80">{name}</span>}
+        <span
+          className={cn(
+            "truncate text-xs",
+            name ? "text-primary/80" : "font-mono text-muted-foreground/50",
+          )}
+        >
+          {name || "--"}
+        </span>
       </span>
       {room.holder && (
         <span className="size-2 rounded-full bg-warning shadow-[0_0_6px] shadow-warning" />

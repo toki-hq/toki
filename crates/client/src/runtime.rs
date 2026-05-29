@@ -32,7 +32,7 @@ use toki_proto::wire::{
     OPUS_FRAME_SAMPLES, SEQ_LEN, TAG_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
 };
 
-use crate::audio::{self, push_playback, BeepParams, PlaybackBuf};
+use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
 use crate::state::{ConnState, SharedState};
 
 pub enum Cmd {
@@ -864,7 +864,9 @@ impl Session {
                                 continue;
                             }
                         };
-                        push_playback(&playback, &samples);
+                        // Latency-managed: keeps the voice backlog tight
+                        // so playback can't fall progressively behind.
+                        push_voice(&playback, &samples);
                     }
                     Err(e) => {
                         warn!(error = %e, "udp recv error");

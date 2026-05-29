@@ -208,6 +208,7 @@ mod tests {
             Room {
                 members: vec!["a".into(), "b".into()],
                 holder: Some("a".into()),
+                ..Default::default()
             },
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
@@ -238,6 +239,7 @@ mod tests {
             Room {
                 members: vec!["a".into(), "b".into()],
                 holder: None,
+                ..Default::default()
             },
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
@@ -266,6 +268,7 @@ mod tests {
             Room {
                 members: vec!["a".into()],
                 holder: None,
+                ..Default::default()
             },
         );
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));

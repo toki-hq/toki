@@ -735,7 +735,26 @@ impl Signaling for SignalingSvc {
                         sender_is_priority,
                     );
                     if let Some(d) = &decision {
-                        room.holder = d.new_holder.clone();
+                        match &d.new_holder {
+                            // A new holder took the floor (press or
+                            // priority preemption): void any release-grace
+                            // so the previous holder's residual UDP tail
+                            // can't bleed into this fresh transmission.
+                            Some(new) => {
+                                room.holder = Some(new.clone());
+                                room.last_released = None;
+                            }
+                            // Floor released: remember who just let go and
+                            // when, so the relay forwards their final
+                            // in-flight UDP frames for a short grace window
+                            // (UDP lags the reliable PttUp that cleared the
+                            // floor). See `Room::last_released`.
+                            None => {
+                                if let Some(prev) = room.holder.take() {
+                                    room.last_released = Some((prev, std::time::Instant::now()));
+                                }
+                            }
+                        }
                     }
                     decision.map(|d| (d.pressed, d.priority))
                 };

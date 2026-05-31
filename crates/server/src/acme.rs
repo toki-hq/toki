@@ -259,11 +259,32 @@ async fn issue(
         .await
         .context("poll ACME order to ready")?;
     if status != OrderStatus::Ready {
+        // Gather per-authorization failure detail from the server so the
+        // operator sees *why* (e.g. the HTTP-01 fetch 404'd because
+        // something else owns port 80) instead of a bare "Invalid".
+        let mut details = Vec::new();
+        {
+            let mut authorizations = order.authorizations();
+            while let Some(Ok(authz)) = authorizations.next().await {
+                let domain = authz.identifier();
+                for ch in &authz.challenges {
+                    if let Some(problem) = &ch.error {
+                        details.push(format!("{domain}: {problem}"));
+                    }
+                }
+            }
+        }
         // Clear our challenge entries before bailing.
         if let Ok(mut map) = challenges.write() {
             map.clear();
         }
-        anyhow::bail!("ACME order did not become ready (status {status:?})");
+        if details.is_empty() {
+            anyhow::bail!("ACME order did not become ready (status {status:?})");
+        }
+        anyhow::bail!(
+            "ACME authorization failed (status {status:?}): {}",
+            details.join("; ")
+        );
     }
 
     let key_pem = order.finalize().await.context("finalize ACME order")?;

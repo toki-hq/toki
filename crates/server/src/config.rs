@@ -129,6 +129,11 @@ pub const ENV_ACME_ENABLED: &str = "TOKI_ACME_ENABLED";
 pub const ENV_ACME_DOMAINS: &str = "TOKI_ACME_DOMAINS";
 pub const ENV_ACME_EMAIL: &str = "TOKI_ACME_EMAIL";
 pub const ENV_ACME_STAGING: &str = "TOKI_ACME_STAGING";
+/// Accept the ACME provider's Terms of Service. Setting this to a truthy
+/// value is equivalent to `terms_of_service_agreed = true` in TOML — it
+/// lets a pure-env (Docker) deployment enable ACME without also mounting
+/// a `config.toml` just for the ToS line.
+pub const ENV_ACME_TOS_AGREED: &str = "TOKI_ACME_TOS_AGREED";
 
 /// Subdirectory (under the data dir) for ACME state: account
 /// credentials + the issued cert/key + the `issued_at` marker.
@@ -163,7 +168,7 @@ impl AcmeConfig {
     /// defaults). `TOKI_ACME_DOMAINS` is comma-separated.
     pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
         if let Ok(v) = std::env::var(ENV_ACME_ENABLED) {
-            self.enabled = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+            self.enabled = env_truthy(&v);
         }
         if let Ok(v) = std::env::var(ENV_ACME_DOMAINS) {
             self.domains = v
@@ -177,10 +182,19 @@ impl AcmeConfig {
             self.contact_email = v;
         }
         if let Ok(v) = std::env::var(ENV_ACME_STAGING) {
-            self.staging = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+            self.staging = env_truthy(&v);
+        }
+        if let Ok(v) = std::env::var(ENV_ACME_TOS_AGREED) {
+            self.terms_of_service_agreed = env_truthy(&v);
         }
         Ok(())
     }
+}
+
+/// Parse a boolean-ish env value: `1` / `true` / `yes` (case-insensitive)
+/// are true, everything else false.
+fn env_truthy(v: &str) -> bool {
+    matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes")
 }
 
 /// Admin web panel settings. All fields have defaults; an empty
@@ -718,12 +732,18 @@ mod tests {
         let _d = set_env(ENV_ACME_DOMAINS, " a.example.com , b.example.com ");
         let _m = set_env(ENV_ACME_EMAIL, "ops@example.com");
         let _s = set_env(ENV_ACME_STAGING, "1");
+        let _t = set_env(ENV_ACME_TOS_AGREED, "yes");
         let mut acme = AcmeConfig::default();
         acme.apply_env_overrides().unwrap();
         assert!(acme.enabled);
         assert_eq!(acme.domains, vec!["a.example.com", "b.example.com"]);
         assert_eq!(acme.contact_email, "ops@example.com");
         assert!(acme.staging);
+        assert!(acme.terms_of_service_agreed);
+        // A fully env-configured ACME setup must pass validation with no
+        // config.toml at all (the Docker / pure-env path).
+        acme.validate()
+            .expect("env-only ACME config should be valid");
     }
 
     #[test]

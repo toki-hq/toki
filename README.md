@@ -63,6 +63,7 @@ cargo run -p toki-client
 | `TOKI_ACME_DOMAINS` | Comma-separated domain(s) for the cert | unset |
 | `TOKI_ACME_EMAIL` | ACME account contact email | unset |
 | `TOKI_ACME_STAGING` | Use Let's Encrypt staging (testing) | `false` |
+| `TOKI_ACME_TOS_AGREED` | Accept the ACME provider's Terms of Service | `false` |
 
 Anything in the `[tls]`, `[acme]`, `[admin]`, and top-level `password` blocks of `config.toml` is overridden by the matching env var (env > TOML > defaults).
 
@@ -78,7 +79,8 @@ docker run -p 50051:50051/tcp -p 50051:50051/udp -p 8000:8000 \
 # (admin panel), and set the panel to 443. See "Automatic TLS" below.
 docker run -p 50051:50051/tcp -p 50051:50051/udp -p 80:80 -p 443:443 \
   -e TOKI_ACME_ENABLED=true -e TOKI_ACME_DOMAINS=toki.example.com \
-  -e TOKI_ACME_EMAIL=ops@example.com -e TOKI_ADMIN_PORT=443 \
+  -e TOKI_ACME_EMAIL=ops@example.com -e TOKI_ACME_TOS_AGREED=true \
+  -e TOKI_ACME_STAGING=true -e TOKI_ADMIN_PORT=443 \
   -v toki-data:/data ellessen/toki-server
 ```
 

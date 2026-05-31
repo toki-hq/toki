@@ -120,7 +120,7 @@ fn generate_self_signed(tls_dir: &Path, cert_path: &Path, key_path: &Path) -> Re
 }
 
 #[cfg(unix)]
-fn tighten_key_perms(path: &Path) {
+pub fn tighten_key_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
         tracing::warn!(error = %e, path = %path.display(), "could not chmod TLS key");

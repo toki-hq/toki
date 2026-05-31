@@ -1,6 +1,8 @@
+pub mod acme;
 pub mod admin;
 pub mod audio;
 pub mod audit;
+pub mod cert_store;
 pub mod config;
 pub mod metrics;
 pub mod reaper;

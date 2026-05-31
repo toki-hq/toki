@@ -26,7 +26,7 @@ Voice is **Opus** by default (~24 kbps/stream of audio — a ~15–20× cut vs t
 
 ## Security
 
-- **TLS is mandatory** for gRPC. The operator supplies a cert + key in `[tls]`, or the server auto-generates a self-signed pair under `<data-dir>/tls/` on first run and reuses it.
+- **TLS is mandatory** for gRPC *and* the admin panel, both served from one hot-swappable cert resolver. Cert source, in precedence order: operator `[tls]` cert/key paths > **`[acme]` Let's Encrypt** (auto-issued + auto-renewed, see [Automatic TLS](#automatic-tls-lets-encrypt)) > an auto-generated self-signed pair under `<data-dir>/tls/`. Renewals hot-swap into both listeners with no restart.
 - **Password gate** (optional): clients must echo a shared secret on `Register`. Resolution order is TOML (`password = "…"`) > runtime DB value (set from the admin panel) > open mode. Compared in constant time.
 - **UDP audio** is AEAD-encrypted, MAC-verified, replay-protected, and IP-bound — a captured token can't be replayed off-path or from another address.
 - **Admin auth**: argon2id password hashes + BLAKE3-hashed, server-revocable session cookies (HttpOnly, Secure, SameSite=Strict). First boot seeds an `admin` user with a random password logged once at `WARN`. Per-IP rate limiting on login; `admin.db` is `chmod 0600`.
@@ -37,7 +37,8 @@ Voice is **Opus** by default (~24 kbps/stream of audio — a ~15–20× cut vs t
 
 ```sh
 # server — gRPC TCP :50051, UDP audio :50051 (same number, different
-# protocol), admin panel HTTPS :8000
+# protocol), admin panel HTTPS :8000 (self-signed by default; see
+# "Automatic TLS" for a real Let's Encrypt cert)
 cargo run -p toki-server
 
 # client
@@ -58,8 +59,12 @@ cargo run -p toki-client
 | `TOKI_ADMIN_DB_PATH` | SQLite path for admin users/sessions/config | `admin.db` (under data dir) |
 | `TOKI_ADMIN_SESSION_TTL_HOURS` | Admin session lifetime | `12` |
 | `TOKI_ADMIN_HTTP_REDIRECT_PORT` | Optional plain-HTTP listener that 308-redirects to HTTPS | unset (disabled) |
+| `TOKI_ACME_ENABLED` | Enable Let's Encrypt (ACME HTTP-01) | `false` |
+| `TOKI_ACME_DOMAINS` | Comma-separated domain(s) for the cert | unset |
+| `TOKI_ACME_EMAIL` | ACME account contact email | unset |
+| `TOKI_ACME_STAGING` | Use Let's Encrypt staging (testing) | `false` |
 
-Anything in the `[tls]`, `[admin]`, and top-level `password` blocks of `config.toml` is overridden by the matching env var (env > TOML > defaults).
+Anything in the `[tls]`, `[acme]`, `[admin]`, and top-level `password` blocks of `config.toml` is overridden by the matching env var (env > TOML > defaults).
 
 ### Docker
 
@@ -68,7 +73,40 @@ docker pull ellessen/toki-server:latest
 # state (certs, admin.db) lives under /data
 docker run -p 50051:50051/tcp -p 50051:50051/udp -p 8000:8000 \
   -v toki-data:/data ellessen/toki-server
+
+# With Let's Encrypt: publish 80 (ACME challenge + redirect) and 443
+# (admin panel), and set the panel to 443. See "Automatic TLS" below.
+docker run -p 50051:50051/tcp -p 50051:50051/udp -p 80:80 -p 443:443 \
+  -e TOKI_ACME_ENABLED=true -e TOKI_ACME_DOMAINS=toki.example.com \
+  -e TOKI_ACME_EMAIL=ops@example.com -e TOKI_ADMIN_PORT=443 \
+  -v toki-data:/data ellessen/toki-server
 ```
+
+### Automatic TLS (Let's Encrypt)
+
+Toki can obtain and renew a browser-trusted certificate via **ACME HTTP-01** — no reverse proxy, no manual cert wrangling. Enable it in `config.toml`:
+
+```toml
+[acme]
+enabled = true
+domains = ["toki.example.com"]      # public DNS name(s) → this server
+contact_email = "ops@example.com"
+terms_of_service_agreed = true       # required (Let's Encrypt ToS)
+staging = true                       # test first; flip to false for a real cert
+
+[admin]
+port = 443                           # serve the panel on standard HTTPS
+```
+
+**Requirements / how it works:**
+
+- **Public domain + port 80.** HTTP-01 validates on port 80 *only* — Let's Encrypt fetches `http://<domain>/.well-known/acme-challenge/…` during issuance **and every ~60-day renewal**, so port 80 must stay reachable from the internet. Bare IPs can't get a cert.
+- **Port topology:** **80** = ACME challenge + 308 redirect to HTTPS; **443** = admin panel (set `[admin].port = 443` so `https://<host>/` works); **50051** = gRPC signaling + UDP audio (client-dialed). Publish 80 + 443 + 50051(tcp+udp).
+- **Privileged ports:** binding 80/443 needs root, `CAP_NET_BIND_SERVICE`, or Docker port publishing.
+- **Resilient + hot:** the server boots immediately on a self-signed (or cached) cert, obtains the real cert in the background, and **hot-swaps** it into both the gRPC and admin listeners — and again on each renewal — with no restart. The account + issued cert are cached under `<data-dir>/tls/acme/` and reused across restarts.
+- **Test with `staging = true` first** (untrusted root, far higher rate limits); once issuance works end-to-end, set `staging = false` for a real, browser-trusted cert.
+
+> Note: the desktop client currently trusts any server cert, so a real cert removes the admin-panel browser warning and is correct PKI hygiene, but client-side validation of the gRPC cert is a separate hardening step.
 
 ## Admin panel
 

@@ -42,10 +42,13 @@ ENV TOKI_CONFIG=/data/config.toml
 USER toki
 
 # gRPC + audio share port 50051 (TCP for gRPC, UDP for audio — the
-# kernel keys binds by `(protocol, port)`, so they coexist). 8000
-# is the admin web panel. Declaring the protocol explicitly so
-# `docker run -P` / `docker inspect` know to publish the UDP side
-# as well — bare `EXPOSE 50051` defaults to TCP only.
-EXPOSE 50051/tcp 50051/udp 8000/tcp
+# kernel keys binds by `(protocol, port)`, so they coexist). 8000 is
+# the admin web panel's default port. 80 + 443 are for Let's Encrypt
+# (ACME HTTP-01): when `[acme]` is enabled the operator typically sets
+# `[admin].port = 443` and publishes 80 (challenge + HTTP→HTTPS redirect)
+# and 443 (panel). Declaring protocols explicitly so `docker run -P` /
+# `docker inspect` publish the UDP side too — bare `EXPOSE 50051`
+# defaults to TCP only.
+EXPOSE 50051/tcp 50051/udp 8000/tcp 80/tcp 443/tcp
 
 ENTRYPOINT ["./entrypoint.sh"]

@@ -59,6 +59,128 @@ pub struct Config {
     /// loopback to keep it private.
     #[serde(default)]
     pub admin: AdminConfig,
+
+    /// Automatic TLS via Let's Encrypt (ACME HTTP-01). Disabled by
+    /// default. When enabled with a domain + agreed ToS, the server
+    /// obtains a browser-trusted cert on first boot and renews it in
+    /// the background, hot-swapping it into both the gRPC and admin
+    /// listeners with no restart. A parallel cert *source* to `[tls]`;
+    /// precedence is explicit `[tls]` paths > `[acme]` > self-signed.
+    #[serde(default)]
+    pub acme: AcmeConfig,
+}
+
+/// Automatic-certificate (ACME / Let's Encrypt) settings. All fields
+/// default to "off", so an absent `[acme]` block leaves the server on
+/// its self-signed / operator-`[tls]` path exactly as before.
+///
+/// HTTP-01 has hard external requirements the operator must satisfy:
+/// a public DNS name resolving to this host, and inbound **port 80**
+/// reachable from the internet for issuance *and* every renewal.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AcmeConfig {
+    /// Master switch. Even with domains set, ACME stays dormant unless
+    /// this is `true` — avoids surprise external calls / port-80 binds.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Domain(s) the cert is issued for. The first is the primary; any
+    /// extras become SANs. Bare IPs are invalid for Let's Encrypt.
+    #[serde(default)]
+    pub domains: Vec<String>,
+    /// Contact email registered with the ACME account (expiry notices).
+    #[serde(default)]
+    pub contact_email: String,
+    /// Must be `true` to proceed — the operator agrees to the ACME
+    /// provider's Terms of Service (Let's Encrypt requires this). We
+    /// refuse to boot with ACME enabled but ToS not agreed.
+    #[serde(default)]
+    pub terms_of_service_agreed: bool,
+    /// Use Let's Encrypt's *staging* directory (untrusted roots, far
+    /// higher rate limits) while testing the setup. Flip to `false`
+    /// for real, browser-trusted certs once issuance works end-to-end.
+    #[serde(default)]
+    pub staging: bool,
+    /// Bind address for the port-80 listener that serves the HTTP-01
+    /// challenge and 308-redirects everything else to HTTPS. Must be
+    /// publicly reachable on port 80; `0.0.0.0:80` by default.
+    #[serde(default = "default_acme_http_bind")]
+    pub http_bind: String,
+}
+
+impl Default for AcmeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            domains: Vec::new(),
+            contact_email: String::new(),
+            terms_of_service_agreed: false,
+            staging: false,
+            http_bind: default_acme_http_bind(),
+        }
+    }
+}
+
+fn default_acme_http_bind() -> String {
+    "0.0.0.0:80".to_string()
+}
+
+/// Env-var overrides for `[acme]`, mirroring the `[admin]` pattern.
+pub const ENV_ACME_ENABLED: &str = "TOKI_ACME_ENABLED";
+pub const ENV_ACME_DOMAINS: &str = "TOKI_ACME_DOMAINS";
+pub const ENV_ACME_EMAIL: &str = "TOKI_ACME_EMAIL";
+pub const ENV_ACME_STAGING: &str = "TOKI_ACME_STAGING";
+
+/// Subdirectory (under the data dir) for ACME state: account
+/// credentials + the issued cert/key + the `issued_at` marker.
+pub const DEFAULT_ACME_DIR: &str = "tls/acme";
+
+impl AcmeConfig {
+    /// Whether ACME issuance should actually run: explicitly enabled
+    /// and at least one domain configured.
+    pub fn is_active(&self) -> bool {
+        self.enabled && !self.domains.is_empty()
+    }
+
+    /// Validate an active ACME config. Surfaces operator mistakes as a
+    /// clear boot failure rather than a confusing ACME error later.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.is_active() {
+            return Ok(());
+        }
+        if self.contact_email.trim().is_empty() {
+            anyhow::bail!("[acme] enabled but contact_email is empty");
+        }
+        if !self.terms_of_service_agreed {
+            anyhow::bail!(
+                "[acme] enabled but terms_of_service_agreed = false; \
+                 set it to true to accept the ACME provider's Terms of Service"
+            );
+        }
+        Ok(())
+    }
+
+    /// Apply `TOKI_ACME_*` env vars over the TOML values (env > TOML >
+    /// defaults). `TOKI_ACME_DOMAINS` is comma-separated.
+    pub fn apply_env_overrides(&mut self) -> anyhow::Result<()> {
+        if let Ok(v) = std::env::var(ENV_ACME_ENABLED) {
+            self.enabled = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var(ENV_ACME_DOMAINS) {
+            self.domains = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+        }
+        if let Ok(v) = std::env::var(ENV_ACME_EMAIL) {
+            self.contact_email = v;
+        }
+        if let Ok(v) = std::env::var(ENV_ACME_STAGING) {
+            self.staging = matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        Ok(())
+    }
 }
 
 /// Admin web panel settings. All fields have defaults; an empty
@@ -254,6 +376,8 @@ impl Config {
             None => (Self::default(), None),
         };
         cfg.admin.apply_env_overrides()?;
+        cfg.acme.apply_env_overrides()?;
+        cfg.acme.validate()?;
         Ok((cfg, path))
     }
 
@@ -533,6 +657,73 @@ mod tests {
             resolve_under(Path::new("/var/lib/toki"), rel),
             PathBuf::from("/var/lib/toki/admin.db")
         );
+    }
+
+    #[test]
+    fn acme_absent_is_disabled() {
+        let cfg: Config = toml::from_str("password = \"x\"").unwrap();
+        assert!(!cfg.acme.enabled);
+        assert!(!cfg.acme.is_active());
+        assert_eq!(cfg.acme.http_bind, "0.0.0.0:80");
+    }
+
+    #[test]
+    fn acme_block_round_trips() {
+        let raw = r#"
+            [acme]
+            enabled = true
+            domains = ["toki.example.com", "alt.example.com"]
+            contact_email = "ops@example.com"
+            terms_of_service_agreed = true
+            staging = true
+        "#;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.acme.is_active());
+        assert_eq!(
+            cfg.acme.domains,
+            vec!["toki.example.com", "alt.example.com"]
+        );
+        assert_eq!(cfg.acme.contact_email, "ops@example.com");
+        assert!(cfg.acme.staging);
+        cfg.acme.validate().expect("valid active config");
+    }
+
+    #[test]
+    fn acme_validate_requires_email_and_tos() {
+        let no_email = AcmeConfig {
+            enabled: true,
+            domains: vec!["toki.example.com".into()],
+            terms_of_service_agreed: true,
+            ..AcmeConfig::default()
+        };
+        assert!(no_email.validate().is_err(), "missing email must fail");
+
+        let no_tos = AcmeConfig {
+            enabled: true,
+            domains: vec!["toki.example.com".into()],
+            contact_email: "ops@example.com".into(),
+            terms_of_service_agreed: false,
+            ..AcmeConfig::default()
+        };
+        assert!(no_tos.validate().is_err(), "ToS not agreed must fail");
+
+        // Inactive (disabled) configs always validate, even if incomplete.
+        assert!(AcmeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn acme_env_overrides() {
+        let _e = set_env(ENV_ACME_ENABLED, "true");
+        let _d = set_env(ENV_ACME_DOMAINS, " a.example.com , b.example.com ");
+        let _m = set_env(ENV_ACME_EMAIL, "ops@example.com");
+        let _s = set_env(ENV_ACME_STAGING, "1");
+        let mut acme = AcmeConfig::default();
+        acme.apply_env_overrides().unwrap();
+        assert!(acme.enabled);
+        assert_eq!(acme.domains, vec!["a.example.com", "b.example.com"]);
+        assert_eq!(acme.contact_email, "ops@example.com");
+        assert!(acme.staging);
     }
 
     #[test]

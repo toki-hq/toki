@@ -44,6 +44,24 @@ rcgen = "0.13"
 # startup. Dep is explicit so the feature flags can't drift even
 # if tonic's transitives change.
 rustls = { version = "0.23", features = ["ring"] }
+# PEM → DER parsing for the cert chain + private key we feed into the
+# shared rustls cert resolver (both at boot and on each ACME renewal).
+rustls-pemfile = "2"
+# Lock-free atomic cert swap behind the shared `ResolvesServerCert`
+# resolver, so a Let's Encrypt renewal can hot-swap the cert that both
+# the gRPC and admin listeners serve — no restart, no handshake stall.
+arc-swap = "1"
+# We terminate the gRPC TLS handshake ourselves (instead of tonic's
+# static `ServerTlsConfig::identity`) so the cert can be swapped at
+# runtime via the resolver above; `tokio-rustls` is the acceptor. Pinned
+# to the same minor tonic already resolves so there's one rustls in the tree.
+tokio-rustls = "0.26"
+# ACME (Let's Encrypt) client for automatic certificate issuance +
+# renewal via the HTTP-01 challenge. Pure-Rust; `default-features =
+# false` + `ring` keeps the aws-lc-rs C toolchain (and any openssl) out
+# of the build, matching Toki's no-openssl posture. `hyper-rustls` is
+# its HTTPS transport to the ACME directory.
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "ring"] }
 
 # --- Admin web panel ---
 #

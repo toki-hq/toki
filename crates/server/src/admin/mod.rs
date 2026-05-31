@@ -47,10 +47,10 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use axum::{
-    extract::{OriginalUri, State},
+    extract::{OriginalUri, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::Redirect,
-    routing::any,
+    routing::{any, get},
     Router,
 };
 use axum_server::tls_rustls::RustlsConfig;
@@ -58,13 +58,13 @@ use tonic_web::GrpcWebLayer;
 
 use toki_proto::admin::v1::admin_server::AdminServer;
 
+use crate::acme::ChallengeMap;
 use crate::audit::AuditSink;
 use crate::config::AdminConfig;
 use crate::metrics::{SharedByteCounters, SharedHealth, SharedLiveRate};
 use crate::server_config::SharedServerConfig;
 use crate::state::{SharedChannelNames, SharedRegistry};
 use crate::throttle::IpThrottle;
-use crate::tls::TlsMaterial;
 
 pub mod auth;
 pub mod db;
@@ -158,7 +158,7 @@ pub struct AppState {
 pub async fn run(
     cfg: AdminConfig,
     registry: SharedRegistry,
-    tls_material: TlsMaterial,
+    tls_config: Arc<rustls::ServerConfig>,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
     byte_counters: SharedByteCounters,
@@ -166,6 +166,11 @@ pub async fn run(
     audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
     data_dir: std::path::PathBuf,
     toml_password_override: bool,
+    // When ACME is active, `main.rs` passes the challenge map + the
+    // port-80 bind so this task can answer HTTP-01 validations (and
+    // 308-redirect everything else). `None` → fall back to the optional
+    // `http_redirect_port` plain-HTTP redirect listener.
+    acme_http: Option<(String, ChallengeMap)>,
 ) -> Result<()> {
     let bind: SocketAddr = format!("{}:{}", cfg.bind, cfg.port)
         .parse()
@@ -283,33 +288,37 @@ pub async fn run(
         .merge(grpc_router)
         .fallback(handlers::spa);
 
-    // Build a RustlsConfig from the PEM bytes we already have in
-    // hand. `from_pem` parses them via `rustls-pemfile`; the result
-    // is reloadable but we don't expose that — operators who rotate
-    // certs can restart the server. Same identity as the gRPC
-    // channel: cert source is the operator's `[tls]` block, or our
-    // auto-generated `tls/cert.pem` on first boot.
-    let tls_cfg =
-        RustlsConfig::from_pem(tls_material.cert_pem.clone(), tls_material.key_pem.clone())
-            .await
-            .context("admin: build RustlsConfig from PEM")?;
+    // Build the admin TLS config from the *shared* rustls ServerConfig
+    // (built in `main.rs` around the swappable cert resolver). Because
+    // the resolver is dynamic, an ACME renewal is picked up live on the
+    // next handshake — no `reload`, no restart, same cert as the gRPC
+    // port. ALPN is `h2 + http/1.1` so both browsers and h2 clients work.
+    let tls_cfg = RustlsConfig::from_config(tls_config);
 
-    tracing::info!(
-        %bind,
-        cert_source = %tls_material.source.display(),
-        "admin panel listening (HTTPS)",
-    );
+    tracing::info!(%bind, "admin panel listening (HTTPS)");
 
-    // Optional plain-HTTP listener that 308-redirects every request
-    // to the HTTPS counterpart. The admin panel is TLS-only, so an
-    // operator who types `http://host:8000` would otherwise get a
-    // raw TLS-handshake error. When `http_redirect_port` is set, we
-    // bind a second listener on `bind:that_port` that returns a 308
-    // for every method + path; modern browsers preserve the method
-    // (so POST/PUT survive) and cache the upgrade per-origin.
+    // Port-80 / plain-HTTP listener. Three modes, in priority order:
+    //   1. ACME active → bind the configured ACME address (`0.0.0.0:80`)
+    //      and serve `/.well-known/acme-challenge/{token}` from the
+    //      shared challenge map, 308-redirecting everything else to
+    //      HTTPS. ACME owns port 80, so this supersedes `http_redirect_port`.
+    //   2. `http_redirect_port` set → plain 308-redirect listener (so a
+    //      browser typing `http://host:port` upgrades cleanly).
+    //   3. neither → no second listener.
     let redirect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
-        match cfg.http_redirect_port {
-            Some(http_port) => {
+        match (acme_http, cfg.http_redirect_port) {
+            (Some((acme_bind, challenges)), _) => {
+                let http_bind: SocketAddr = acme_bind
+                    .parse()
+                    .with_context(|| format!("parse ACME HTTP bind {acme_bind}"))?;
+                tracing::info!(
+                    %http_bind,
+                    https_port = cfg.port,
+                    "ACME HTTP-01 + HTTP→HTTPS redirect listening",
+                );
+                Box::pin(serve_acme_http(http_bind, cfg.port, challenges))
+            }
+            (None, Some(http_port)) => {
                 let http_bind: SocketAddr = format!("{}:{}", cfg.bind, http_port)
                     .parse()
                     .with_context(|| {
@@ -322,7 +331,7 @@ pub async fn run(
                 );
                 Box::pin(serve_redirect(http_bind, cfg.port))
             }
-            None => Box::pin(std::future::pending()),
+            (None, None) => Box::pin(std::future::pending()),
         };
 
     // `into_make_service_with_connect_info::<SocketAddr>` populates
@@ -367,6 +376,63 @@ async fn serve_redirect(bind: SocketAddr, https_port: u16) -> Result<()> {
     Ok(())
 }
 
+/// State for the port-80 ACME listener: the HTTPS port to redirect to
+/// plus the live HTTP-01 challenge map.
+#[derive(Clone)]
+struct AcmeHttpState {
+    https_port: u16,
+    challenges: ChallengeMap,
+}
+
+/// Port-80 listener used while ACME is active: answers Let's Encrypt's
+/// HTTP-01 validation at `/.well-known/acme-challenge/{token}` and
+/// 308-redirects every other request to the HTTPS admin port.
+async fn serve_acme_http(
+    bind: SocketAddr,
+    https_port: u16,
+    challenges: ChallengeMap,
+) -> Result<()> {
+    let state = AcmeHttpState {
+        https_port,
+        challenges,
+    };
+    let app: Router = Router::new()
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            get(acme_challenge_handler),
+        )
+        .fallback(any(acme_redirect_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .with_context(|| format!("bind ACME HTTP listener at {bind}"))?;
+    axum::serve(listener, app)
+        .await
+        .context("ACME HTTP axum::serve")?;
+    Ok(())
+}
+
+/// Serve the key authorization for an outstanding HTTP-01 token, or 404
+/// once it's been consumed / was never issued. Plain text, per RFC 8555.
+async fn acme_challenge_handler(
+    State(state): State<AcmeHttpState>,
+    Path(token): Path<String>,
+) -> Result<([(header::HeaderName, &'static str); 1], String), StatusCode> {
+    match crate::acme::challenge_response(&state.challenges, &token) {
+        Some(key_auth) => Ok(([(header::CONTENT_TYPE, "text/plain")], key_auth)),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Non-challenge requests on the ACME port → 308 to HTTPS.
+async fn acme_redirect_handler(
+    State(state): State<AcmeHttpState>,
+    headers: HeaderMap,
+    uri: OriginalUri,
+) -> Result<Redirect, (StatusCode, &'static str)> {
+    redirect_target(state.https_port, &headers, &uri)
+}
+
 /// Build the 308 target URL. We trust the `Host` header for the
 /// hostname (this listener only ever serves the admin panel, so the
 /// security implications of trusting `Host` are limited to "the
@@ -376,14 +442,24 @@ async fn serve_redirect(bind: SocketAddr, https_port: u16) -> Result<()> {
 async fn redirect_handler(
     State(https_port): State<u16>,
     headers: HeaderMap,
-    OriginalUri(uri): OriginalUri,
+    uri: OriginalUri,
+) -> Result<Redirect, (StatusCode, &'static str)> {
+    redirect_target(https_port, &headers, &uri)
+}
+
+/// Shared 308-redirect builder used by both the plain redirect listener
+/// and the ACME port's non-challenge fallback.
+fn redirect_target(
+    https_port: u16,
+    headers: &HeaderMap,
+    uri: &OriginalUri,
 ) -> Result<Redirect, (StatusCode, &'static str)> {
     let host_header = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .ok_or((StatusCode::BAD_REQUEST, "missing or invalid Host header"))?;
     let bare_host = strip_host_port(host_header);
-    let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let path_and_query = uri.0.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let target = format!("https://{bare_host}:{https_port}{path_and_query}");
     Ok(Redirect::permanent(&target))
 }

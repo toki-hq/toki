@@ -105,6 +105,7 @@ port = 443                           # serve the panel on standard HTTPS
 - **Public domain + port 80.** HTTP-01 validates on port 80 *only* — Let's Encrypt fetches `http://<domain>/.well-known/acme-challenge/…` during issuance **and every ~60-day renewal**, so port 80 must stay reachable from the internet. Bare IPs can't get a cert.
 - **Port topology:** **80** = ACME challenge + 308 redirect to HTTPS; **443** = admin panel (set `[admin].port = 443` so `https://<host>/` works); **50051** = gRPC signaling + UDP audio (client-dialed). Publish 80 + 443 + 50051(tcp+udp).
 - **Privileged ports:** binding 80/443 needs root, `CAP_NET_BIND_SERVICE`, or Docker port publishing.
+- **System CA roots:** issuance verifies Let's Encrypt's TLS against the OS trust store. The Docker image ships `ca-certificates`; if you run the bare binary on a *minimal* host, make sure a CA bundle is installed (e.g. `apt install ca-certificates`) or issuance fails with "No CA certificates were loaded from the system".
 - **Resilient + hot:** the server boots immediately on a self-signed (or cached) cert, obtains the real cert in the background, and **hot-swaps** it into both the gRPC and admin listeners — and again on each renewal — with no restart. The account + issued cert are cached under `<data-dir>/tls/acme/` and reused across restarts.
 - **Test with `staging = true` first** (untrusted root, far higher rate limits); once issuance works end-to-end, set `staging = false` for a real, browser-trusted cert.
 

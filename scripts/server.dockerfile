@@ -26,6 +26,14 @@ RUN cargo build --release --package toki-server
 
 FROM debian:13-slim
 
+# System CA roots. The ACME client (instant-acme) verifies Let's
+# Encrypt's own TLS via the platform trust store; debian-slim ships
+# none, so without this issuance fails with "No CA certificates were
+# loaded from the system". Tiny, and only needed when [acme] is on.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/target/release/toki-server /usr/bin/toki-server
 RUN  chmod +x /usr/bin/toki-server
 

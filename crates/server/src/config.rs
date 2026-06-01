@@ -233,6 +233,15 @@ pub struct AdminConfig {
     /// single-port setup. Common value: `8080`.
     #[serde(default)]
     pub http_redirect_port: Option<u16>,
+    /// Serve the admin panel over **plain HTTP** instead of HTTPS, for
+    /// deployments behind a TLS-terminating reverse proxy (Coolify /
+    /// Traefik, nginx, Caddy, k8s ingress) that owns the public cert.
+    /// Off by default. When on, Toki does no TLS / ACME / redirect on
+    /// the admin port — the proxy is responsible for HTTPS — so it must
+    /// only be reachable over a trusted network (e.g. the proxy's
+    /// private Docker network). The gRPC + audio port is unaffected.
+    #[serde(default)]
+    pub plaintext: bool,
 }
 
 impl Default for AdminConfig {
@@ -243,6 +252,7 @@ impl Default for AdminConfig {
             db_path: default_admin_db_path(),
             session_ttl_hours: default_admin_session_ttl_hours(),
             http_redirect_port: None,
+            plaintext: false,
         }
     }
 }
@@ -255,6 +265,7 @@ pub const ENV_ADMIN_PORT: &str = "TOKI_ADMIN_PORT";
 pub const ENV_ADMIN_DB_PATH: &str = "TOKI_ADMIN_DB_PATH";
 pub const ENV_ADMIN_SESSION_TTL_HOURS: &str = "TOKI_ADMIN_SESSION_TTL_HOURS";
 pub const ENV_ADMIN_HTTP_REDIRECT_PORT: &str = "TOKI_ADMIN_HTTP_REDIRECT_PORT";
+pub const ENV_ADMIN_PLAINTEXT: &str = "TOKI_ADMIN_PLAINTEXT";
 
 /// Root directory for runtime-managed state (auto-generated TLS
 /// certs, admin sqlite, anything else we write at boot or upgrade
@@ -334,6 +345,9 @@ impl AdminConfig {
                     format!("{ENV_ADMIN_HTTP_REDIRECT_PORT}={v:?}: expected a TCP port (0..=65535)")
                 })?)
             };
+        }
+        if let Ok(v) = std::env::var(ENV_ADMIN_PLAINTEXT) {
+            self.plaintext = env_truthy(&v);
         }
         Ok(())
     }
@@ -571,6 +585,7 @@ mod tests {
             db_path: PathBuf::from("custom.db"),
             session_ttl_hours: 6,
             http_redirect_port: None,
+            plaintext: false,
         };
         admin.apply_env_overrides().unwrap();
         assert_eq!(admin.bind, "1.2.3.4");
@@ -723,6 +738,16 @@ mod tests {
 
         // Inactive (disabled) configs always validate, even if incomplete.
         assert!(AcmeConfig::default().validate().is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn admin_plaintext_env_override() {
+        assert!(!AdminConfig::default().plaintext, "off by default");
+        let _g = set_env(ENV_ADMIN_PLAINTEXT, "true");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert!(admin.plaintext);
     }
 
     #[test]

@@ -68,11 +68,18 @@ async fn main() -> anyhow::Result<()> {
     // Either way gRPC + admin are always HTTPS — there is no plaintext.
     //
     // ACME only runs when enabled *and* no explicit `[tls]` is set
-    // (explicit operator certs win). When both are configured we honour
-    // `[tls]` and warn that ACME is being ignored.
-    let acme_active = config.acme.is_active() && config.tls.is_none();
+    // (explicit operator certs win), *and* the admin panel isn't in
+    // plaintext/behind-proxy mode (there a reverse proxy owns the public
+    // cert + port 80, so Toki issuing its own would just conflict).
+    let acme_active = config.acme.is_active() && config.tls.is_none() && !config.admin.plaintext;
     if config.acme.is_active() && config.tls.is_some() {
         tracing::warn!("[tls] cert paths take precedence; [acme] is configured but ignored");
+    }
+    if config.acme.is_active() && config.admin.plaintext {
+        tracing::warn!(
+            "[admin].plaintext is set (behind-proxy mode); [acme] is configured but ignored \
+             — the reverse proxy is expected to provide TLS"
+        );
     }
 
     // Resolve the *seed* cert the listeners bind with immediately. With

@@ -59,6 +59,7 @@ cargo run -p toki-client
 | `TOKI_ADMIN_DB_PATH` | SQLite path for admin users/sessions/config | `admin.db` (under data dir) |
 | `TOKI_ADMIN_SESSION_TTL_HOURS` | Admin session lifetime | `12` |
 | `TOKI_ADMIN_HTTP_REDIRECT_PORT` | Optional plain-HTTP listener that 308-redirects to HTTPS | unset (disabled) |
+| `TOKI_ADMIN_PLAINTEXT` | Serve the admin panel over plain HTTP (behind-proxy mode) | `false` |
 | `TOKI_ACME_ENABLED` | Enable Let's Encrypt (ACME HTTP-01) | `false` |
 | `TOKI_ACME_DOMAINS` | Comma-separated domain(s) for the cert | unset |
 | `TOKI_ACME_EMAIL` | ACME account contact email | unset |
@@ -110,6 +111,21 @@ port = 443                           # serve the panel on standard HTTPS
 - **Test with `staging = true` first** (untrusted root, far higher rate limits); once issuance works end-to-end, set `staging = false` for a real, browser-trusted cert.
 
 > Note: the desktop client currently trusts any server cert, so a real cert removes the admin-panel browser warning and is correct PKI hygiene, but client-side validation of the gRPC cert is a separate hardening step.
+
+### Behind a reverse proxy (Coolify, Traefik, nginx, Caddy, k8s ingress)
+
+If a TLS-terminating proxy already fronts your host, **don't** use Toki's ACME — the proxy can't share ports 80/443 with Toki, and it already gets certificates. Instead run the admin panel in **plaintext / behind-proxy mode** and let the proxy own the public cert:
+
+```toml
+[admin]
+plaintext = true          # serve the panel over plain HTTP
+bind = "0.0.0.0"          # reachable from the proxy's network
+port = 8000
+```
+or `TOKI_ADMIN_PLAINTEXT=true TOKI_ADMIN_BIND=0.0.0.0`. Then point the proxy's HTTPS vhost at the container's `:8000`. Toki does **no** TLS/ACME/redirect on the admin port in this mode (the warning in the logs is expected), so it must only be reachable over a trusted network (the proxy's private Docker network — not the public internet).
+
+- **Coolify:** set the resource's **Ports Exposes** to `8000`, the **Domain** to `https://your.domain`, add env `TOKI_ADMIN_PLAINTEXT=true` + `TOKI_ADMIN_BIND=0.0.0.0`, and leave `[acme]` off. Coolify provisions the Let's Encrypt cert and proxies to `:8000` — no custom Traefik labels, no passthrough.
+- **gRPC + audio** stay on `:50051` published **directly** (proxies can't carry the h2 control stream + UDP audio cleanly, and the desktop client dials `host:50051`). That port keeps Toki's own (self-signed) TLS, which the client accepts today.
 
 ## Admin panel
 

@@ -288,25 +288,52 @@ pub async fn run(
         .merge(grpc_router)
         .fallback(handlers::spa);
 
-    // Build the admin TLS config from the *shared* rustls ServerConfig
-    // (built in `main.rs` around the swappable cert resolver). Because
-    // the resolver is dynamic, an ACME renewal is picked up live on the
-    // next handshake — no `reload`, no restart, same cert as the gRPC
-    // port. ALPN is `h2 + http/1.1` so both browsers and h2 clients work.
-    let tls_cfg = RustlsConfig::from_config(tls_config);
+    // `into_make_service_with_connect_info::<SocketAddr>` populates the
+    // `ConnectInfo<SocketAddr>` extractor on every request — the login
+    // handler reads the peer IP from there for its per-IP rate-limit
+    // gate. Without it the extractor returns None and the throttle
+    // wouldn't fire. (When behind a proxy the peer IP is the proxy's;
+    // the login throttle still functions, just keyed on the proxy hop.)
+    type AdminFut = std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>;
+    let (serve_fut, redirect_fut): (AdminFut, AdminFut) = if cfg.plaintext {
+        // Behind-proxy mode: serve the panel over **plain HTTP** on the
+        // (private) bind address and let a TLS-terminating reverse proxy
+        // (Coolify/Traefik, nginx, Caddy, k8s ingress) own the public
+        // certificate. No Toki TLS, no ACME, no redirect listener — the
+        // proxy handles all of that. `main.rs` forces ACME off in this
+        // mode and the shared cert resolver still backs the gRPC port.
+        tracing::warn!(
+            %bind,
+            "admin panel listening (PLAINTEXT HTTP) — only safe behind a \
+             TLS-terminating proxy on a trusted network"
+        );
+        let listener = tokio::net::TcpListener::bind(bind)
+            .await
+            .with_context(|| format!("bind admin plaintext listener at {bind}"))?;
+        let serve: AdminFut = Box::pin(async move {
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .context("admin axum::serve (plaintext)")
+        });
+        (serve, Box::pin(std::future::pending()))
+    } else {
+        // TLS path: serve HTTPS from the *shared* swappable cert resolver
+        // (built in `main.rs`). Because the resolver is dynamic, an ACME
+        // renewal is picked up live on the next handshake — no reload, no
+        // restart, same cert as the gRPC port. ALPN `h2 + http/1.1`.
+        let tls_cfg = RustlsConfig::from_config(tls_config);
+        tracing::info!(%bind, "admin panel listening (HTTPS)");
 
-    tracing::info!(%bind, "admin panel listening (HTTPS)");
-
-    // Port-80 / plain-HTTP listener. Three modes, in priority order:
-    //   1. ACME active → bind the configured ACME address (`0.0.0.0:80`)
-    //      and serve `/.well-known/acme-challenge/{token}` from the
-    //      shared challenge map, 308-redirecting everything else to
-    //      HTTPS. ACME owns port 80, so this supersedes `http_redirect_port`.
-    //   2. `http_redirect_port` set → plain 308-redirect listener (so a
-    //      browser typing `http://host:port` upgrades cleanly).
-    //   3. neither → no second listener.
-    let redirect_fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
-        match (acme_http, cfg.http_redirect_port) {
+        // Port-80 / plain-HTTP helper. Priority order:
+        //   1. ACME active → serve `/.well-known/acme-challenge/{token}`
+        //      from the shared map, 308-redirect everything else. ACME
+        //      owns port 80, superseding `http_redirect_port`.
+        //   2. `http_redirect_port` set → plain 308-redirect listener.
+        //   3. neither → no second listener.
+        let redirect_fut: AdminFut = match (acme_http, cfg.http_redirect_port) {
             (Some((acme_bind, challenges)), _) => {
                 let http_bind: SocketAddr = acme_bind
                     .parse()
@@ -333,17 +360,13 @@ pub async fn run(
             }
             (None, None) => Box::pin(std::future::pending()),
         };
-
-    // `into_make_service_with_connect_info::<SocketAddr>` populates
-    // the `ConnectInfo<SocketAddr>` extractor on every request — the
-    // login handler reads the peer IP from there for its per-IP
-    // rate-limit gate. Without it the extractor returns None and
-    // the throttle wouldn't fire.
-    let serve_fut = async move {
-        axum_server::bind_rustls(bind, tls_cfg)
-            .serve(router.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .context("admin axum_server::bind_rustls")
+        let serve: AdminFut = Box::pin(async move {
+            axum_server::bind_rustls(bind, tls_cfg)
+                .serve(router.into_make_service_with_connect_info::<SocketAddr>())
+                .await
+                .context("admin axum_server::bind_rustls")
+        });
+        (serve, redirect_fut)
     };
 
     // Both listeners run concurrently. If either errors we bring the

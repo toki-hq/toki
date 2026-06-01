@@ -171,11 +171,20 @@ pub async fn run(
         .parse()
         .with_context(|| format!("parse admin bind addr {}:{}", cfg.bind, cfg.port))?;
 
-    // Open + migrate sqlite before we touch the network. A migration
-    // failure should fail fast at startup, not on the first request.
-    let db = db::AdminDb::open(&cfg.db_path)
-        .with_context(|| format!("open admin sqlite at {}", cfg.db_path.display()))?;
-    db.migrate().await.context("migrate admin sqlite")?;
+    // Open + migrate the admin store before we touch the network. A
+    // connection or migration failure should fail fast at startup, not
+    // on the first request. The backend (SQLite / MariaDB / Postgres) is
+    // chosen by the resolved connection URL.
+    let database_url = cfg.resolve_database_url();
+    let db = db::AdminDb::open(&database_url)
+        .await
+        .with_context(|| format!("open admin db ({})", redact_db_url(&database_url)))?;
+    tracing::info!(
+        backend = db.backend_label(),
+        target = %redact_db_url(&database_url),
+        "admin store opened",
+    );
+    db.migrate().await.context("migrate admin db")?;
 
     // Hydrate the in-memory server_config from sqlite. main.rs
     // constructed it with defaults; the row may have non-default
@@ -354,6 +363,23 @@ pub async fn run(
 /// the original path-and-query; the target host:port is
 /// `<bare_host>:<https_port>`. 308 (vs 301/302) preserves the request
 /// method, which matters for the JS shell's `fetch(...)` mutations.
+/// Mask the password in a DB connection URL for logging:
+/// `mysql://user:secret@host/db` → `mysql://user:***@host/db`. SQLite
+/// URLs (no credentials) pass through unchanged.
+fn redact_db_url(url: &str) -> String {
+    if let Some(scheme_end) = url.find("://") {
+        let (head, rest) = url.split_at(scheme_end + 3);
+        if let Some(at) = rest.find('@') {
+            let authority = &rest[..at];
+            let tail = &rest[at..]; // includes '@'
+            if let Some(colon) = authority.find(':') {
+                return format!("{head}{}:***{tail}", &authority[..colon]);
+            }
+        }
+    }
+    url.to_string()
+}
+
 async fn serve_redirect(bind: SocketAddr, https_port: u16) -> Result<()> {
     let app: Router = Router::new()
         .fallback(any(redirect_handler))

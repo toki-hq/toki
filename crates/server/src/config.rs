@@ -78,9 +78,19 @@ pub struct AdminConfig {
     pub port: u16,
     /// SQLite path for the admin user + session store. Relative
     /// paths are resolved against the process CWD, the same way
-    /// `tls/cert.pem` is.
+    /// `tls/cert.pem` is. Used only when `database_url` is unset —
+    /// it's the zero-config SQLite shorthand.
     #[serde(default = "default_admin_db_path")]
     pub db_path: PathBuf,
+    /// Connection URL for the admin store, selecting the backend by
+    /// scheme: `sqlite://<path>?mode=rwc` (embedded, the default),
+    /// `mysql://user:pass@host/db` / `mariadb://…`, or
+    /// `postgres://user:pass@host/db`. When set, it takes precedence
+    /// over `db_path`. Remote backends connect over TLS (rustls) when
+    /// the server requires it. `None` → fall back to `db_path` as a
+    /// SQLite URL (back-compat: existing deployments need no change).
+    #[serde(default)]
+    pub database_url: Option<String>,
     /// Session TTL in hours. Cookies issued by `/api/login` are
     /// valid for this long; on expiry the next API call returns
     /// 401 and the JS shell re-prompts for credentials.
@@ -107,6 +117,7 @@ impl Default for AdminConfig {
             db_path: default_admin_db_path(),
             session_ttl_hours: default_admin_session_ttl_hours(),
             http_redirect_port: None,
+            database_url: None,
         }
     }
 }
@@ -119,6 +130,7 @@ pub const ENV_ADMIN_PORT: &str = "TOKI_ADMIN_PORT";
 pub const ENV_ADMIN_DB_PATH: &str = "TOKI_ADMIN_DB_PATH";
 pub const ENV_ADMIN_SESSION_TTL_HOURS: &str = "TOKI_ADMIN_SESSION_TTL_HOURS";
 pub const ENV_ADMIN_HTTP_REDIRECT_PORT: &str = "TOKI_ADMIN_HTTP_REDIRECT_PORT";
+pub const ENV_ADMIN_DB_URL: &str = "TOKI_ADMIN_DB_URL";
 
 /// Root directory for runtime-managed state (auto-generated TLS
 /// certs, admin sqlite, anything else we write at boot or upgrade
@@ -182,6 +194,11 @@ impl AdminConfig {
         if let Ok(v) = std::env::var(ENV_ADMIN_DB_PATH) {
             self.db_path = PathBuf::from(v);
         }
+        if let Ok(v) = std::env::var(ENV_ADMIN_DB_URL) {
+            // Empty string falls back to the SQLite `db_path` shorthand
+            // (lets an inherited env var be neutralised without unsetting).
+            self.database_url = if v.trim().is_empty() { None } else { Some(v) };
+        }
         if let Ok(v) = std::env::var(ENV_ADMIN_SESSION_TTL_HOURS) {
             self.session_ttl_hours = v.parse().with_context(|| {
                 format!("{ENV_ADMIN_SESSION_TTL_HOURS}={v:?}: expected a positive integer")
@@ -200,6 +217,22 @@ impl AdminConfig {
             };
         }
         Ok(())
+    }
+
+    /// The connection URL the admin store opens with. Precedence:
+    /// explicit `database_url` (any backend) > the `db_path` SQLite
+    /// shorthand. `db_path` is mapped to `sqlite://<path>?mode=rwc`
+    /// (`mode=rwc` = open read-write, creating the file if missing —
+    /// replacing rusqlite's implicit create-on-open). `main.rs` has
+    /// already anchored a relative `db_path` under the data dir, so the
+    /// path here is the final on-disk location.
+    pub fn resolve_database_url(&self) -> String {
+        if let Some(url) = self.database_url.as_ref() {
+            if !url.trim().is_empty() {
+                return url.clone();
+            }
+        }
+        format!("sqlite://{}?mode=rwc", self.db_path.display())
     }
 }
 
@@ -390,6 +423,51 @@ mod tests {
         assert_eq!(cfg.admin.session_ttl_hours, 12);
     }
 
+    #[test]
+    fn resolve_database_url_maps_db_path_to_sqlite() {
+        // No explicit URL → SQLite shorthand from db_path (back-compat).
+        let admin = AdminConfig {
+            db_path: PathBuf::from("/var/lib/toki/admin.db"),
+            ..AdminConfig::default()
+        };
+        assert_eq!(
+            admin.resolve_database_url(),
+            "sqlite:///var/lib/toki/admin.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn resolve_database_url_prefers_explicit_url() {
+        let admin = AdminConfig {
+            db_path: PathBuf::from("admin.db"),
+            database_url: Some("postgres://u:p@db.example.com/toki".into()),
+            ..AdminConfig::default()
+        };
+        assert_eq!(
+            admin.resolve_database_url(),
+            "postgres://u:p@db.example.com/toki"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_sets_database_url_and_empty_falls_back() {
+        let _g = set_env(ENV_ADMIN_DB_URL, "mysql://u:p@host/toki");
+        let mut admin = AdminConfig::default();
+        admin.apply_env_overrides().unwrap();
+        assert_eq!(admin.database_url.as_deref(), Some("mysql://u:p@host/toki"));
+
+        // Empty env value neutralises it → back to the SQLite shorthand.
+        std::env::set_var(ENV_ADMIN_DB_URL, "");
+        let mut admin = AdminConfig {
+            database_url: Some("mysql://stale".into()),
+            ..AdminConfig::default()
+        };
+        admin.apply_env_overrides().unwrap();
+        assert!(admin.database_url.is_none());
+        assert!(admin.resolve_database_url().starts_with("sqlite://"));
+    }
+
     /// RAII guard that clears an env var on drop. Tests that set
     /// `TOKI_ADMIN_*` use this so a failure mid-test (panic before
     /// the explicit clear) doesn't leak state into the next case.
@@ -433,6 +511,7 @@ mod tests {
             db_path: PathBuf::from("custom.db"),
             session_ttl_hours: 6,
             http_redirect_port: None,
+            database_url: None,
         };
         admin.apply_env_overrides().unwrap();
         assert_eq!(admin.bind, "1.2.3.4");

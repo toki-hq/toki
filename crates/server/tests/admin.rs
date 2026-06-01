@@ -23,7 +23,7 @@ use toki_server::throttle::IpThrottle;
 /// pre-seeded `admin`/`hunter2` user. Returns the router + the cleartext
 /// password.
 async fn boot() -> (axum::Router, &'static str) {
-    let db = AdminDb::open_in_memory().unwrap();
+    let db = AdminDb::open_in_memory().await.unwrap();
     db.migrate().await.unwrap();
     db.insert_user("admin", &auth::hash_password("hunter2").unwrap())
         .await

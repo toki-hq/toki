@@ -63,11 +63,21 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 # Stream of Event. tokio-stream's `BroadcastStream` is the adapter we
 # use to pump the admin event broadcast channel into that stream.
 serde_json = "1"
-# SQLite for the admin user table + sessions. `bundled` builds sqlite
-# into the binary so we don't depend on the runtime image shipping
-# libsqlite3 — matches the rest of Toki's "self-contained binary"
-# posture. One table, one connection, no pool: admin traffic is tiny.
-rusqlite = { version = "0.32", features = ["bundled"] }
+# Admin store, multi-backend: embedded SQLite (default, zero-config) or a
+# remote MariaDB/MySQL or PostgreSQL server, selected by the connection
+# URL. `default-features = false` + `tls-rustls-ring` keeps the no-OpenSSL
+# / ring-only posture (the generic `tls-rustls` can pull aws-lc-rs;
+# `tls-native-tls` is OpenSSL — both avoided). The `sqlite` driver vendors
+# libsqlite3 statically, so the binary stays self-contained. Runtime query
+# API only (no `macros` — compile-time `query!` needs one build-time
+# DATABASE_URL and can't span three dialects).
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "tls-rustls-ring",
+    "sqlite",
+    "mysql",
+    "postgres",
+] }
 # argon2id for the admin password hash. Pure-Rust, no C deps, ~10ms
 # per verify which is fine on a login endpoint and stops cheap GPU
 # bruteforce against a stolen `admin.db`.

@@ -1,325 +1,322 @@
-//! SQLite-backed admin user + session store.
+//! Admin store — multi-backend (SQLite / MariaDB-MySQL / PostgreSQL).
 //!
-//! Two tables, both created idempotently on first boot via [`AdminDb::migrate`]:
+//! Holds admin users, sessions, runtime server config, channel names,
+//! metrics samples, and the audit log. The backend is chosen by the
+//! connection URL passed to [`AdminDb::open`]:
 //!
-//! * `admin_users(username PK, password_hash, created_at)` — one row per
-//!   admin account. We never read passwords in cleartext; only the
-//!   argon2id hash is stored. v1 ships with a single seeded `admin` user
-//!   and no UI to create more (deliberate — multi-admin is a follow-up).
+//! * `sqlite://<path>?mode=rwc` — embedded, zero-config default. The
+//!   driver vendors libsqlite3 statically, so the binary stays
+//!   self-contained, and the file is `chmod 0600` (it holds argon2
+//!   hashes + session-token hashes).
+//! * `mysql://…` / `mariadb://…` — a remote MariaDB/MySQL server.
+//! * `postgres://…` — a remote PostgreSQL server.
 //!
-//! * `sessions(token_hash PK, username, expires_at)` — issued by
-//!   `/api/login`. The *cookie* on the wire carries a raw 16-byte
-//!   token (hex-encoded, CSPRNG from `rand::rngs::OsRng`); the *db*
-//!   stores `BLAKE3(token)` as a 64-char hex string. Lookup hashes
-//!   the cookie value and matches against the column. This closes
-//!   the "leaked admin.db lets you replay live sessions" hole — an
-//!   attacker with read access to the file gets only the hash, which
-//!   is preimage-resistant.
+//! Built on SQLx (async-native; no `spawn_blocking`). All access goes
+//! through a per-backend [`Pool`] enum; the [`on_pool!`] macro expands
+//! each method body once per concrete pool type, so we get each driver's
+//! real type map without generic-over-`Row` gymnastics. SQL is shared
+//! across dialects except for placeholder style (`?` vs `$1`, handled by
+//! [`AdminDb::q`]) and the few upserts/DDL statements that genuinely
+//! differ.
 //!
-//! All connection access goes through a `std::sync::Mutex` wrapped in
-//! `Arc` and offloaded to `spawn_blocking`. Admin traffic is on the order
-//! of single-digit requests per second, so the lock is uncontended; the
-//! `spawn_blocking` hop just keeps the sqlite syscalls off the async
-//! executor.
+//! Security note: the `sessions` table stores `BLAKE3(token)` (64-char
+//! hex), never the raw cookie value — see [`hash_session_token`].
+//!
+//! Multi-backend is **fresh-start**: switching to MariaDB/Postgres
+//! creates empty tables and re-seeds the admin user; no data is copied
+//! from an existing SQLite file.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use sqlx::mysql::MySqlPoolOptions;
+use sqlx::postgres::PgPoolOptions;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use sqlx::{MySqlPool, PgPool, Row, SqlitePool};
 
 use crate::server_config::ServerConfig;
 
-/// Thin async wrapper around a single sqlite connection.
-///
-/// `Clone` is cheap (Arc bump) and intentional — every axum handler
-/// pulls a clone of `AppState` and operates on the same connection.
+/// Which SQL dialect the open connection speaks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Backend {
+    Sqlite,
+    MySql,
+    Postgres,
+}
+
+/// The live connection pool, one variant per backend. `Clone` is a cheap
+/// `Arc` bump (sqlx pools are internally `Arc`), matching the old
+/// "every handler clones `AppState`" model.
+#[derive(Clone)]
+enum Pool {
+    Sqlite(SqlitePool),
+    MySql(MySqlPool),
+    Postgres(PgPool),
+}
+
+/// Async, multi-backend admin store. Public method signatures are
+/// identical across backends, so callers (`auth`, `grpc`, `handlers`,
+/// `audit`, `metrics`, `mod`) are backend-agnostic.
 #[derive(Clone)]
 pub struct AdminDb {
-    conn: Arc<std::sync::Mutex<Connection>>,
+    pool: Pool,
+    backend: Backend,
+}
+
+/// Run a method body once per concrete pool type. The body is expanded
+/// textually in each match arm with `$p` bound to the concrete pool, so
+/// every `sqlx::query`/`Row::try_get` monomorphizes against that driver
+/// — no generic bounds needed. Only the matching arm runs at runtime.
+macro_rules! on_pool {
+    ($self:expr, $p:ident, $body:block) => {
+        match &$self.pool {
+            Pool::Sqlite($p) => $body,
+            Pool::MySql($p) => $body,
+            Pool::Postgres($p) => $body,
+        }
+    };
 }
 
 impl AdminDb {
-    /// Open (or create) the sqlite file at `path`. Does *not* run
-    /// migrations — call [`migrate`](Self::migrate) explicitly so
-    /// callers can fail fast on schema errors.
+    /// Open (and pool) the admin store from a connection URL. Does *not*
+    /// run migrations — call [`migrate`](Self::migrate) explicitly so
+    /// callers fail fast on schema errors.
     ///
-    /// On Unix, tightens the file mode to `0600` (owner-only RW)
-    /// before returning. The file holds argon2 hashes + session
-    /// tokens — both useful to an attacker with read access — so
-    /// we don't want to inherit the operator's umask (typically
-    /// `022`, which would leave the file world-readable). Mirrors
-    /// the treatment of the gRPC TLS private key in `tls.rs`.
-    pub fn open(path: &Path) -> Result<Self> {
-        // Make sure the parent directory exists. Operators usually
-        // configure something like `/var/lib/toki/admin.db`; without
-        // this we'd error out on first boot rather than auto-creating.
-        if let Some(parent) = path.parent() {
-            if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("create admin db parent {}", parent.display()))?;
+    /// For a file-backed SQLite URL the parent dir is created and the
+    /// file is `chmod 0600` after open (it holds password + session
+    /// hashes). SQLite pools are capped at one connection (single-writer;
+    /// also makes `sqlite::memory:` test pools share one database).
+    /// MySQL/Postgres connect over TLS when the server requires it
+    /// (rustls/ring).
+    pub async fn open(database_url: &str) -> Result<Self> {
+        let backend = detect_backend(database_url)?;
+        let pool = match backend {
+            Backend::Sqlite => {
+                let opts = SqliteConnectOptions::from_str(database_url)
+                    .with_context(|| format!("parse sqlite url {database_url}"))?
+                    .create_if_missing(true);
+                let file = sqlite_file_path(database_url, &opts);
+                if let Some(parent) = file.as_ref().and_then(|p| p.parent()) {
+                    if !parent.as_os_str().is_empty() {
+                        std::fs::create_dir_all(parent).with_context(|| {
+                            format!("create admin db parent {}", parent.display())
+                        })?;
+                    }
+                }
+                let pool = SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(opts)
+                    .await
+                    .with_context(|| format!("open sqlite {database_url}"))?;
+                if let Some(path) = &file {
+                    tighten_db_perms(path);
+                }
+                Pool::Sqlite(pool)
+            }
+            Backend::MySql => {
+                // sqlx's MySQL driver expects a `mysql://` scheme; map
+                // the `mariadb://` alias onto it.
+                let url = database_url.replacen("mariadb://", "mysql://", 1);
+                let pool = MySqlPoolOptions::new()
+                    .max_connections(5)
+                    .connect(&url)
+                    .await
+                    .context("connect MariaDB/MySQL admin db")?;
+                Pool::MySql(pool)
+            }
+            Backend::Postgres => {
+                let pool = PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(database_url)
+                    .await
+                    .context("connect PostgreSQL admin db")?;
+                Pool::Postgres(pool)
+            }
+        };
+        Ok(Self { pool, backend })
+    }
+
+    /// Convenience for tests: an in-memory SQLite store.
+    pub async fn open_in_memory() -> Result<Self> {
+        Self::open("sqlite::memory:").await
+    }
+
+    /// Human label for the active backend (for startup logging).
+    pub fn backend_label(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => "sqlite",
+            Backend::MySql => "mysql/mariadb",
+            Backend::Postgres => "postgres",
+        }
+    }
+
+    /// Rewrite `?` placeholders to `$1..$N` for Postgres; pass through
+    /// for SQLite/MySQL. Applied to every statement that binds params.
+    fn q(&self, sql: &str) -> String {
+        if self.backend == Backend::Postgres {
+            pg_rewrite(sql)
+        } else {
+            sql.to_string()
+        }
+    }
+
+    /// Apply the schema. Idempotent (`CREATE TABLE IF NOT EXISTS`). Each
+    /// backend gets its own DDL block (autoincrement / text-PK / index
+    /// syntax differ). The legacy `ALTER TABLE ADD COLUMN` upgrade path
+    /// runs **only** for SQLite (pre-existing files); fresh-start
+    /// MySQL/Postgres schemas already include every current column.
+    pub async fn migrate(&self) -> Result<()> {
+        match &self.pool {
+            Pool::Sqlite(p) => {
+                for stmt in split_ddl(SQLITE_DDL) {
+                    sqlx::query(stmt)
+                        .execute(p)
+                        .await
+                        .with_context(|| format!("sqlite ddl: {stmt}"))?;
+                }
+                // Upgrade pre-existing SQLite files that predate later
+                // columns (CREATE TABLE IF NOT EXISTS won't add them).
+                ensure_column_sqlite(
+                    p,
+                    "server_config",
+                    "grpc_password",
+                    "TEXT NOT NULL DEFAULT ''",
+                )
+                .await?;
+                ensure_column_sqlite(
+                    p,
+                    "server_config",
+                    "named_channels_enabled",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                .await?;
+                ensure_column_sqlite(
+                    p,
+                    "server_config",
+                    "audio_quality",
+                    "INTEGER NOT NULL DEFAULT 2",
+                )
+                .await?;
+            }
+            Pool::MySql(p) => {
+                for stmt in split_ddl(MYSQL_DDL) {
+                    sqlx::query(stmt)
+                        .execute(p)
+                        .await
+                        .with_context(|| format!("mysql ddl: {stmt}"))?;
+                }
+            }
+            Pool::Postgres(p) => {
+                for stmt in split_ddl(POSTGRES_DDL) {
+                    sqlx::query(stmt)
+                        .execute(p)
+                        .await
+                        .with_context(|| format!("postgres ddl: {stmt}"))?;
+                }
             }
         }
-        let conn =
-            Connection::open(path).with_context(|| format!("open sqlite {}", path.display()))?;
-        // chmod after open so the file definitely exists. Best-effort:
-        // a chmod failure logs a warning rather than aborting startup
-        // (matches the TLS-key behaviour and stays consistent with how
-        // the gRPC side handles its private-key permissions).
-        tighten_db_perms(path);
-        Ok(Self {
-            conn: Arc::new(std::sync::Mutex::new(conn)),
-        })
+        Ok(())
     }
 
-    /// Open an in-memory connection. Used by tests (both unit and
-    /// integration) so a case can exercise the full migration +
-    /// query path without touching the filesystem. Public — the
-    /// function is harmless in production and `pub(crate)` would
-    /// hide it from integration tests in `tests/`.
-    pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().context("open in-memory sqlite")?;
-        Ok(Self {
-            conn: Arc::new(std::sync::Mutex::new(conn)),
-        })
-    }
+    // ── Server config (singleton row id = 1) ──────────────────────────
 
-    /// Apply the schema. Idempotent: re-running on an already-migrated
-    /// db is a no-op. We use `IF NOT EXISTS` rather than a version
-    /// table because v1 has exactly one schema; a real migration
-    /// framework would be premature.
-    ///
-    /// The `sessions` table stores `token_hash` (BLAKE3 of the cookie
-    /// value), never the raw token — see module-level docs for why.
-    /// If an older binary populated this table with raw tokens, the
-    /// rows will be unmatchable on next login (their hashes won't
-    /// equal the stored raw values) and the operator will simply be
-    /// asked to log in again. Acceptable one-time UX cost for the
-    /// security upgrade; we don't migrate ancient rows.
-    pub async fn migrate(&self) -> Result<()> {
-        self.with_conn(|c| {
-            c.execute_batch(
-                r#"
-                CREATE TABLE IF NOT EXISTS admin_users (
-                    username      TEXT PRIMARY KEY NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at    INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS sessions (
-                    token_hash TEXT PRIMARY KEY NOT NULL,
-                    username   TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    FOREIGN KEY (username) REFERENCES admin_users(username)
-                );
-                CREATE INDEX IF NOT EXISTS sessions_expires_idx
-                    ON sessions(expires_at);
-
-                -- Runtime-mutable server settings. Singleton — the
-                -- `CHECK (id = 1)` makes the one-row invariant visible
-                -- and rejects attempts to add a second row. Defaults
-                -- track the legacy hardcoded constants exactly, so a
-                -- fresh db behaves identically to a pre-server_config
-                -- build.
-                CREATE TABLE IF NOT EXISTS server_config (
-                    id              INTEGER PRIMARY KEY CHECK (id = 1),
-                    server_name     TEXT    NOT NULL DEFAULT '',
-                    max_peers       INTEGER NOT NULL DEFAULT 256,
-                    idle_kick_secs  INTEGER NOT NULL DEFAULT 10,
-                    grpc_password   TEXT    NOT NULL DEFAULT '',
-                    updated_at      INTEGER NOT NULL DEFAULT 0
-                );
-                INSERT OR IGNORE INTO server_config (id) VALUES (1);
-
-                -- Admin-assigned channel names, keyed by canonical
-                -- frequency string. Rows persist independently of room
-                -- occupancy (a name outlives the last member leaving).
-                -- Absence of a row = unnamed. Gated at runtime by
-                -- server_config.named_channels_enabled.
-                CREATE TABLE IF NOT EXISTS channel_names (
-                    frequency  TEXT PRIMARY KEY NOT NULL,
-                    name       TEXT NOT NULL,
-                    updated_at INTEGER NOT NULL DEFAULT 0
-                );
-
-                -- Time-series metrics, one row per minute (see metrics.rs).
-                -- `ts` is unix seconds; rx/tx are bytes/sec averaged over
-                -- the sample interval. Pruned past the retention window.
-                CREATE TABLE IF NOT EXISTS metrics_samples (
-                    ts           INTEGER PRIMARY KEY NOT NULL,
-                    rx_bps       INTEGER NOT NULL,
-                    tx_bps       INTEGER NOT NULL,
-                    users        INTEGER NOT NULL,
-                    transmitting INTEGER NOT NULL
-                );
-
-                -- Audit log: admin actions, security/auth events, and peer
-                -- connect/disconnect. Append-only; paged newest-first by id.
-                CREATE TABLE IF NOT EXISTS audit_log (
-                    id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts        INTEGER NOT NULL,
-                    kind      TEXT NOT NULL,
-                    actor     TEXT NOT NULL,
-                    frequency TEXT NOT NULL DEFAULT '',
-                    detail    TEXT NOT NULL DEFAULT ''
-                );
-                CREATE INDEX IF NOT EXISTS audit_log_id_idx ON audit_log(id);
-                CREATE INDEX IF NOT EXISTS metrics_ts_idx ON metrics_samples(ts);
-                "#,
-            )?;
-            // Upgrade path: a db that pre-dates the grpc_password
-            // column won't get it from `CREATE TABLE IF NOT EXISTS`
-            // (the table already exists). Add it explicitly via a
-            // `pragma_table_info` check so the call stays idempotent
-            // — we can't lean on `ALTER TABLE … IF NOT EXISTS`
-            // because sqlite doesn't support that conditional form.
-            ensure_column_exists(
-                c,
-                "server_config",
-                "grpc_password",
-                "TEXT NOT NULL DEFAULT ''",
-            )?;
-            // Upgrade path for the named-channels toggle (added after
-            // the grpc_password column). Same idempotent ALTER dance.
-            ensure_column_exists(
-                c,
-                "server_config",
-                "named_channels_enabled",
-                "INTEGER NOT NULL DEFAULT 0",
-            )?;
-            // Upgrade path for the audio-quality dial (added after named
-            // channels). Default 2 = Standard Opus, matching the struct
-            // default so an upgraded db starts compressing.
-            ensure_column_exists(
-                c,
-                "server_config",
-                "audio_quality",
-                "INTEGER NOT NULL DEFAULT 2",
-            )?;
-            Ok(())
-        })
-        .await
-    }
-
-    /// Read the singleton `server_config` row. Returns `Default` if
-    /// the row hasn't been touched yet (i.e. on the very first read
-    /// after migration); the migration's `INSERT OR IGNORE` already
-    /// created it with default column values, so this branch is
-    /// mostly defensive.
+    /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
-        self.with_conn(|c| {
-            let row = c
-                .query_row(
-                    "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                     named_channels_enabled, audio_quality \
-                     FROM server_config WHERE id = 1",
-                    [],
-                    |r| {
-                        Ok(ServerConfig {
-                            server_name: r.get(0)?,
-                            max_peers: r.get::<_, i64>(1)? as u32,
-                            idle_kick_secs: r.get::<_, i64>(2)? as u32,
-                            grpc_password: r.get(3)?,
-                            named_channels_enabled: r.get::<_, i64>(4)? != 0,
-                            audio_quality: r.get::<_, i64>(5)? as u32,
-                        })
-                    },
-                )
-                .optional()?;
-            Ok(row.unwrap_or_default())
+        let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
+                   named_channels_enabled, audio_quality \
+                   FROM server_config WHERE id = 1";
+        on_pool!(self, p, {
+            let row = sqlx::query(sql).fetch_optional(p).await?;
+            Ok(match row {
+                Some(r) => ServerConfig {
+                    server_name: r.try_get::<String, _>(0)?,
+                    max_peers: r.try_get::<i64, _>(1)? as u32,
+                    idle_kick_secs: r.try_get::<i64, _>(2)? as u32,
+                    grpc_password: r.try_get::<String, _>(3)?,
+                    named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
+                    audio_quality: r.try_get::<i64, _>(5)? as u32,
+                },
+                None => ServerConfig::default(),
+            })
         })
-        .await
     }
 
-    /// Persist the server config back to the singleton row. Stamps
-    /// `updated_at` to the current unix time so we can tell when a
-    /// setting last changed (useful for the audit log follow-up).
+    /// Persist the singleton config, stamping `updated_at` to now.
     pub async fn save_server_config(&self, cfg: &ServerConfig) -> Result<()> {
-        let cfg = cfg.clone();
         let now = now_unix();
-        self.with_conn(move |c| {
-            c.execute(
-                "UPDATE server_config \
-                 SET server_name = ?1, max_peers = ?2, idle_kick_secs = ?3, \
-                     grpc_password = ?4, named_channels_enabled = ?5, \
-                     audio_quality = ?6, updated_at = ?7 \
-                 WHERE id = 1",
-                params![
-                    cfg.server_name,
-                    cfg.max_peers as i64,
-                    cfg.idle_kick_secs as i64,
-                    cfg.grpc_password,
-                    cfg.named_channels_enabled as i64,
-                    cfg.audio_quality as i64,
-                    now,
-                ],
-            )?;
+        let sql = self.q("UPDATE server_config \
+             SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
+                 named_channels_enabled = ?, audio_quality = ?, updated_at = ? \
+             WHERE id = 1");
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(cfg.server_name.as_str())
+                .bind(cfg.max_peers as i64)
+                .bind(cfg.idle_kick_secs as i64)
+                .bind(cfg.grpc_password.as_str())
+                .bind(cfg.named_channels_enabled as i64)
+                .bind(cfg.audio_quality as i64)
+                .bind(now)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Load every channel name into a `frequency → name` map. Called
-    /// once at startup to seed the in-memory [`SharedChannelNames`];
-    /// the admin mutation handlers keep that map and the table in sync
-    /// thereafter, so this is never on a hot path.
-    pub async fn load_channel_names(&self) -> Result<std::collections::HashMap<String, String>> {
-        self.with_conn(|c| {
-            let mut stmt = c.prepare("SELECT frequency, name FROM channel_names")?;
-            let rows =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-            let mut map = std::collections::HashMap::new();
-            for row in rows {
-                let (freq, name) = row?;
-                map.insert(freq, name);
+    // ── Channel names ─────────────────────────────────────────────────
+
+    /// Load every channel name into a `frequency → name` map.
+    pub async fn load_channel_names(&self) -> Result<HashMap<String, String>> {
+        on_pool!(self, p, {
+            let rows = sqlx::query("SELECT frequency, name FROM channel_names")
+                .fetch_all(p)
+                .await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(r.try_get::<String, _>(0)?, r.try_get::<String, _>(1)?);
             }
             Ok(map)
         })
-        .await
     }
 
-    /// Upsert a single channel name (caller has already validated the
-    /// frequency is canonical and the name is ≤16 chars).
+    /// Upsert a single channel name (caller validated freq + ≤16-char name).
     pub async fn set_channel_name(&self, frequency: &str, name: &str) -> Result<()> {
-        let frequency = frequency.to_string();
-        let name = name.to_string();
         let now = now_unix();
-        self.with_conn(move |c| {
-            c.execute(
-                "INSERT INTO channel_names (frequency, name, updated_at) VALUES (?1, ?2, ?3) \
-                 ON CONFLICT(frequency) DO UPDATE SET name = ?2, updated_at = ?3",
-                params![frequency, name, now],
-            )?;
+        let sql = self.channel_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(frequency)
+                .bind(name)
+                .bind(now)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Delete a single channel name (clearing it). No-op if absent.
+    /// Delete a single channel name (no-op if absent).
     pub async fn clear_channel_name(&self, frequency: &str) -> Result<()> {
-        let frequency = frequency.to_string();
-        self.with_conn(move |c| {
-            c.execute(
-                "DELETE FROM channel_names WHERE frequency = ?1",
-                params![frequency],
-            )?;
+        let sql = self.q("DELETE FROM channel_names WHERE frequency = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(frequency).execute(p).await?;
             Ok(())
         })
-        .await
     }
 
-    /// Delete every channel name in one statement.
+    /// Delete every channel name.
     pub async fn clear_all_channel_names(&self) -> Result<()> {
-        self.with_conn(|c| {
-            c.execute("DELETE FROM channel_names", [])?;
+        on_pool!(self, p, {
+            sqlx::query("DELETE FROM channel_names").execute(p).await?;
             Ok(())
         })
-        .await
     }
 
-    // ── Metrics time-series ───────────────────────────────────────
+    // ── Metrics time-series ───────────────────────────────────────────
 
-    /// Append one metrics sample (1-minute cadence). `INSERT OR REPLACE`
-    /// keeps the `ts` PK unique if two ticks ever land in the same second.
+    /// Append one metrics sample (1-minute cadence). Upserts on the `ts`
+    /// PK so two ticks in the same second don't collide.
     pub async fn insert_metric_sample(
         &self,
         ts: i64,
@@ -328,61 +325,54 @@ impl AdminDb {
         users: u32,
         transmitting: u32,
     ) -> Result<()> {
-        self.with_conn(move |c| {
-            c.execute(
-                "INSERT OR REPLACE INTO metrics_samples (ts, rx_bps, tx_bps, users, transmitting) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    ts,
-                    rx_bps as i64,
-                    tx_bps as i64,
-                    users as i64,
-                    transmitting as i64
-                ],
-            )?;
+        let sql = self.metrics_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(ts)
+                .bind(rx_bps as i64)
+                .bind(tx_bps as i64)
+                .bind(users as i64)
+                .bind(transmitting as i64)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
     /// Load samples with `ts >= since`, oldest-first.
     pub async fn load_metrics(&self, since: i64) -> Result<Vec<MetricRow>> {
-        self.with_conn(move |c| {
-            let mut stmt = c.prepare(
-                "SELECT ts, rx_bps, tx_bps, users, transmitting FROM metrics_samples \
-                 WHERE ts >= ?1 ORDER BY ts ASC",
-            )?;
-            let rows = stmt.query_map(params![since], |r| {
-                Ok(MetricRow {
-                    ts: r.get(0)?,
-                    rx_bps: r.get::<_, i64>(1)? as u64,
-                    tx_bps: r.get::<_, i64>(2)? as u64,
-                    users: r.get::<_, i64>(3)? as u32,
-                    transmitting: r.get::<_, i64>(4)? as u32,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
+        let sql = self.q(
+            "SELECT ts, rx_bps, tx_bps, users, transmitting FROM metrics_samples \
+             WHERE ts >= ? ORDER BY ts ASC",
+        );
+        on_pool!(self, p, {
+            let rows = sqlx::query(&sql).bind(since).fetch_all(p).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in &rows {
+                out.push(MetricRow {
+                    ts: r.try_get::<i64, _>(0)?,
+                    rx_bps: r.try_get::<i64, _>(1)? as u64,
+                    tx_bps: r.try_get::<i64, _>(2)? as u64,
+                    users: r.try_get::<i64, _>(3)? as u32,
+                    transmitting: r.try_get::<i64, _>(4)? as u32,
+                });
             }
             Ok(out)
         })
-        .await
     }
 
     /// Delete metrics rows older than `cutoff` (unix seconds).
     pub async fn prune_metrics(&self, cutoff: i64) -> Result<()> {
-        self.with_conn(move |c| {
-            c.execute("DELETE FROM metrics_samples WHERE ts < ?1", params![cutoff])?;
+        let sql = self.q("DELETE FROM metrics_samples WHERE ts < ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(cutoff).execute(p).await?;
             Ok(())
         })
-        .await
     }
 
-    // ── Audit log ─────────────────────────────────────────────────
+    // ── Audit log ─────────────────────────────────────────────────────
 
-    /// Append an audit entry. Caller supplies the unix timestamp so the
-    /// recorder controls clock semantics.
+    /// Append an audit entry (caller supplies the unix timestamp).
     pub async fn insert_audit(
         &self,
         ts: i64,
@@ -391,35 +381,36 @@ impl AdminDb {
         frequency: &str,
         detail: &str,
     ) -> Result<()> {
-        let (kind, actor, frequency, detail) = (
-            kind.to_string(),
-            actor.to_string(),
-            frequency.to_string(),
-            detail.to_string(),
+        let sql = self.q(
+            "INSERT INTO audit_log (ts, kind, actor, frequency, detail) \
+             VALUES (?, ?, ?, ?, ?)",
         );
-        self.with_conn(move |c| {
-            c.execute(
-                "INSERT INTO audit_log (ts, kind, actor, frequency, detail) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![ts, kind, actor, frequency, detail],
-            )?;
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(ts)
+                .bind(kind)
+                .bind(actor)
+                .bind(frequency)
+                .bind(detail)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Page the audit log newest-first. `kinds` is the set of allowed
-    /// `kind` values for the active filter (empty = no filter / ALL).
-    /// `before_id` of 0 means the newest page; otherwise rows with
-    /// `id < before_id`. Returns `(rows, total_matching)`.
+    /// Page the audit log newest-first. `kinds` is the allowed-kind set
+    /// for the active filter (empty = ALL); `before_id` of 0 = newest
+    /// page, else rows with `id < before_id`. Returns `(rows, total)`.
+    ///
+    /// The `kind`/`before_id`/`limit` values are code-supplied (clamped,
+    /// fixed vocabulary — never user input), so they're interpolated;
+    /// no bound params, hence portable verbatim across backends.
     pub async fn load_audit(
         &self,
         kinds: &[&str],
         limit: u32,
         before_id: u64,
     ) -> Result<(Vec<AuditRow>, u64)> {
-        // Build the optional `kind IN (...)` clause from a fixed, code-
-        // supplied vocabulary (never user input) — safe to interpolate.
         let kind_list: Vec<String> = kinds.iter().map(|k| format!("'{k}'")).collect();
         let kind_clause = if kind_list.is_empty() {
             String::new()
@@ -432,222 +423,235 @@ impl AdminDb {
             String::new()
         };
         let limit = limit.clamp(1, 500);
-        self.with_conn(move |c| {
-            let total: i64 = c.query_row(
-                &format!("SELECT COUNT(*) FROM audit_log WHERE 1=1{kind_clause}"),
-                [],
-                |r| r.get(0),
-            )?;
-            let sql = format!(
-                "SELECT id, ts, kind, actor, frequency, detail FROM audit_log \
-                 WHERE 1=1{kind_clause}{before_clause} ORDER BY id DESC LIMIT {limit}"
-            );
-            let mut stmt = c.prepare(&sql)?;
-            let rows = stmt.query_map([], |r| {
-                Ok(AuditRow {
-                    id: r.get::<_, i64>(0)? as u64,
-                    ts: r.get(1)?,
-                    kind: r.get(2)?,
-                    actor: r.get(3)?,
-                    frequency: r.get(4)?,
-                    detail: r.get(5)?,
-                })
-            })?;
-            let mut out = Vec::new();
-            for row in rows {
-                out.push(row?);
+        let count_sql = format!("SELECT COUNT(*) FROM audit_log WHERE 1=1{kind_clause}");
+        let sql = format!(
+            "SELECT id, ts, kind, actor, frequency, detail FROM audit_log \
+             WHERE 1=1{kind_clause}{before_clause} ORDER BY id DESC LIMIT {limit}"
+        );
+        on_pool!(self, p, {
+            let total: i64 = sqlx::query(&count_sql).fetch_one(p).await?.try_get(0)?;
+            let rows = sqlx::query(&sql).fetch_all(p).await?;
+            let mut out = Vec::with_capacity(rows.len());
+            for r in &rows {
+                out.push(AuditRow {
+                    id: r.try_get::<i64, _>(0)? as u64,
+                    ts: r.try_get::<i64, _>(1)?,
+                    kind: r.try_get::<String, _>(2)?,
+                    actor: r.try_get::<String, _>(3)?,
+                    frequency: r.try_get::<String, _>(4)?,
+                    detail: r.try_get::<String, _>(5)?,
+                });
             }
             Ok((out, total as u64))
         })
-        .await
     }
 
     /// Delete audit rows older than `cutoff` (unix seconds).
     pub async fn prune_audit(&self, cutoff: i64) -> Result<()> {
-        self.with_conn(move |c| {
-            c.execute("DELETE FROM audit_log WHERE ts < ?1", params![cutoff])?;
+        let sql = self.q("DELETE FROM audit_log WHERE ts < ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(cutoff).execute(p).await?;
             Ok(())
         })
-        .await
     }
 
-    /// Count rows in `admin_users`. The seeder uses this to decide
-    /// whether to mint the bootstrap account.
+    // ── Admin users + auth ─────────────────────────────────────────────
+
+    /// Count rows in `admin_users` (the seeder gate).
     pub async fn user_count(&self) -> Result<i64> {
-        self.with_conn(|c| {
-            let n: i64 = c.query_row("SELECT COUNT(*) FROM admin_users", [], |r| r.get(0))?;
+        on_pool!(self, p, {
+            let n: i64 = sqlx::query("SELECT COUNT(*) FROM admin_users")
+                .fetch_one(p)
+                .await?
+                .try_get(0)?;
             Ok(n)
         })
-        .await
     }
 
-    /// Insert a new admin user. Returns an error if the username
-    /// already exists — the seeder only calls this when the table
-    /// is empty, so collisions indicate a logic bug.
+    /// Insert a new admin user. Errors on a duplicate username.
     pub async fn insert_user(&self, username: &str, password_hash: &str) -> Result<()> {
-        let username = username.to_string();
-        let password_hash = password_hash.to_string();
-        self.with_conn(move |c| {
-            let now = now_unix();
-            c.execute(
-                "INSERT INTO admin_users (username, password_hash, created_at) VALUES (?1, ?2, ?3)",
-                params![username, password_hash, now],
-            )?;
+        let now = now_unix();
+        let sql = self
+            .q("INSERT INTO admin_users (username, password_hash, created_at) VALUES (?, ?, ?)");
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(username)
+                .bind(password_hash)
+                .bind(now)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Replace the stored argon2 hash for an existing user. Used by
-    /// the `/api/account/password` change flow. Silently no-ops on a
-    /// missing user — callers always verify existence (via the
-    /// session middleware) before reaching this method, so a zero-
-    /// row update would indicate a logic bug we'd rather not paper
-    /// over by erroring.
+    /// Replace the stored argon2 hash for an existing user.
     pub async fn update_password_hash(&self, username: &str, new_hash: &str) -> Result<()> {
-        let username = username.to_string();
-        let new_hash = new_hash.to_string();
-        self.with_conn(move |c| {
-            c.execute(
-                "UPDATE admin_users SET password_hash = ?1 WHERE username = ?2",
-                params![new_hash, username],
-            )?;
+        let sql = self.q("UPDATE admin_users SET password_hash = ? WHERE username = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(new_hash)
+                .bind(username)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Delete every session for `username` **except** the one whose
-    /// hash matches `keep_token_hash`. Returns the number of rows
-    /// removed. Used after a successful password change so any
-    /// already-issued cookies that aren't the current browser's get
-    /// invalidated — if the password change is happening because of
-    /// a suspected compromise, the attacker's parallel session dies
-    /// the moment this query commits.
+    /// Delete every session for `username` except the one whose hash is
+    /// `keep_token_hash`. Returns the number removed (used after a
+    /// password change to kill other sessions).
     pub async fn delete_other_sessions_for_user(
         &self,
         username: &str,
         keep_token_hash: &str,
     ) -> Result<u64> {
-        let username = username.to_string();
-        let keep = keep_token_hash.to_string();
-        self.with_conn(move |c| {
-            let n = c.execute(
-                "DELETE FROM sessions WHERE username = ?1 AND token_hash != ?2",
-                params![username, keep],
-            )?;
-            Ok(n as u64)
+        let sql = self.q("DELETE FROM sessions WHERE username = ? AND token_hash != ?");
+        on_pool!(self, p, {
+            let r = sqlx::query(&sql)
+                .bind(username)
+                .bind(keep_token_hash)
+                .execute(p)
+                .await?;
+            Ok(r.rows_affected())
         })
-        .await
     }
 
-    /// Look up the password hash for a given username. Returns `None`
-    /// if the user doesn't exist. Login handlers run a constant-time
-    /// argon2 verify against this; the *presence* of a row is therefore
-    /// not directly observable in normal timing (the verify dominates).
+    /// Look up the password hash for a username (`None` if no such user).
     pub async fn get_password_hash(&self, username: &str) -> Result<Option<String>> {
-        let username = username.to_string();
-        self.with_conn(move |c| {
-            c.query_row(
-                "SELECT password_hash FROM admin_users WHERE username = ?1",
-                params![username],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
+        let sql = self.q("SELECT password_hash FROM admin_users WHERE username = ?");
+        on_pool!(self, p, {
+            let row = sqlx::query(&sql).bind(username).fetch_optional(p).await?;
+            Ok(row.map(|r| r.try_get::<String, _>(0)).transpose()?)
         })
-        .await
     }
 
-    /// Insert a fresh session row. `expires_at` is a unix timestamp.
-    /// The cookie value handed to the browser is `token`; on disk we
-    /// store only `hash_session_token(token)` so the raw cookie value
-    /// never lives in the sqlite file.
+    // ── Sessions ───────────────────────────────────────────────────────
+
+    /// Insert a fresh session. The cookie value is `token`; only
+    /// `BLAKE3(token)` is stored.
     pub async fn create_session(&self, token: &str, username: &str, expires_at: i64) -> Result<()> {
         let token_hash = hash_session_token(token);
-        let username = username.to_string();
-        self.with_conn(move |c| {
-            c.execute(
-                "INSERT INTO sessions (token_hash, username, expires_at) VALUES (?1, ?2, ?3)",
-                params![token_hash, username, expires_at],
-            )?;
+        let sql =
+            self.q("INSERT INTO sessions (token_hash, username, expires_at) VALUES (?, ?, ?)");
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(token_hash.as_str())
+                .bind(username)
+                .bind(expires_at)
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Resolve a cookie token back to its (username, expiry). Returns
-    /// `None` if the token is unknown *or* expired — callers don't need
-    /// to differentiate; both map to 401. The cookie value is hashed
-    /// before the query; the raw token never reaches sqlite.
+    /// Resolve a cookie token to `(username, expiry)`. `None` if unknown
+    /// or expired. Hashes the token before the query.
     pub async fn lookup_session(&self, token: &str) -> Result<Option<SessionRow>> {
         let token_hash = hash_session_token(token);
         let now = now_unix();
-        self.with_conn(move |c| {
-            c.query_row(
-                "SELECT username, expires_at FROM sessions \
-                 WHERE token_hash = ?1 AND expires_at > ?2",
-                params![token_hash, now],
-                |r| {
-                    Ok(SessionRow {
-                        username: r.get(0)?,
-                        expires_at: r.get(1)?,
-                    })
-                },
-            )
-            .optional()
+        let sql = self
+            .q("SELECT username, expires_at FROM sessions WHERE token_hash = ? AND expires_at > ?");
+        on_pool!(self, p, {
+            let row = sqlx::query(&sql)
+                .bind(token_hash.as_str())
+                .bind(now)
+                .fetch_optional(p)
+                .await?;
+            Ok(match row {
+                Some(r) => Some(SessionRow {
+                    username: r.try_get::<String, _>(0)?,
+                    expires_at: r.try_get::<i64, _>(1)?,
+                }),
+                None => None,
+            })
         })
-        .await
     }
 
-    /// Drop a single session row. Idempotent — deleting an unknown
-    /// token returns `Ok(())`. Called by `/api/logout`. Like the
-    /// lookup, hashes the cookie value before matching.
+    /// Drop a single session (idempotent). Hashes the token first.
     pub async fn delete_session(&self, token: &str) -> Result<()> {
         let token_hash = hash_session_token(token);
-        self.with_conn(move |c| {
-            c.execute(
-                "DELETE FROM sessions WHERE token_hash = ?1",
-                params![token_hash],
-            )?;
+        let sql = self.q("DELETE FROM sessions WHERE token_hash = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql)
+                .bind(token_hash.as_str())
+                .execute(p)
+                .await?;
             Ok(())
         })
-        .await
     }
 
-    /// Sweep expired session rows. Called opportunistically on each
-    /// login so the table doesn't grow unbounded over weeks of
-    /// browser-tab churn.
+    /// Sweep expired sessions. Returns the number removed.
     pub async fn prune_expired_sessions(&self) -> Result<u64> {
         let now = now_unix();
-        self.with_conn(move |c| {
-            let n = c.execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])?;
-            Ok(n as u64)
+        let sql = self.q("DELETE FROM sessions WHERE expires_at <= ?");
+        on_pool!(self, p, {
+            let r = sqlx::query(&sql).bind(now).execute(p).await?;
+            Ok(r.rows_affected())
         })
-        .await
     }
 
-    /// Run a closure with locked, blocking access to the sqlite
-    /// connection on a worker thread. Every public method goes
-    /// through this so the async signatures stay uniform.
-    ///
-    /// `pub(crate)` because the integration tests in `tests/admin.rs`
-    /// poke the db directly to assert invariants the public API
-    /// would otherwise hide (e.g. the H2 "raw token doesn't land on
-    /// disk" check). Not part of the public surface.
-    pub(crate) async fn with_conn<F, R>(&self, f: F) -> Result<R>
-    where
-        F: FnOnce(&Connection) -> rusqlite::Result<R> + Send + 'static,
-        R: Send + 'static,
-    {
-        let conn = self.conn.clone();
-        tokio::task::spawn_blocking(move || {
-            let conn = conn
-                .lock()
-                .map_err(|_| anyhow::anyhow!("admin sqlite mutex poisoned"))?;
-            f(&conn).map_err(anyhow::Error::from)
+    // ── Per-dialect upsert SQL (the statements that genuinely differ) ──
+
+    fn channel_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO channel_names (frequency, name, updated_at) VALUES (?, ?, ?) \
+                 ON CONFLICT(frequency) DO UPDATE SET name = excluded.name, \
+                 updated_at = excluded.updated_at"
+            }
+            Backend::MySql => {
+                "INSERT INTO channel_names (frequency, name, updated_at) VALUES (?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE name = VALUES(name), updated_at = VALUES(updated_at)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO channel_names (frequency, name, updated_at) VALUES ($1, $2, $3) \
+                 ON CONFLICT(frequency) DO UPDATE SET name = excluded.name, \
+                 updated_at = excluded.updated_at"
+            }
+        }
+    }
+
+    fn metrics_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT OR REPLACE INTO metrics_samples (ts, rx_bps, tx_bps, users, transmitting) \
+                 VALUES (?, ?, ?, ?, ?)"
+            }
+            Backend::MySql => {
+                "INSERT INTO metrics_samples (ts, rx_bps, tx_bps, users, transmitting) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE rx_bps = VALUES(rx_bps), tx_bps = VALUES(tx_bps), \
+                 users = VALUES(users), transmitting = VALUES(transmitting)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO metrics_samples (ts, rx_bps, tx_bps, users, transmitting) \
+                 VALUES ($1, $2, $3, $4, $5) \
+                 ON CONFLICT(ts) DO UPDATE SET rx_bps = excluded.rx_bps, tx_bps = excluded.tx_bps, \
+                 users = excluded.users, transmitting = excluded.transmitting"
+            }
+        }
+    }
+
+    /// Raw single-statement execute, for tests that assert invariants the
+    /// public API hides (e.g. the singleton CHECK).
+    #[cfg(test)]
+    pub(crate) async fn exec_raw(&self, sql: &str) -> Result<()> {
+        on_pool!(self, p, {
+            sqlx::query(sql).execute(p).await?;
+            Ok(())
         })
-        .await
-        .context("admin sqlite spawn_blocking join")?
+    }
+
+    /// Raw scalar-text fetch, for tests (e.g. reading the stored token
+    /// hash to prove the raw cookie never lands on disk).
+    #[cfg(test)]
+    pub(crate) async fn fetch_text(&self, sql: &str) -> Result<String> {
+        on_pool!(self, p, {
+            Ok(sqlx::query(sql)
+                .fetch_one(p)
+                .await?
+                .try_get::<String, _>(0)?)
+        })
     }
 }
 
@@ -679,39 +683,81 @@ pub struct AuditRow {
     pub detail: String,
 }
 
-/// Idempotently add a column to a table. SQLite has no
-/// `ALTER TABLE … ADD COLUMN IF NOT EXISTS`, so we check
-/// `pragma_table_info(<table>)` first and skip the ALTER if the
-/// column is already there. Used for schema upgrades from a db
-/// created by an older binary — fresh dbs get the column via the
-/// initial `CREATE TABLE` and this becomes a no-op.
-fn ensure_column_exists(
-    c: &Connection,
+/// Map a connection URL's scheme to a backend.
+fn detect_backend(url: &str) -> Result<Backend> {
+    let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
+    match scheme.as_str() {
+        "sqlite" => Ok(Backend::Sqlite),
+        "mysql" | "mariadb" => Ok(Backend::MySql),
+        "postgres" | "postgresql" => Ok(Backend::Postgres),
+        other => anyhow::bail!(
+            "unsupported admin database URL scheme {other:?} \
+             (expected sqlite / mysql / mariadb / postgres)"
+        ),
+    }
+}
+
+/// The on-disk path for a file-backed SQLite URL, or `None` for an
+/// in-memory database (`:memory:` / `mode=memory`). Used to decide
+/// whether to create the parent dir + `chmod 0600`.
+fn sqlite_file_path(url: &str, opts: &SqliteConnectOptions) -> Option<PathBuf> {
+    if url.contains(":memory:") || url.contains("mode=memory") {
+        return None;
+    }
+    Some(opts.get_filename().to_path_buf())
+}
+
+/// Rewrite positional `?` placeholders to Postgres `$1..$N`. Our SQL
+/// never contains a literal `?`, so a plain scan is safe.
+fn pg_rewrite(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len() + 8);
+    let mut n = 0u32;
+    for ch in sql.chars() {
+        if ch == '?' {
+            n += 1;
+            out.push('$');
+            out.push_str(&n.to_string());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Split a DDL batch into individual statements. Our DDL contains no
+/// `;` inside literals or comments, so splitting on `;` is safe.
+fn split_ddl(ddl: &str) -> impl Iterator<Item = &str> {
+    ddl.split(';').map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Idempotently add a column to a SQLite table (SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`). Only ever called for the SQLite backend
+/// to upgrade pre-existing files; `table`/`column`/`spec` are hardcoded.
+async fn ensure_column_sqlite(
+    pool: &SqlitePool,
     table: &str,
     column: &str,
     spec: &str,
-) -> rusqlite::Result<()> {
-    let mut stmt = c.prepare(&format!("PRAGMA table_info({table})"))?;
-    let exists = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .filter_map(|r| r.ok())
-        .any(|name| name == column);
+) -> Result<()> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("pragma table_info({table})"))?;
+    let exists = rows.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .map(|n| n == column)
+            .unwrap_or(false)
+    });
     if !exists {
-        // `ALTER TABLE` doesn't accept `?` parameters for column
-        // names, but `table`/`column`/`spec` are all hardcoded at
-        // call sites — no untrusted input lands here.
-        c.execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"),
-            [],
-        )?;
+        sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} add {column}"))?;
     }
     Ok(())
 }
 
-/// Apply `chmod 0600` to the admin db file. Best-effort: a permission
-/// error gets warned about but doesn't abort startup (so the panel
-/// still comes up on platforms / filesystems where chmod is a no-op
-/// or unsupported). Same posture as `tls::tighten_key_perms`.
+/// `chmod 0600` the admin db file (file-backed SQLite only). Best-effort.
 #[cfg(unix)]
 fn tighten_db_perms(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -721,31 +767,16 @@ fn tighten_db_perms(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn tighten_db_perms(_path: &Path) {
-    // Non-Unix targets (Windows) don't have a meaningful equivalent.
-    // The admin panel on Windows should be locked down via NTFS ACLs
-    // out-of-band; we deliberately don't try to emulate that here.
-}
+fn tighten_db_perms(_path: &Path) {}
 
-/// BLAKE3 of the session token, hex-encoded.
-///
-/// Used as the lookup key in the `sessions` table. The cookie carries
-/// the raw 32-hex-char token; we hash on every insert / lookup / delete
-/// so an attacker with read access to `admin.db` only ever sees the
-/// preimage-resistant hash, not anything they can present back over
-/// the wire.
-///
-/// BLAKE3 is unkeyed and the input is already 128 bits of CSPRNG
-/// output, so a salt would add nothing — and a deterministic hash is
-/// the whole point (we *need* the same input to map to the same row).
+/// BLAKE3 of the session token, hex-encoded — the `sessions` lookup key.
+/// The cookie carries the raw token; we hash on insert/lookup/delete so a
+/// leaked db only ever exposes the preimage-resistant hash.
 pub fn hash_session_token(raw: &str) -> String {
-    let h = blake3::hash(raw.as_bytes());
-    h.to_hex().to_string()
+    blake3::hash(raw.as_bytes()).to_hex().to_string()
 }
 
-/// Seconds since the unix epoch, as `i64` so sqlite's INTEGER column
-/// holds it natively. We don't need sub-second precision here — TTLs
-/// are measured in hours.
+/// Seconds since the unix epoch as `i64`.
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -753,16 +784,154 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+// ── Per-backend schema (fresh-start; all current columns present) ──────
+
+const SQLITE_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS admin_users (
+    username      TEXT PRIMARY KEY NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY NOT NULL,
+    username   TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS server_config (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    server_name     TEXT    NOT NULL DEFAULT '',
+    max_peers       INTEGER NOT NULL DEFAULT 256,
+    idle_kick_secs  INTEGER NOT NULL DEFAULT 10,
+    grpc_password   TEXT    NOT NULL DEFAULT '',
+    named_channels_enabled INTEGER NOT NULL DEFAULT 0,
+    audio_quality   INTEGER NOT NULL DEFAULT 2,
+    updated_at      INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO server_config (id) VALUES (1);
+CREATE TABLE IF NOT EXISTS channel_names (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    name       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS metrics_samples (
+    ts           INTEGER PRIMARY KEY NOT NULL,
+    rx_bps       INTEGER NOT NULL,
+    tx_bps       INTEGER NOT NULL,
+    users        INTEGER NOT NULL,
+    transmitting INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metrics_ts_idx ON metrics_samples(ts);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts        INTEGER NOT NULL,
+    kind      TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    frequency TEXT NOT NULL DEFAULT '',
+    detail    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_log_id_idx ON audit_log(id)
+"#;
+
+const MYSQL_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS admin_users (
+    username      VARCHAR(255) PRIMARY KEY NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash VARCHAR(64) PRIMARY KEY NOT NULL,
+    username   VARCHAR(255) NOT NULL,
+    expires_at BIGINT NOT NULL,
+    INDEX sessions_expires_idx (expires_at)
+);
+CREATE TABLE IF NOT EXISTS server_config (
+    id              INT PRIMARY KEY CHECK (id = 1),
+    server_name     VARCHAR(255) NOT NULL DEFAULT '',
+    max_peers       BIGINT NOT NULL DEFAULT 256,
+    idle_kick_secs  BIGINT NOT NULL DEFAULT 10,
+    grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
+    named_channels_enabled BIGINT NOT NULL DEFAULT 0,
+    audio_quality   BIGINT NOT NULL DEFAULT 2,
+    updated_at      BIGINT NOT NULL DEFAULT 0
+);
+INSERT IGNORE INTO server_config (id) VALUES (1);
+CREATE TABLE IF NOT EXISTS channel_names (
+    frequency  VARCHAR(32) PRIMARY KEY NOT NULL,
+    name       VARCHAR(255) NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS metrics_samples (
+    ts           BIGINT PRIMARY KEY NOT NULL,
+    rx_bps       BIGINT NOT NULL,
+    tx_bps       BIGINT NOT NULL,
+    users        BIGINT NOT NULL,
+    transmitting BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    ts        BIGINT NOT NULL,
+    kind      VARCHAR(64) NOT NULL,
+    actor     VARCHAR(255) NOT NULL,
+    frequency VARCHAR(32) NOT NULL DEFAULT '',
+    detail    VARCHAR(1024) NOT NULL DEFAULT ''
+)
+"#;
+
+const POSTGRES_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS admin_users (
+    username      TEXT PRIMARY KEY NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at    BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT PRIMARY KEY NOT NULL,
+    username   TEXT NOT NULL,
+    expires_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
+CREATE TABLE IF NOT EXISTS server_config (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    server_name     TEXT    NOT NULL DEFAULT '',
+    max_peers       BIGINT  NOT NULL DEFAULT 256,
+    idle_kick_secs  BIGINT  NOT NULL DEFAULT 10,
+    grpc_password   TEXT    NOT NULL DEFAULT '',
+    named_channels_enabled BIGINT NOT NULL DEFAULT 0,
+    audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    updated_at      BIGINT  NOT NULL DEFAULT 0
+);
+INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
+CREATE TABLE IF NOT EXISTS channel_names (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    name       TEXT NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS metrics_samples (
+    ts           BIGINT PRIMARY KEY NOT NULL,
+    rx_bps       BIGINT NOT NULL,
+    tx_bps       BIGINT NOT NULL,
+    users        BIGINT NOT NULL,
+    transmitting BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS metrics_ts_idx ON metrics_samples(ts);
+CREATE TABLE IF NOT EXISTS audit_log (
+    id        BIGSERIAL PRIMARY KEY,
+    ts        BIGINT NOT NULL,
+    kind      TEXT NOT NULL,
+    actor     TEXT NOT NULL,
+    frequency TEXT NOT NULL DEFAULT '',
+    detail    TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_log_id_idx ON audit_log(id)
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
     async fn migration_is_idempotent() {
-        // Running migrate twice on the same connection must not fail
-        // and must not duplicate the schema (CREATE TABLE IF NOT EXISTS
-        // is the only thing guaranteeing this — assert it explicitly).
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.migrate().await.unwrap();
         assert_eq!(db.user_count().await.unwrap(), 0);
@@ -770,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_insert_and_lookup_round_trip() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "$argon2id$fake$hash")
             .await
@@ -778,17 +947,15 @@ mod tests {
         assert_eq!(db.user_count().await.unwrap(), 1);
         let hash = db.get_password_hash("admin").await.unwrap().unwrap();
         assert_eq!(hash, "$argon2id$fake$hash");
-        // Unknown user must surface as None, not an error.
         assert!(db.get_password_hash("ghost").await.unwrap().is_none());
     }
 
     #[tokio::test]
     async fn session_round_trip_and_expiry() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "h").await.unwrap();
 
-        // Active session looks up successfully.
         let future = now_unix() + 3600;
         db.create_session("tok-valid", "admin", future)
             .await
@@ -797,7 +964,6 @@ mod tests {
         assert_eq!(row.username, "admin");
         assert_eq!(row.expires_at, future);
 
-        // Expired session looks up as None (same as unknown).
         db.create_session("tok-expired", "admin", now_unix() - 10)
             .await
             .unwrap();
@@ -807,54 +973,47 @@ mod tests {
 
     #[tokio::test]
     async fn raw_token_never_lands_on_disk() {
-        // H2: the cookie value must not appear in the sqlite file —
-        // only its BLAKE3 hash should. Smoke-test by inserting a
-        // recognisable raw token, dumping the row, and asserting
-        // the raw bytes aren't present anywhere in the column.
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "h").await.unwrap();
         let raw = "deadbeef-this-is-the-cookie-value";
         db.create_session(raw, "admin", now_unix() + 60)
             .await
             .unwrap();
-        let stored: String = db
-            .with_conn(|c| c.query_row("SELECT token_hash FROM sessions LIMIT 1", [], |r| r.get(0)))
+        let stored = db
+            .fetch_text("SELECT token_hash FROM sessions LIMIT 1")
             .await
             .unwrap();
         assert!(
             !stored.contains(raw),
-            "raw token leaked into token_hash column",
+            "raw token leaked into token_hash column"
         );
         assert_eq!(
             stored.len(),
             64,
             "expected 64-char BLAKE3 hex; got {}",
-            stored.len(),
+            stored.len()
         );
-        // Round-trip via lookup still works.
         let row = db.lookup_session(raw).await.unwrap().unwrap();
         assert_eq!(row.username, "admin");
     }
 
     #[tokio::test]
     async fn delete_session_is_idempotent() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "h").await.unwrap();
         db.create_session("tok", "admin", now_unix() + 60)
             .await
             .unwrap();
         db.delete_session("tok").await.unwrap();
-        // Second delete on the same token is fine.
         db.delete_session("tok").await.unwrap();
-        // And a delete on an unknown token is also fine.
         db.delete_session("never-existed").await.unwrap();
     }
 
     #[tokio::test]
     async fn update_password_hash_overwrites_existing_row() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "first-hash").await.unwrap();
         db.update_password_hash("admin", "second-hash")
@@ -866,9 +1025,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_other_sessions_for_user_keeps_current() {
-        // Three concurrent sessions for "admin". After deleting "the
-        // others", only the one matching keep_token_hash survives.
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "h").await.unwrap();
         let future = now_unix() + 3600;
@@ -888,21 +1045,18 @@ mod tests {
 
     #[tokio::test]
     async fn server_config_loads_defaults_on_fresh_db() {
-        // After a fresh migration, the INSERT OR IGNORE seeds the
-        // row with defaults from the column DEFAULT clauses. Load
-        // must return those defaults verbatim — they're the same
-        // values the legacy hardcoded constants used.
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         let cfg = db.load_server_config().await.unwrap();
         assert_eq!(cfg.server_name, "");
         assert_eq!(cfg.max_peers, 256);
         assert_eq!(cfg.idle_kick_secs, 10);
+        assert_eq!(cfg.audio_quality, 2);
     }
 
     #[tokio::test]
     async fn server_config_round_trips() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         let new = ServerConfig {
             server_name: "Singular Toki".into(),
@@ -919,47 +1073,28 @@ mod tests {
         assert_eq!(loaded.idle_kick_secs, 30);
         assert_eq!(loaded.grpc_password, "hunter2");
         assert!(loaded.named_channels_enabled);
+        assert_eq!(loaded.audio_quality, 1);
     }
 
     #[tokio::test]
-    async fn migrate_adds_grpc_password_to_pre_existing_table() {
-        // Upgrade path: a db created by a binary that pre-dates the
-        // grpc_password column should grow that column on next
-        // migrate(). Simulate by manually creating the old shape,
-        // then running migrate(), then verifying the column is
-        // present and load/save round-trip it.
-        let db = AdminDb::open_in_memory().unwrap();
-        db.with_conn(|c| {
-            c.execute_batch(
-                r#"
-                CREATE TABLE server_config (
-                    id              INTEGER PRIMARY KEY CHECK (id = 1),
-                    server_name     TEXT    NOT NULL DEFAULT '',
-                    max_peers       INTEGER NOT NULL DEFAULT 256,
-                    idle_kick_secs  INTEGER NOT NULL DEFAULT 10,
-                    updated_at      INTEGER NOT NULL DEFAULT 0
-                );
-                INSERT INTO server_config (id) VALUES (1);
-                CREATE TABLE admin_users (
-                    username TEXT PRIMARY KEY NOT NULL,
-                    password_hash TEXT NOT NULL,
-                    created_at INTEGER NOT NULL
-                );
-                CREATE TABLE sessions (
-                    token_hash TEXT PRIMARY KEY NOT NULL,
-                    username TEXT NOT NULL,
-                    expires_at INTEGER NOT NULL
-                );
-                "#,
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-        // Now run the migration the upgrade path would take.
+    async fn migrate_adds_columns_to_pre_existing_sqlite_table() {
+        // A SQLite db created by a binary that predates later columns
+        // should grow them on migrate(). Build the old shape, migrate,
+        // verify load/save round-trips the new columns.
+        let db = AdminDb::open_in_memory().await.unwrap();
+        for stmt in [
+            "CREATE TABLE server_config (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                server_name TEXT NOT NULL DEFAULT '',
+                max_peers INTEGER NOT NULL DEFAULT 256,
+                idle_kick_secs INTEGER NOT NULL DEFAULT 10,
+                updated_at INTEGER NOT NULL DEFAULT 0
+            )",
+            "INSERT INTO server_config (id) VALUES (1)",
+        ] {
+            db.exec_raw(stmt).await.unwrap();
+        }
         db.migrate().await.unwrap();
-        // The new column should be present and the row should
-        // round-trip through load/save with grpc_password set.
         db.save_server_config(&ServerConfig {
             server_name: "after-upgrade".into(),
             max_peers: 128,
@@ -972,42 +1107,30 @@ mod tests {
         .unwrap();
         let loaded = db.load_server_config().await.unwrap();
         assert_eq!(loaded.grpc_password, "secret");
-        // The named_channels_enabled column was added by the same
-        // upgrade path and round-trips too.
         assert!(loaded.named_channels_enabled);
-        // Running migrate() again must remain idempotent (no error,
-        // no second ALTER fail).
-        db.migrate().await.unwrap();
+        assert_eq!(loaded.audio_quality, 1);
+        db.migrate().await.unwrap(); // still idempotent
     }
 
     #[tokio::test]
     async fn server_config_is_singleton() {
-        // The CHECK (id = 1) constraint should refuse any attempt
-        // to add a second row. Smoke this so a future "let's relax
-        // the schema" change can't slip through unnoticed.
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         let err = db
-            .with_conn(|c| {
-                c.execute(
-                    "INSERT INTO server_config (id, server_name) VALUES (2, 'rogue')",
-                    [],
-                )
-            })
+            .exec_raw("INSERT INTO server_config (id, server_name) VALUES (2, 'rogue')")
             .await;
         assert!(err.is_err(), "second row should be rejected by CHECK");
     }
 
     #[tokio::test]
     async fn channel_names_crud_roundtrips() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
 
         db.set_channel_name("446.05", "Ops Net").await.unwrap();
         db.set_channel_name("447.00", "Backup").await.unwrap();
-        // Upsert: re-setting the same freq replaces, doesn't duplicate.
-        db.set_channel_name("446.05", "Dispatch").await.unwrap();
+        db.set_channel_name("446.05", "Dispatch").await.unwrap(); // upsert
         let names = db.load_channel_names().await.unwrap();
         assert_eq!(names.len(), 2);
         assert_eq!(names.get("446.05").map(String::as_str), Some("Dispatch"));
@@ -1024,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn metrics_insert_load_prune() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         for ts in [100, 200, 300] {
             db.insert_metric_sample(ts, ts as u64, (ts / 2) as u64, 3, 1)
@@ -1035,9 +1158,7 @@ mod tests {
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].ts, 100); // oldest-first
         assert_eq!(all[2].rx_bps, 300);
-        // since-filter
         assert_eq!(db.load_metrics(250).await.unwrap().len(), 1);
-        // prune drops rows strictly older than the cutoff
         db.prune_metrics(200).await.unwrap();
         let kept = db.load_metrics(0).await.unwrap();
         assert_eq!(kept.len(), 2);
@@ -1045,8 +1166,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_upsert_on_duplicate_ts() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        db.insert_metric_sample(100, 1, 1, 1, 0).await.unwrap();
+        db.insert_metric_sample(100, 999, 2, 2, 1).await.unwrap(); // same ts → replace
+        let all = db.load_metrics(0).await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].rx_bps, 999);
+    }
+
+    #[tokio::test]
     async fn audit_insert_load_filter_page_prune() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_audit(10, "connect", "A", "", "").await.unwrap();
         db.insert_audit(20, "kick", "admin", "446.05", "")
@@ -1056,23 +1188,19 @@ mod tests {
             .await
             .unwrap();
 
-        // No filter (ALL), newest-first.
         let (rows, total) = db.load_audit(&[], 50, 0).await.unwrap();
         assert_eq!(total, 3);
         assert_eq!(rows[0].kind, "auth-fail");
 
-        // Category filter.
         let (rows, total) = db.load_audit(&["kick", "rename"], 50, 0).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(rows[0].kind, "kick");
 
-        // Paging via before_id (id of the newest row is 3).
         let newest_id = db.load_audit(&[], 1, 0).await.unwrap().0[0].id;
         let (page2, _) = db.load_audit(&[], 50, newest_id).await.unwrap();
         assert_eq!(page2.len(), 2);
         assert!(page2.iter().all(|r| r.id < newest_id));
 
-        // Prune older than 25 → drops the two oldest.
         db.prune_audit(25).await.unwrap();
         let (rows, total) = db.load_audit(&[], 50, 0).await.unwrap();
         assert_eq!(total, 1);
@@ -1080,14 +1208,15 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn open_chmods_db_to_0600() {
+    #[tokio::test]
+    async fn open_chmods_db_to_0600() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("toki-db-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("admin.db");
-        let _db = AdminDb::open(&path).unwrap();
+        let url = format!("sqlite://{}?mode=rwc", path.display());
+        let _db = AdminDb::open(&url).await.unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(mode, 0o600, "admin.db must be chmod 0600, was {mode:o}");
@@ -1095,7 +1224,7 @@ mod tests {
 
     #[tokio::test]
     async fn prune_drops_only_expired_rows() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", "h").await.unwrap();
         db.create_session("active", "admin", now_unix() + 60)
@@ -1108,5 +1237,31 @@ mod tests {
         assert_eq!(pruned, 1);
         assert!(db.lookup_session("active").await.unwrap().is_some());
         assert!(db.lookup_session("stale").await.unwrap().is_none());
+    }
+
+    #[test]
+    fn pg_rewrite_numbers_placeholders() {
+        assert_eq!(pg_rewrite("a = ? AND b = ?"), "a = $1 AND b = $2");
+        assert_eq!(pg_rewrite("no params"), "no params");
+    }
+
+    #[test]
+    fn detect_backend_by_scheme() {
+        assert_eq!(detect_backend("sqlite::memory:").unwrap(), Backend::Sqlite);
+        assert_eq!(
+            detect_backend("sqlite://x?mode=rwc").unwrap(),
+            Backend::Sqlite
+        );
+        assert_eq!(detect_backend("mysql://u@h/d").unwrap(), Backend::MySql);
+        assert_eq!(detect_backend("mariadb://u@h/d").unwrap(), Backend::MySql);
+        assert_eq!(
+            detect_backend("postgres://u@h/d").unwrap(),
+            Backend::Postgres
+        );
+        assert_eq!(
+            detect_backend("postgresql://u@h/d").unwrap(),
+            Backend::Postgres
+        );
+        assert!(detect_backend("redis://x").is_err());
     }
 }

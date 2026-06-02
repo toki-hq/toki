@@ -1862,6 +1862,30 @@ impl TokiApp {
             }
         }
 
+        // ── Duplex-mode light (bottom-left) ────────────────────────
+        // A small dot + caption showing the current channel's duplex
+        // mode: lit (primary, glowing) "FDX" on a full-duplex channel,
+        // dim "HDX" on a half-duplex one. Hidden while the transport is
+        // down (no channel to describe). Bottom-left keeps it clear of
+        // the centered frequency readout and the top-row marquee/ACT dot.
+        if !st.is_transport_down() {
+            let full = self.state.lock().unwrap().duplex_full;
+            let dm_x = rect.left() + pad_x + 3.0;
+            let dm_y = rect.bottom() - pad_y - 4.0;
+            if full {
+                glow_dot(painter, Pos2::new(dm_x, dm_y), 3.0, T::PRIMARY, 1.0);
+            } else {
+                painter.circle_filled(Pos2::new(dm_x, dm_y), 3.0, T::INK_MUTE);
+            }
+            painter.text(
+                Pos2::new(dm_x + 7.0, dm_y),
+                Align2::LEFT_CENTER,
+                if full { "FDX" } else { "HDX" },
+                font_mono(7.0),
+                if full { T::PRIMARY_DIM } else { T::INK_MUTE },
+            );
+        }
+
         // ── Frequency readout ──────────────────────────────────────
         // Now the only text on this panel, so we let it dominate:
         // bigger font and centered both horizontally and vertically

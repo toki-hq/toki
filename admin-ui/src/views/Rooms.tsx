@@ -137,6 +137,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
                 key={r.frequency}
                 room={r}
                 name={names[r.frequency]}
+                mode={modes[r.frequency] ?? 0}
                 selected={current?.frequency === r.frequency}
                 onSelect={() => setSelected(r.frequency)}
               />
@@ -175,11 +176,13 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
 function ChannelRow({
   room,
   name,
+  mode,
   selected,
   onSelect,
 }: {
   room: Room;
   name?: string;
+  mode: number;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -195,7 +198,14 @@ function ChannelRow({
         {String(channelNumber(room.frequency)).padStart(2, "0")}
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-mono text-sm tabular">{room.frequency}</span>
+        <span className="flex items-center gap-1.5 font-mono text-sm tabular">
+          {room.frequency}
+          {mode === 1 && (
+            <span className="rounded bg-primary/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
+              full
+            </span>
+          )}
+        </span>
         <span
           className={cn(
             "truncate text-xs",

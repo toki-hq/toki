@@ -1825,34 +1825,14 @@ impl TokiApp {
             painter.circle_filled(Pos2::new(dot_x, dot_y), 3.0, T::INK_MUTE);
         }
         // Tiny "ACT" caption next to the light, on its left — gives
-        // the dot a label without crowding the corner.
-        // ── Duplex-mode light (top-right, left of ACT) ─────────────
-        // Mirrors the ACT light's "caption • dot" layout: a green glowing
-        // "FDX" on a full-duplex channel, an amber glowing "HDX" on a
-        // half-duplex one. Shown only when the server reported a mode
-        // (i.e. the full-duplex feature is enabled) and we're online —
-        // otherwise hidden entirely. Sits left of ACT: [FDX •]  [ACT •].
+        // the dot a label without crowding the corner. The duplex
+        // (HALF/FULL) indicator now lives as a colored badge below the
+        // MHz readout (see the frequency block below) rather than up
+        // here, so this corner is just ACT again.
         let (duplex_full, duplex_known) = {
             let s = self.state.lock().unwrap();
             (s.duplex_full, s.duplex_known)
         };
-        if !st.is_transport_down() && duplex_known {
-            let full = duplex_full;
-            let dplx_dot_x = dot_x - 40.0; // clear of the ACT caption + dot
-            let (color, label) = if full {
-                (T::PRIMARY, "FDX")
-            } else {
-                (T::TX, "HDX")
-            };
-            painter.text(
-                Pos2::new(dplx_dot_x - 6.0, dot_y),
-                Align2::RIGHT_CENTER,
-                label,
-                font_mono(7.0),
-                color,
-            );
-            glow_dot(painter, Pos2::new(dplx_dot_x, dot_y), 3.0, color, 1.0);
-        }
         painter.text(
             Pos2::new(dot_x - 6.0, dot_y),
             Align2::RIGHT_CENTER,
@@ -1876,11 +1856,12 @@ impl TokiApp {
             if !name.is_empty() {
                 // Vertically centered on `dot_y` so the name's midline
                 // matches the ACT caption + activity dot on the right.
-                // Stop short of the duplex (FDX/HDX) + ACT lights on the
-                // right so a long scrolling name never runs under them.
+                // Stop short of the ACT caption + dot so a long scrolling
+                // name never runs under them (the duplex indicator moved
+                // out of this corner to a badge below the readout).
                 let name_region = Rect::from_min_max(
                     Pos2::new(rect.left() + pad_x, dot_y - 6.0),
-                    Pos2::new(dot_x - 62.0, dot_y + 6.0),
+                    Pos2::new(dot_x - 26.0, dot_y + 6.0),
                 );
                 paint_marquee(
                     painter,
@@ -1930,8 +1911,26 @@ impl TokiApp {
         };
 
         // Available horizontal space between the panel pads, minus a
-        // bit of room for the " MHz" suffix.
+        // bit of room for the unit column (the "MHz" label and, beneath
+        // it, the duplex badge).
         let available_w = rect.width() - 2.0 * pad_x;
+
+        // Duplex (HALF/FULL) badge, shown to the right of the digits
+        // beneath the MHz label when the full-duplex feature is on and
+        // we're online. Lay it out first so the unit column can reserve
+        // the wider of "MHz" and the badge, keeping the block centered.
+        let show_duplex_badge = !offline_view && duplex_known;
+        let (badge_color, badge_label) = if duplex_full {
+            (T::PRIMARY, "FULL")
+        } else {
+            (T::TX, "HALF")
+        };
+        let badge_font = font_mono(9.0);
+        let badge_label_galley =
+            painter.layout_no_wrap(badge_label.to_string(), badge_font.clone(), badge_color);
+        let badge_w = badge_label_galley.size().x + 12.0;
+        let badge_h = 14.0;
+
         // Try a generous size; if the layout actually overflows we
         // step down. With the band's 3.2-digit numbers (e.g. "447.05")
         // 38 px fits the 200-px-wide regular OLED comfortably.
@@ -1939,7 +1938,15 @@ impl TokiApp {
         let unit_font = font_mono(12.0);
         let unit_galley =
             painter.layout_no_wrap("MHz".to_string(), unit_font.clone(), T::PRIMARY_DIM);
-        let unit_advance = unit_galley.size().x + 6.0; // gap to digits
+        // The unit column stacks "MHz" (top) over the duplex badge
+        // (below), so reserve the wider of the two to the right of the
+        // digits — neither should push past the panel pad.
+        let unit_col_w = if show_duplex_badge {
+            unit_galley.size().x.max(badge_w)
+        } else {
+            unit_galley.size().x
+        };
+        let unit_advance = unit_col_w + 6.0; // gap to digits
         loop {
             let g = painter.layout_no_wrap(freq_text.clone(), font_mono(font_size), active_color);
             if g.size().x + unit_advance <= available_w || font_size <= 22.0 {
@@ -1975,25 +1982,60 @@ impl TokiApp {
             active_glow,
             if offline_view { 0.0 } else { 1.0 },
         );
-        // "MHz" baseline-aligned to the digits. The digits' baseline
-        // sits roughly at (center + font_size * 0.30) for a mono font;
-        // good enough that the suffix tracks the readout cleanly.
-        // Suppressed in the offline view — the "—" placeholder
-        // doesn't need a unit.
-        let baseline_y = center_y + font_size * 0.30;
+        // Unit column to the right of the digits: "MHz" baseline-aligned
+        // to the digits, with the duplex badge stacked directly beneath
+        // it. The digits' baseline sits roughly at (center + font_size *
+        // 0.30) for a mono font; good enough that the suffix tracks the
+        // readout cleanly. Suppressed in the offline view — the "—"
+        // placeholder needs no unit.
+        let unit_x = freq_left + freq_galley.size().x + 7.0;
+        let baseline_y = center_y + font_size * 0.30 - 13.0;
         if !offline_view {
             painter.text(
-                Pos2::new(freq_left + freq_galley.size().x + 6.0, baseline_y),
+                Pos2::new(unit_x, baseline_y),
                 Align2::LEFT_BOTTOM,
                 "MHz",
                 unit_font,
                 T::PRIMARY_DIM,
             );
         }
-        // `baseline_y` is only relevant for the MHz suffix above; in
-        // the offline branch nothing reads it, so suppress the unused
-        // warning rather than reorder the block.
-        let _ = baseline_y;
+
+        // ── Duplex-mode badge (under the MHz label) ────────────────
+        // Styled like the M1–M4 memory presets: a rounded rect with a
+        // translucent color wash, a 1px colored border, and a centered
+        // colored label. Green "FULL" on a full-duplex channel, amber
+        // "HALF" on a half-duplex one. Only shown when the server
+        // reported a mode (full-duplex feature on) and we're online.
+        if show_duplex_badge {
+            let badge_rect = Rect::from_min_size(
+                Pos2::new(unit_x, baseline_y + 4.0),
+                Vec2::new(badge_w, badge_h),
+            );
+            let radius = CornerRadius::same(T::RADIUS_CHEVRON as u8);
+            // Translucent wash (alpha ~46, the same gentle tint the
+            // presets carry at rest) + a 1px border in the full color.
+            let fill = Color32::from_rgba_unmultiplied(
+                badge_color.r(),
+                badge_color.g(),
+                badge_color.b(),
+                46,
+            );
+            painter.rect_filled(badge_rect, radius, fill);
+            painter.rect(
+                badge_rect,
+                radius,
+                Color32::TRANSPARENT,
+                Stroke::new(1.0, badge_color),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                badge_rect.center(),
+                Align2::CENTER_CENTER,
+                badge_label,
+                badge_font,
+                badge_color,
+            );
+        }
 
         // ── Chevron row (no label between them) ────────────────────
         let chev_w = 56.0;

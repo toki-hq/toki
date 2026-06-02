@@ -4,13 +4,15 @@ A walkie-talkie style VOIP system. Tune to a frequency, hold a button to talk, r
 
 ## Layout
 
-Cargo workspace:
+Cargo workspace + a standalone web UI:
 
 ```
 crates/
   proto/    # toki.proto + generated tonic types + UDP wire format
-  server/   # gRPC signaling + UDP audio relay + admin web panel
+  server/   # gRPC signaling + UDP audio relay + admin gRPC-Web service
   client/   # egui desktop client
+admin-ui/   # React/Vite admin SPA (JS/TS, not a cargo crate) — its own
+            # Docker image; reverse-proxies to the server admin port
 ```
 
 ## Architecture
@@ -20,7 +22,7 @@ crates/
 - **Audio** — raw UDP, out of band, **encrypted + authenticated**. Client→server packets are `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, sealed with ChaCha20-Poly1305 under a per-session key from the TLS handshake. Version `0` is a keepalive (refreshes the NAT mapping / UDP source address, not forwarded); version `1` is a 10 ms raw-PCM frame (mono, i16 LE, 48 kHz); version `2` is a 10 ms **Opus** frame (the default — ~24 kbps audio, ~15–20× smaller than PCM; 10 ms framing keeps mouth-to-ear latency on par with the PCM path). The server is a pure relay — it verifies the tag, enforces a strictly-increasing sequence (replay protection), pins the session to its registering IP, then re-seals the opaque payload to each peer (server→peer packets prepend the codec version so receivers pick the right decoder); it never decodes audio. The operator picks the codec/quality (Raw / Low / Standard / High); the server advertises it at register and clients honor it.
 - **Audio I/O** — [cpal] on a dedicated thread, with inline resampling so 44.1/48/96 kHz devices interoperate cleanly. PTT-gated outbound; inbound feeds a latency-managed playback ring that keeps the voice backlog tight (~60 ms target, ~120 ms ceiling) — if playback ever falls behind it skips forward to catch up rather than carrying a growing delay. Output is opened in stereo so the balance control can pan to either ear.
 - **Client GUI** — [egui] / eframe radio-strip UI: frequency tuner, live roster with talking indicators, configurable global PTT, memory presets, mic/speaker/balance knobs, roger-beep presets, and a settings panel.
-- **Admin panel** — a React (Vite + Tailwind + shadcn/ui) SPA served over HTTPS on a separate port, talking **gRPC-Web** to an embedded `Admin` service. A server-streaming `Watch` RPC drives the live dashboard; unary RPCs handle operator actions (kick / move / rename / priority) and runtime configuration. Two switchable themes (modern + phosphor terminal).
+- **Admin panel** — a React (Vite + Tailwind + shadcn/ui) SPA that talks **gRPC-Web** to the server's embedded `Admin` service. It ships as its **own** container (`admin-ui/`): an nginx image that serves the static SPA and reverse-proxies the gRPC-Web + `/api` cookie endpoints to the server's admin port, so the browser stays same-origin and the `HttpOnly + Secure + SameSite=Strict` session cookie round-trips. A server-streaming `Watch` RPC drives the live dashboard; unary RPCs handle operator actions (kick / move / rename / priority) and runtime configuration. Two switchable themes (modern + phosphor terminal).
 
 Voice is **Opus** by default (~24 kbps/stream of audio — a ~15–20× cut vs the original raw PCM once per-packet overhead is counted, which scales the whole per-listener fan-out down with it). Frames are 10 ms, matching the capture cadence, so there's no encoder buffering and no added mouth-to-ear delay. Operators can dial quality (Low/Standard/High) or drop to Raw PCM (~780 kbps, no codec) from the admin panel; the choice is advertised to clients at register. The codec lives entirely on the clients — the server relays opaque encrypted payloads — so adding future codecs is a client-only change plus a wire version byte.
 
@@ -62,6 +64,14 @@ cargo run -p toki-client
 
 Anything in the `[tls]`, `[admin]`, and top-level `password` blocks of `config.toml` is overridden by the matching env var (env > TOML > defaults).
 
+### Admin UI environment variables
+
+The admin SPA is a separate service (`admin-ui/`). Its only setting is the backend it proxies to:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `TOKI_SERVER_GRPC_ENDPOINT` | The server **admin port** the UI reverse-proxies `/api/*` + the gRPC-Web `Admin` service to (it co-serves both). Read at container start (nginx) or by the Vite dev server — runtime, not baked into the bundle. | `https://toki-server:8000` |
+
 ### Admin database backends
 
 The admin store (users, sessions, runtime config, channel names, metrics, audit log) runs on **SQLite by default** — zero-config, embedded, a single `admin.db` file. To use a **remote MariaDB/MySQL or PostgreSQL** server instead, set a connection URL; the backend is chosen by the scheme:
@@ -83,6 +93,8 @@ or via env: `TOKI_ADMIN_DB_URL=postgres://toki:secret@db.example.com/toki`.
 
 ### Docker
 
+The server and the admin UI are **two images**. Run the server alone if you don't need the panel:
+
 ```sh
 docker pull ellessen/toki-server:latest
 # state (certs, admin.db) lives under /data
@@ -90,9 +102,27 @@ docker run -p 50051:50051/tcp -p 50051:50051/udp -p 8000:8000 \
   -v toki-data:/data ellessen/toki-server
 ```
 
+Add the admin UI as a second service pointing at the server's admin port:
+
+```sh
+docker pull ellessen/toki-admin-ui:latest
+docker run -p 8080:80 \
+  -e TOKI_SERVER_GRPC_ENDPOINT=https://<server-host>:8000 \
+  ellessen/toki-admin-ui
+```
+
+The bundled `docker-compose.yml` wires both (plus a Postgres) together for a local stack: `docker compose up`. The UI image serves plain HTTP on `:80` — terminate TLS in front of it (Coolify / Traefik / etc.); the `Secure` session cookie requires the browser to reach the UI over HTTPS.
+
 ## Admin panel
 
-Browse to `https://<host>:8000` (self-signed cert → expect a browser warning, or front it with a reverse proxy). Grab the seeded `admin` password from the server's startup log. The panel offers:
+The panel is the **`toki-admin-ui` service**, not the server. Browse to it (e.g. `https://<ui-host>/`); it reverse-proxies to the server's admin port, so the browser only ever sees the UI origin and the session cookie stays same-origin. For local UI development, run it against a server directly:
+
+```sh
+cd admin-ui
+TOKI_SERVER_GRPC_ENDPOINT=https://localhost:8000 npm run dev   # https://localhost:5173
+```
+
+Grab the seeded `admin` password from the server's startup log. The panel offers:
 
 - **Live dashboard** (gRPC-Web `Watch` stream) — members per frequency, current PTT holder, session age; updates on a 1 Hz tick and immediately after any admin action.
 - **Metrics & KPIs** — time-series charts of voice-relay **bandwidth (ingress/egress)** and **users over time** (selectable 1h / 24h / 7d window), plus uptime / peers / transmitting / busiest-channel KPIs and a host-health card (CPU, memory, disk via `sysinfo`). Samples persist to `admin.db` at 1-minute resolution (7-day retention); the UDP relay's byte counters feed the bandwidth series.

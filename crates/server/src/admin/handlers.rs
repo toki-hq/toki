@@ -3,15 +3,17 @@
 //! After the gRPC-Web migration this module is small: it owns only the
 //! two endpoints that have to be plain HTTP because they manage the
 //! session **cookie** (`POST /api/login`, `POST /api/logout` — gRPC can't
-//! ergonomically issue `Set-Cookie`), plus the SPA file server that hands
-//! the embedded React build to the browser. Everything else moved to the
-//! gRPC `Admin` service in [`super::grpc`].
+//! ergonomically issue `Set-Cookie`). The admin SPA is no longer served
+//! here: it ships as a standalone service (`admin-ui/`) that reverse-
+//! proxies these `/api/*` endpoints and the gRPC `Admin` service back to
+//! this port. Everything else moved to the gRPC `Admin` service in
+//! [`super::grpc`].
 
 use std::net::{IpAddr, SocketAddr};
 
 use axum::{
     extract::{ConnectInfo, FromRequestParts, State},
-    http::{header, request::Parts, StatusCode, Uri},
+    http::{header, request::Parts, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -48,57 +50,6 @@ fn internal_error<E: std::fmt::Debug>(e: E) -> (StatusCode, Json<ApiError>) {
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiError::new("internal error")),
     )
-}
-
-// ── Embedded SPA ──────────────────────────────────────────────────
-
-/// The built React admin SPA (Vite `dist/`). In debug builds rust-embed
-/// reads from the filesystem at runtime (so `npm run build` is picked up
-/// without recompiling); in release the bytes are baked into the binary.
-#[derive(rust_embed::RustEmbed)]
-#[folder = "admin-ui/dist/"]
-struct Assets;
-
-/// SPA file server. Serves an embedded asset by path; for any
-/// extension-less path that isn't a real file (a client-router route like
-/// `/server`), falls back to `index.html` so the SPA can route it. gRPC
-/// paths (`/toki.admin.v1.Admin/*`) and `/api/*` are matched by their own
-/// routes before this fallback runs.
-pub async fn spa(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
-
-    if let Some(file) = Assets::get(path) {
-        return asset_response(path, file.data.into_owned(), false);
-    }
-    // History fallback: no file extension → hand back index.html.
-    if !path.contains('.') {
-        if let Some(index) = Assets::get("index.html") {
-            return asset_response("index.html", index.data.into_owned(), true);
-        }
-    }
-    (StatusCode::NOT_FOUND, "not found").into_response()
-}
-
-/// Build an asset response: guessed Content-Type + a cache policy. Hashed
-/// build assets (Vite emits content-hashed filenames under `assets/`) are
-/// immutable and cached hard; `index.html` is `no-cache` so a redeploy is
-/// always picked up.
-fn asset_response(path: &str, body: Vec<u8>, is_index: bool) -> Response {
-    let mime = mime_guess::from_path(path).first_or_octet_stream();
-    let cache = if is_index || path == "index.html" {
-        "no-cache, must-revalidate"
-    } else {
-        "public, max-age=31536000, immutable"
-    };
-    (
-        [
-            (header::CONTENT_TYPE, mime.as_ref()),
-            (header::CACHE_CONTROL, cache),
-        ],
-        body,
-    )
-        .into_response()
 }
 
 // ── Cookie endpoints ──────────────────────────────────────────────

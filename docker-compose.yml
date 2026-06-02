@@ -1,0 +1,60 @@
+services:
+  toki-server:
+    build:
+      context: .
+      dockerfile: scripts/server.dockerfile
+      target: base
+    restart: unless-stopped
+    environment:
+      - TOKI_ADMIN_DB_URL=postgres://toki:toki@postgres:5432/toki
+      - TOKI_ADMIN_BIND=0.0.0.0
+      - TOKI_ADMIN_PORT=8000
+    command: cargo run -p toki-server
+    ports:
+      - "50051:50051/tcp"
+      - "50051:50051/udp"
+      - "8000:8000/tcp"
+    working_dir: /app
+    volumes:
+      - .:/app
+      - toki-data:/data
+
+
+  # Standalone admin UI. Dev mode: the Vite dev server (HTTPS via
+  # basic-ssl on :5173) reverse-proxies /api + /toki.admin.v1.Admin to
+  # TOKI_SERVER_GRPC_ENDPOINT, so the browser stays same-origin and the
+  # admin session cookie round-trips. Browse https://localhost:5173.
+  # (For production, build scripts/admin-ui.dockerfile → nginx instead.)
+  toki-admin-ui:
+    image: node:24-slim
+    restart: unless-stopped
+    working_dir: /app/admin-ui
+    command: sh -c "npm install && npm run gen && npm run dev -- --host 0.0.0.0"
+    environment:
+      - TOKI_SERVER_GRPC_ENDPOINT=https://toki-server:8000
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      # Keep the container's own (linux) install — don't let the host's
+      # node_modules shadow it.
+      - toki-ui-node-modules:/app/admin-ui/node_modules
+    depends_on:
+      - toki-server
+
+  postgres:
+    image: postgres:15
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - toki-db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=toki
+      - POSTGRES_PASSWORD=toki
+      - POSTGRES_DB=toki
+
+volumes:
+  toki-data:
+  toki-db:
+  toki-ui-node-modules:

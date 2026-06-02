@@ -42,25 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The admin SPA (crates/server/admin-ui) is embedded into the
-      # server binary via rust-embed at *compile* time, so its `dist/`
-      # must exist with real content before any cargo build. Build it
-      # first; `git diff --exit-code src/gen` guards against committed
-      # protobuf stubs drifting from admin.proto.
-      - name: install Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: crates/server/admin-ui/package-lock.json
-      - name: build admin UI
-        working-directory: crates/server/admin-ui
-        run: |
-          npm ci
-          npm run gen
-          git diff --exit-code src/gen || (echo "::error::src/gen is stale — run 'npm run gen' and commit" && exit 1)
-          npm run build
-
+      # The admin SPA is decoupled — it builds + ships as its own image
+      # (see the `admin-ui` and `docker-admin-ui-*` jobs below), so the
+      # server is a pure Rust build here with no Node step.
       - name: install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -124,6 +108,32 @@ jobs:
           if-no-files-found: error
 
   # ───────────────────────────────────────────────────────────────
+  # Admin UI: typecheck + build the standalone SPA and guard the
+  # committed protobuf stubs against drift. Independent of the Rust
+  # build now that the UI is decoupled.
+  # ───────────────────────────────────────────────────────────────
+  admin-ui:
+    name: admin UI (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: build
+        working-directory: admin-ui
+        run: |
+          npm ci
+          npm run gen
+          git diff --exit-code src/gen || (echo "::error::src/gen is stale — run 'npm run gen' and commit" && exit 1)
+          npm run build
+
+  # ───────────────────────────────────────────────────────────────
   # Smoke-build the server Docker image on every PR and push to
   # main/release-* — verifies the Dockerfile still works without
   # publishing anything. Single-platform (amd64) for speed; the
@@ -152,6 +162,35 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/toki-hq/toki
             org.opencontainers.image.description=Toki server (smoke build)
+            org.opencontainers.image.licenses=MIT
+
+  # ───────────────────────────────────────────────────────────────
+  # Smoke-build the standalone admin-UI Docker image on every PR and
+  # push — verifies the Node build + nginx packaging still works.
+  # ───────────────────────────────────────────────────────────────
+  docker-admin-ui-smoke:
+    name: docker admin-ui (smoke build)
+    runs-on: ubuntu-latest
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/admin-ui.dockerfile
+          push: false
+          load: false
+          tags: toki-admin-ui:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/toki-hq/toki
+            org.opencontainers.image.description=Toki admin UI (smoke build)
             org.opencontainers.image.licenses=MIT
 
   # ───────────────────────────────────────────────────────────────
@@ -200,6 +239,53 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/toki-hq/toki
             org.opencontainers.image.description=Toki server
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.tag.outputs.version }}
+
+  # ───────────────────────────────────────────────────────────────
+  # Tag-only: multi-arch publish of `ellessen/toki-admin-ui` to
+  # Docker Hub, mirroring the server release. Gated on the test job.
+  # ───────────────────────────────────────────────────────────────
+  docker-admin-ui-release:
+    name: docker admin-ui (release)
+    runs-on: ubuntu-latest
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up QEMU
+        # Needed for linux/arm64 cross-builds on an x86 runner.
+        uses: docker/setup-qemu-action@v3
+
+      - name: set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: derive version from tag
+        id: tag
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: build + push (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: scripts/admin-ui.dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            ellessen/toki-admin-ui:${{ steps.tag.outputs.version }}
+            ellessen/toki-admin-ui:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/toki-hq/toki
+            org.opencontainers.image.description=Toki admin UI
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.version=${{ steps.tag.outputs.version }}
 

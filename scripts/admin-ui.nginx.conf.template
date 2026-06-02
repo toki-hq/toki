@@ -1,0 +1,75 @@
+# nginx config for the standalone Toki admin UI.
+#
+# This is a TEMPLATE: the entrypoint runs `envsubst` over it to inject
+# ${TOKI_SERVER_GRPC_ENDPOINT} (the toki-server admin port — it co-serves
+# the gRPC-Web Admin service and the /api/* cookie endpoints). Only that
+# one variable is substituted; nginx's own `$host`/`$remote_addr`/etc. are
+# escaped from envsubst by listing the allowed var explicitly at runtime.
+#
+# The browser only ever talks to THIS origin, so the admin session cookie
+# stays same-origin: HttpOnly + Secure + SameSite=Strict round-trip
+# untouched. We just relay the API + gRPC-Web paths to the backend.
+#
+# gRPC-Web is plain HTTP/1.1 (not h2), so a normal `proxy_pass` carries it
+# — no `grpc_pass`/HTTP2 special-casing needed.
+
+server {
+    listen 80;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Resolve the backend at *request* time, not at boot. With a static
+    # `proxy_pass host:port`, nginx resolves the name once at startup and
+    # refuses to boot if the server container isn't up yet (crash-loop on
+    # start ordering) — and never re-resolves if the server restarts onto
+    # a new IP. Routing through a `$variable` + `resolver` defers lookups
+    # to each request. 127.0.0.11 is Docker's embedded DNS on user-defined
+    # networks (docker-compose / Coolify both use one).
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    # Don't buffer the streaming Watch RPC — flush server-sent frames to
+    # the browser as they arrive.
+    proxy_buffering off;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    # The backend admin port serves a self-signed cert by default; we
+    # trust it on the internal hop (TLS to the browser is terminated by
+    # the external proxy in front of this container).
+    proxy_ssl_verify off;
+    proxy_ssl_server_name on;
+
+    # gRPC-Web control-plane service. The `$upstream` variable (with no
+    # URI part) makes nginx forward the original request URI unchanged.
+    location /toki.admin.v1.Admin/ {
+        set $upstream ${TOKI_SERVER_GRPC_ENDPOINT};
+        proxy_pass $upstream;
+    }
+
+    # Cookie endpoints (login / logout). Set-Cookie is relayed verbatim,
+    # so the session cookie is stored against this origin.
+    location /api/ {
+        set $upstream ${TOKI_SERVER_GRPC_ENDPOINT};
+        proxy_pass $upstream;
+    }
+
+    # Static SPA with client-side-routing history fallback: real files are
+    # served as-is (Vite's content-hashed assets), anything else falls
+    # back to index.html so the React router can handle the path.
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # index.html must never be cached so a redeploy is picked up; the
+    # hashed assets under /assets are immutable and cached hard.
+    location = /index.html {
+        add_header Cache-Control "no-cache, must-revalidate";
+    }
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+}

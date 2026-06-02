@@ -89,14 +89,6 @@ rand = "0.8"
 # Hex encoding for session token cookies. Keeps the cookie value
 # ASCII-safe without dragging in base64.
 hex = "0.4"
-# The built React admin SPA (Vite `dist/`) is embedded into the binary
-# so the server stays self-contained. In debug builds rust-embed reads
-# from the filesystem at runtime (so `npm run build` is picked up
-# without recompiling); release bakes the bytes in.
-rust-embed = "8"
-# Content-Type guessing for the embedded SPA assets (hashed .js/.css,
-# fonts, index.html).
-mime_guess = "2"
 # Tower is needed at runtime now (not just tests) to layer GrpcWebLayer
 # + the auth interceptor onto the admin gRPC service.
 tower = "0.5"

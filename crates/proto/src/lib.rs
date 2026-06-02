@@ -30,17 +30,22 @@ pub mod admin {
 ///              little-endian i16 PCM samples; zero bytes for keepalives
 /// ```
 ///
-/// Server → peer packet layout (`HEADER_LEN_S2C` = 24 bytes header):
+/// Server → peer packet layout (`HEADER_LEN_S2C` = 29 bytes header):
 ///
 /// ```text
-///   [0..8]     8-byte little-endian monotonic seq, peer-specific
-///   [8..24]    16-byte Poly1305 tag
-///   [24..]     ChaCha20 ciphertext of the PCM payload
+///   [0]        1-byte codec version (the *sender's* VERSION_AUDIO_*); AEAD AAD
+///   [1..5]     4-byte little-endian sender routing id; AEAD AAD
+///   [5..13]    8-byte little-endian monotonic seq, peer-specific; doubles as nonce
+///   [13..29]   16-byte Poly1305 tag
+///   [29..]     ChaCha20 ciphertext of the audio payload (PCM or Opus)
 /// ```
 ///
 /// No token in the S2C direction: the client's socket is `connect()`-ed
 /// to exactly one server endpoint and trusts everything that arrives;
-/// the AEAD tag is the actual authenticator.
+/// the AEAD tag is the actual authenticator. The codec version + sender
+/// id are bound as associated data (see [`wire::s2c_aad`]) so neither can
+/// be tampered, and the sender id lets the receiver demux + mix several
+/// concurrent talkers on a full-duplex channel.
 pub mod wire {
     pub const TOKEN_LEN: usize = 16;
     /// Per-packet monotonic sequence width, in bytes (le-encoded u64).
@@ -54,16 +59,41 @@ pub mod wire {
     /// trailing 8 bytes; the leading 4 bytes are constant zero.
     pub const NONCE_LEN: usize = 12;
 
+    /// Per-sender routing id stamped into the S2C header, in bytes
+    /// (le-encoded u32). The server assigns each session a compact id at
+    /// register; the receiver uses it purely to route each packet to the
+    /// right per-sender decoder + jitter buffer when several peers talk
+    /// at once on a full-duplex channel. It is *not* an identity — the
+    /// roster's talking indicators come from the gRPC `Ptt` events.
+    pub const SENDER_ID_LEN: usize = 4;
+
     /// Client→server header length (token + version + seq + tag).
     pub const HEADER_LEN_C2S: usize = TOKEN_LEN + 1 + SEQ_LEN + TAG_LEN;
-    /// Server→peer header length (version + seq + tag; no token).
+    /// Server→peer header length: `version(1) | sender_id(4) | seq(8) | tag(16)`.
+    /// (No token — the client trusts everything on its `connect()`-ed
+    /// socket and the AEAD tag is the authenticator.)
     ///
-    /// The leading version byte tells the receiver which codec the
-    /// relayed payload uses (PCM vs Opus) so it can pick the right
-    /// decoder + AEAD associated-data. The server stamps it with the
-    /// *sender's* version, so mixed-codec senders and legacy peers
-    /// interoperate per-packet.
-    pub const HEADER_LEN_S2C: usize = 1 + SEQ_LEN + TAG_LEN;
+    /// - **version** tells the receiver which codec the relayed payload
+    ///   uses (PCM vs Opus); the server stamps the *sender's* version so
+    ///   mixed-codec senders interoperate per-packet.
+    /// - **sender_id** routes the packet to a per-sender decoder/jitter
+    ///   buffer so a receiver can mix concurrent talkers on a full-duplex
+    ///   channel (on a half-duplex channel there's only ever one).
+    ///
+    /// Both `version` and `sender_id` are folded into the AEAD associated
+    /// data (see [`s2c_aad`]), so a tampered header fails the tag check.
+    pub const HEADER_LEN_S2C: usize = 1 + SENDER_ID_LEN + SEQ_LEN + TAG_LEN;
+
+    /// Build the S2C AEAD associated data from the packet's plaintext
+    /// header fields (codec version + sender routing id). The relay
+    /// (encrypt) and the receiver (decrypt) must construct this
+    /// identically.
+    pub fn s2c_aad(version: u8, sender_id: u32) -> [u8; 1 + SENDER_ID_LEN] {
+        let mut aad = [0u8; 1 + SENDER_ID_LEN];
+        aad[0] = version;
+        aad[1..].copy_from_slice(&sender_id.to_le_bytes());
+        aad
+    }
 
     /// Back-compat alias for code that still wants the inbound header
     /// length — kept until call sites migrate to the explicit name.
@@ -102,8 +132,9 @@ pub mod wire {
     pub const MAX_OPUS_PAYLOAD: usize = 512;
 
     /// Largest UDP datagram we ever send/receive. The PCM frame (960 B)
-    /// dominates the Opus payload, so the C2S PCM packet is the ceiling;
-    /// S2C is smaller (no token, +1 version byte). Sized off the larger.
+    /// dominates the Opus payload, so the C2S PCM packet is the ceiling
+    /// (41 B header). The S2C header is 29 B (no token, +sender_id), so
+    /// an S2C PCM packet (989 B) still fits under this. Sized off C2S.
     pub const MAX_AUDIO_PACKET: usize = HEADER_LEN_C2S + FRAME_BYTES;
 
     /// True for the two forwardable audio codecs (not keepalive).
@@ -156,6 +187,40 @@ pub mod version {
             (Some(s), Some(c)) => s == c,
             _ => false,
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::wire::*;
+
+    #[test]
+    fn s2c_header_layout_is_29_bytes() {
+        // version(1) + sender_id(4) + seq(8) + tag(16)
+        assert_eq!(HEADER_LEN_S2C, 1 + 4 + 8 + 16);
+        assert_eq!(SENDER_ID_LEN, 4);
+        // The S2C PCM packet must still fit under the global ceiling.
+        assert!(HEADER_LEN_S2C + FRAME_BYTES <= MAX_AUDIO_PACKET);
+    }
+
+    #[test]
+    fn s2c_aad_round_trips_version_and_sender() {
+        let aad = s2c_aad(VERSION_AUDIO_OPUS, 0xDEAD_BEEF);
+        assert_eq!(aad[0], VERSION_AUDIO_OPUS);
+        assert_eq!(
+            u32::from_le_bytes([aad[1], aad[2], aad[3], aad[4]]),
+            0xDEAD_BEEF
+        );
+        // Distinct (version, sender) pairs yield distinct AAD, so a
+        // packet resealed for one stream can't be replayed as another.
+        assert_ne!(
+            s2c_aad(VERSION_AUDIO_PCM, 1),
+            s2c_aad(VERSION_AUDIO_OPUS, 1)
+        );
+        assert_ne!(
+            s2c_aad(VERSION_AUDIO_OPUS, 1),
+            s2c_aad(VERSION_AUDIO_OPUS, 2)
+        );
     }
 }
 

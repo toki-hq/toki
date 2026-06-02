@@ -36,9 +36,10 @@
 //!     (44.1) talks to a macOS client (48) — without resampling, frames
 //!     arrive faster or slower than the receiver consumes them.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -48,7 +49,63 @@ use tracing::{info, warn};
 
 use toki_proto::wire::{FRAME_SAMPLES, SAMPLE_RATE_HZ};
 
-pub type PlaybackBuf = Arc<Mutex<VecDeque<i16>>>;
+/// Reserved mixer slot for locally-generated, play-in-full audio (roger
+/// beeps, tone previews). Server-assigned sender ids start at 1, so 0
+/// never collides with a peer's voice stream.
+pub const LOCAL_SENDER_ID: u32 = 0;
+
+/// Evict a peer's drained jitter buffer after this long with no new
+/// audio, so the per-sender map doesn't accumulate one entry per session
+/// ever seen. Far longer than any inter-packet gap during speech.
+const SENDER_IDLE_EVICT: Duration = Duration::from_secs(3);
+
+/// One source's playback jitter buffer plus when it last received audio
+/// (for idle eviction). Wire-rate (48 kHz) mono i16.
+struct SenderBuf {
+    buf: VecDeque<i16>,
+    last: Instant,
+}
+
+/// Playback mixer: one jitter buffer per audio source (each peer's
+/// `sender_id`, plus [`LOCAL_SENDER_ID`] for beeps), summed sample-for-
+/// sample by the output callback. On a half-duplex channel there's only
+/// ever one peer talking, so this degrades to a single buffer; on a
+/// full-duplex channel concurrent talkers mix here.
+#[derive(Default)]
+pub struct Mixer {
+    senders: HashMap<u32, SenderBuf>,
+}
+
+impl Mixer {
+    /// Pop up to `max` mixed mono samples into `out`. Each position sums
+    /// one sample from every source buffer (absent → 0), clipped to i16.
+    /// Stops early once *every* buffer is dry (so the callback pads with
+    /// silence rather than emitting zeros forever).
+    fn mix_into(&mut self, out: &mut Vec<i16>, max: usize) {
+        for _ in 0..max {
+            let mut any = false;
+            let mut acc: i32 = 0;
+            for sb in self.senders.values_mut() {
+                if let Some(s) = sb.buf.pop_front() {
+                    acc += s as i32;
+                    any = true;
+                }
+            }
+            if !any {
+                break;
+            }
+            out.push(acc.clamp(i16::MIN as i32, i16::MAX as i32) as i16);
+        }
+    }
+
+    /// Test-only: a source's current jitter buffer, if present.
+    #[cfg(test)]
+    fn sender_buf(&self, id: u32) -> Option<&VecDeque<i16>> {
+        self.senders.get(&id).map(|sb| &sb.buf)
+    }
+}
+
+pub type PlaybackBuf = Arc<Mutex<Mixer>>;
 
 pub struct AudioHandle {
     pub mic_rx: UnboundedReceiver<Vec<i16>>,
@@ -613,11 +670,8 @@ pub fn spawn(
     initial_balance: f32,
 ) -> Result<AudioHandle> {
     let (mic_tx, mic_rx) = unbounded_channel::<Vec<i16>>();
-    // Pre-size the playback ring for ~500 ms of wire-rate audio so we
-    // don't reallocate during normal jitter absorption.
-    let playback: PlaybackBuf = Arc::new(Mutex::new(VecDeque::with_capacity(
-        SAMPLE_RATE_HZ as usize / 2,
-    )));
+    // Per-source playback mixer (one jitter buffer per talker + beeps).
+    let playback: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AudioCmd>();
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
@@ -1164,17 +1218,13 @@ where
             while ready.len() < frames_needed {
                 wire_chunk.clear();
                 {
-                    let mut buf = playback.lock().unwrap();
-                    for _ in 0..256 {
-                        if let Some(s) = buf.pop_front() {
-                            wire_chunk.push(s);
-                        } else {
-                            break;
-                        }
-                    }
+                    // Mix one chunk across all active sources (peers +
+                    // local beeps). On half-duplex this is a single buffer.
+                    let mut mixer = playback.lock().unwrap();
+                    mixer.mix_into(&mut wire_chunk, 256);
                 }
                 if wire_chunk.is_empty() {
-                    break; // ring is dry, callback will pad with silence
+                    break; // all sources dry, callback will pad with silence
                 }
                 resampled.clear();
                 resampler.process(&wire_chunk, &mut resampled);
@@ -1227,13 +1277,22 @@ where
 /// latency-managed path used by incoming voice.
 pub fn push_playback(buf: &PlaybackBuf, samples: &[i16]) {
     let mut guard = buf.lock().unwrap();
+    let now = Instant::now();
+    let slot = guard
+        .senders
+        .entry(LOCAL_SENDER_ID)
+        .or_insert_with(|| SenderBuf {
+            buf: VecDeque::with_capacity(SAMPLE_RATE_HZ as usize / 2),
+            last: now,
+        });
+    slot.last = now;
     // 500 ms at wire rate.
     let cap = (SAMPLE_RATE_HZ / 2) as usize;
     for &s in samples {
-        if guard.len() >= cap {
-            guard.pop_front();
+        if slot.buf.len() >= cap {
+            slot.buf.pop_front();
         }
-        guard.push_back(s);
+        slot.buf.push_back(s);
     }
 }
 
@@ -1258,12 +1317,30 @@ const VOICE_MAX_SAMPLES: usize = (SAMPLE_RATE_HZ as usize * 120) / 1000;
 /// catch-up skip that keeps voice tight rather than carrying a growing
 /// delay. For half-duplex push-to-talk this is the right trade: a brief
 /// skip during a hiccup beats a permanently laggy channel.
-pub fn push_voice(buf: &PlaybackBuf, samples: &[i16]) {
+/// `sender_id` is the per-session routing id from the S2C header — each
+/// talker gets their own jitter buffer so concurrent full-duplex streams
+/// stay independent (and Opus decoder state never crosses senders). The
+/// 60/120 ms catch-up is applied per buffer.
+pub fn push_voice(buf: &PlaybackBuf, sender_id: u32, samples: &[i16]) {
     let mut guard = buf.lock().unwrap();
-    guard.extend(samples.iter().copied());
-    if guard.len() > VOICE_MAX_SAMPLES {
-        let drop = guard.len() - VOICE_TARGET_SAMPLES;
-        guard.drain(..drop);
+    let now = Instant::now();
+    // Opportunistically drop drained buffers from talkers who've gone
+    // quiet, so the map doesn't grow one entry per session ever heard.
+    guard.senders.retain(|&id, sb| {
+        id == sender_id
+            || id == LOCAL_SENDER_ID
+            || !sb.buf.is_empty()
+            || now.duration_since(sb.last) < SENDER_IDLE_EVICT
+    });
+    let slot = guard.senders.entry(sender_id).or_insert_with(|| SenderBuf {
+        buf: VecDeque::with_capacity(VOICE_MAX_SAMPLES),
+        last: now,
+    });
+    slot.last = now;
+    slot.buf.extend(samples.iter().copied());
+    if slot.buf.len() > VOICE_MAX_SAMPLES {
+        let drop = slot.buf.len() - VOICE_TARGET_SAMPLES;
+        slot.buf.drain(..drop);
     }
 }
 
@@ -1413,32 +1490,51 @@ mod beep_tests {
     #[test]
     fn push_voice_keeps_small_backlog_intact() {
         // Below the cap, nothing is dropped — every sample is preserved.
-        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
-        push_voice(&buf, &vec![7i16; VOICE_TARGET_SAMPLES]);
-        assert_eq!(buf.lock().unwrap().len(), VOICE_TARGET_SAMPLES);
+        let buf: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
+        push_voice(&buf, 1, &vec![7i16; VOICE_TARGET_SAMPLES]);
+        assert_eq!(
+            buf.lock().unwrap().sender_buf(1).unwrap().len(),
+            VOICE_TARGET_SAMPLES
+        );
     }
 
     #[test]
     fn push_voice_trims_to_target_when_backlog_exceeds_cap() {
-        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        let buf: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
         // Overflow the hard ceiling in one shot.
-        push_voice(&buf, &vec![1i16; VOICE_MAX_SAMPLES + 5000]);
+        push_voice(&buf, 1, &vec![1i16; VOICE_MAX_SAMPLES + 5000]);
         // It snaps back to the target, not just shaves the overflow —
         // so latency can't sit pinned at the ceiling.
-        assert_eq!(buf.lock().unwrap().len(), VOICE_TARGET_SAMPLES);
+        assert_eq!(
+            buf.lock().unwrap().sender_buf(1).unwrap().len(),
+            VOICE_TARGET_SAMPLES
+        );
     }
 
     #[test]
     fn push_voice_catch_up_drops_oldest_keeps_newest() {
-        let buf: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        let buf: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
         // Fill near the cap with a marker value, then push fresh audio
         // that tips it over. The retained window must be the *newest*
         // audio (the catch-up discards the stale front).
-        push_voice(&buf, &vec![1i16; VOICE_MAX_SAMPLES - 10]);
-        push_voice(&buf, &vec![2i16; 100]);
+        push_voice(&buf, 1, &vec![1i16; VOICE_MAX_SAMPLES - 10]);
+        push_voice(&buf, 1, &vec![2i16; 100]);
         let guard = buf.lock().unwrap();
-        assert_eq!(guard.len(), VOICE_TARGET_SAMPLES);
-        assert_eq!(*guard.back().unwrap(), 2, "freshest sample retained");
+        let sb = guard.sender_buf(1).unwrap();
+        assert_eq!(sb.len(), VOICE_TARGET_SAMPLES);
+        assert_eq!(*sb.back().unwrap(), 2, "freshest sample retained");
+    }
+
+    #[test]
+    fn mixer_sums_two_concurrent_senders() {
+        // Full-duplex core: two talkers' streams add sample-for-sample,
+        // and mixing stops once both buffers are dry.
+        let buf: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
+        push_voice(&buf, 1, &[100, 100, 100]);
+        push_voice(&buf, 2, &[10, 20, 30]);
+        let mut out = Vec::new();
+        buf.lock().unwrap().mix_into(&mut out, 8);
+        assert_eq!(out, vec![110, 120, 130], "per-position sum of both senders");
     }
 
     #[test]

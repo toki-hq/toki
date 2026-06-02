@@ -204,6 +204,13 @@ impl AdminDb {
                     "INTEGER NOT NULL DEFAULT 2",
                 )
                 .await?;
+                ensure_column_sqlite(
+                    p,
+                    "server_config",
+                    "full_duplex_enabled",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                .await?;
             }
             Pool::MySql(p) => {
                 for stmt in split_ddl(MYSQL_DDL) {
@@ -230,7 +237,7 @@ impl AdminDb {
     /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                   named_channels_enabled, audio_quality \
+                   named_channels_enabled, audio_quality, full_duplex_enabled \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -242,6 +249,7 @@ impl AdminDb {
                     grpc_password: r.try_get::<String, _>(3)?,
                     named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
                     audio_quality: r.try_get::<i64, _>(5)? as u32,
+                    full_duplex_enabled: r.try_get::<i64, _>(6)? != 0,
                 },
                 None => ServerConfig::default(),
             })
@@ -253,7 +261,8 @@ impl AdminDb {
         let now = now_unix();
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
-                 named_channels_enabled = ?, audio_quality = ?, updated_at = ? \
+                 named_channels_enabled = ?, audio_quality = ?, full_duplex_enabled = ?, \
+                 updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
             sqlx::query(&sql)
@@ -263,6 +272,7 @@ impl AdminDb {
                 .bind(cfg.grpc_password.as_str())
                 .bind(cfg.named_channels_enabled as i64)
                 .bind(cfg.audio_quality as i64)
+                .bind(cfg.full_duplex_enabled as i64)
                 .bind(now)
                 .execute(p)
                 .await?;
@@ -314,6 +324,48 @@ impl AdminDb {
     pub async fn clear_all_channel_names(&self) -> Result<()> {
         on_pool!(self, p, {
             sqlx::query("DELETE FROM channel_names").execute(p).await?;
+            Ok(())
+        })
+    }
+
+    /// Load every non-default channel duplex mode (canonical frequency →
+    /// integer mode, 0 = half / 1 = full). Half-duplex frequencies are
+    /// not stored (an absent key is half), so the map is usually small.
+    pub async fn load_channel_modes(&self) -> Result<HashMap<String, u32>> {
+        on_pool!(self, p, {
+            let rows = sqlx::query("SELECT frequency, mode FROM channel_modes")
+                .fetch_all(p)
+                .await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(r.try_get::<String, _>(0)?, r.try_get::<i64, _>(1)? as u32);
+            }
+            Ok(map)
+        })
+    }
+
+    /// Upsert a single channel's duplex mode (caller validated freq +
+    /// mode). Half-duplex (`0`) is stored too — the caller clears the row
+    /// when resetting to default rather than relying on absence here.
+    pub async fn set_channel_mode(&self, frequency: &str, mode: u32) -> Result<()> {
+        let now = now_unix();
+        let sql = self.mode_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(frequency)
+                .bind(mode as i64)
+                .bind(now)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Delete a single channel's stored duplex mode (back to half-duplex).
+    pub async fn clear_channel_mode(&self, frequency: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM channel_modes WHERE frequency = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(frequency).execute(p).await?;
             Ok(())
         })
     }
@@ -616,6 +668,25 @@ impl AdminDb {
         }
     }
 
+    fn mode_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES (?, ?, ?) \
+                 ON CONFLICT(frequency) DO UPDATE SET mode = excluded.mode, \
+                 updated_at = excluded.updated_at"
+            }
+            Backend::MySql => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES (?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE mode = VALUES(mode), updated_at = VALUES(updated_at)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES ($1, $2, $3) \
+                 ON CONFLICT(frequency) DO UPDATE SET mode = excluded.mode, \
+                 updated_at = excluded.updated_at"
+            }
+        }
+    }
+
     fn metrics_upsert_sql(&self) -> &'static str {
         match self.backend {
             Backend::Sqlite => {
@@ -871,12 +942,18 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled INTEGER NOT NULL DEFAULT 0,
     audio_quality   INTEGER NOT NULL DEFAULT 2,
+    full_duplex_enabled INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO server_config (id) VALUES (1);
 CREATE TABLE IF NOT EXISTS channel_names (
     frequency  TEXT PRIMARY KEY NOT NULL,
     name       TEXT NOT NULL,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    mode       INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
@@ -918,12 +995,18 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT NOT NULL DEFAULT 2,
+    full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 INSERT IGNORE INTO server_config (id) VALUES (1);
 CREATE TABLE IF NOT EXISTS channel_names (
     frequency  VARCHAR(32) PRIMARY KEY NOT NULL,
     name       VARCHAR(255) NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  VARCHAR(32) PRIMARY KEY NOT NULL,
+    mode       BIGINT NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
@@ -963,12 +1046,18 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
 INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS channel_names (
     frequency  TEXT PRIMARY KEY NOT NULL,
     name       TEXT NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    mode       BIGINT NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
@@ -1130,6 +1219,7 @@ mod tests {
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            full_duplex_enabled: true,
         };
         db.save_server_config(&new).await.unwrap();
         let loaded = db.load_server_config().await.unwrap();
@@ -1139,6 +1229,7 @@ mod tests {
         assert_eq!(loaded.grpc_password, "hunter2");
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
+        assert!(loaded.full_duplex_enabled);
     }
 
     #[tokio::test]
@@ -1167,6 +1258,7 @@ mod tests {
             grpc_password: "secret".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            full_duplex_enabled: true,
         })
         .await
         .unwrap();
@@ -1208,6 +1300,26 @@ mod tests {
 
         db.clear_all_channel_names().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_modes_crud_roundtrips() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_channel_modes().await.unwrap().is_empty());
+
+        db.set_channel_mode("446.05", 1).await.unwrap(); // full
+        db.set_channel_mode("447.00", 1).await.unwrap();
+        db.set_channel_mode("446.05", 0).await.unwrap(); // upsert back to half
+        let modes = db.load_channel_modes().await.unwrap();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes.get("446.05").copied(), Some(0));
+        assert_eq!(modes.get("447.00").copied(), Some(1));
+
+        db.clear_channel_mode("446.05").await.unwrap();
+        let modes = db.load_channel_modes().await.unwrap();
+        assert_eq!(modes.len(), 1);
+        assert!(!modes.contains_key("446.05"));
     }
 
     #[tokio::test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// State shared between the GUI thread and the tokio runtime thread.
@@ -26,8 +26,24 @@ pub struct ClientState {
     pub members: HashMap<String, String>,
     /// Walkie-talkie lock: client_id of whoever is currently transmitting,
     /// or `None` if the floor is free. Updated only from authoritative
-    /// server broadcasts — the local press never sets this.
+    /// server broadcasts — the local press never sets this. **Half-duplex
+    /// only**; on a full-duplex channel use `talkers` instead.
     pub holder: Option<String>,
+    /// Whether the current channel is full-duplex. Delivered by the server
+    /// (`ChannelModeChanged`) on join / change-frequency and on live mode
+    /// changes. On full-duplex the client transmits the instant PTT is
+    /// pressed (no floor grant) and several members can talk at once.
+    pub duplex_full: bool,
+    /// Whether the server has told us this channel's duplex mode at all.
+    /// The server only emits `ChannelModeChanged` while the full-duplex
+    /// feature is enabled, so this stays `false` when the feature is off —
+    /// the UI then hides the duplex indicator entirely. Reset on every
+    /// frequency change / disconnect.
+    pub duplex_known: bool,
+    /// On a full-duplex channel, the set of client_ids currently keying
+    /// (from `Ptt` broadcasts). Drives the multi-talker roster. Empty on
+    /// half-duplex (use `holder` there).
+    pub talkers: HashSet<String>,
     pub log: VecDeque<String>,
 }
 

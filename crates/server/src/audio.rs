@@ -185,7 +185,7 @@ pub async fn run(
         // and (for audio frames) snapshot per-peer keys + outbound
         // seqs for the fan-out. We release before doing any send_to
         // calls so the network path can't backpressure into the lock.
-        let dispatch: Option<(Vec<u8>, Vec<PeerTarget>)> = {
+        let dispatch: Option<(Vec<u8>, u32, Vec<PeerTarget>)> = {
             let mut registry = registry.lock().await;
             let Some(sender_id) = registry.tokens.get(&token_hash).cloned() else {
                 debug!(?peer, "unknown audio token");
@@ -263,33 +263,37 @@ pub async fn run(
                 continue;
             }
 
-            // Walkie-talkie fan-out. Only forward audio from the
-            // sender's current-frequency-room PTT holder. We collect
-            // (addr, key, seq) triples while still under the lock,
-            // bumping each peer's outbound seq as we go so two
-            // back-to-back senders can't share a nonce.
-            let frequency = registry
+            // Walkie-talkie fan-out. We collect (addr, key, seq) triples
+            // while still under the lock, bumping each peer's outbound seq
+            // as we go so two back-to-back senders can't share a nonce.
+            // The sender's `audio_id` is stamped into every S2C header so
+            // receivers can demux concurrent talkers on full-duplex.
+            let (frequency, sender_audio_id) = registry
                 .clients
                 .get(&sender_id)
-                .and_then(|c| c.current_frequency.clone());
+                .map(|c| (c.current_frequency.clone(), c.audio_id))
+                .unwrap_or((None, 0));
             let Some(freq) = frequency else { continue };
 
             let member_ids: Vec<String> = {
                 let Some(room) = registry.rooms.get(&freq) else {
                     continue;
                 };
-                // Forward if the sender currently holds the floor, or if
-                // they just released it and we're still inside the grace
-                // window (covers UDP tail frames that lag the reliable
-                // PttUp which already cleared the holder). See RELEASE_GRACE.
-                let allowed = should_relay(
-                    room.holder.as_deref(),
-                    room.last_released
-                        .as_ref()
-                        .map(|(id, at)| (id.as_str(), at.elapsed())),
-                    &sender_id,
-                    RELEASE_GRACE,
-                );
+                // Full-duplex: no floor — forward every member's audio (the
+                // client self-gates by only sending while PTT is held).
+                // Half-duplex: forward only the current floor holder, or a
+                // just-released holder still inside the grace window (covers
+                // UDP tail frames lagging the reliable PttUp). See
+                // RELEASE_GRACE.
+                let allowed = room.duplex.is_full()
+                    || should_relay(
+                        room.holder.as_deref(),
+                        room.last_released
+                            .as_ref()
+                            .map(|(id, at)| (id.as_str(), at.elapsed())),
+                        &sender_id,
+                        RELEASE_GRACE,
+                    );
                 if !allowed {
                     continue;
                 }
@@ -314,10 +318,10 @@ pub async fn run(
                     }
                 }
             }
-            Some((plaintext, targets))
+            Some((plaintext, sender_audio_id, targets))
         };
 
-        let Some((plaintext, targets)) = dispatch else {
+        let Some((plaintext, sender_audio_id, targets)) = dispatch else {
             continue;
         };
 
@@ -325,23 +329,25 @@ pub async fn run(
         // outbound seq, then send. The send loop runs *outside* the
         // registry lock so a slow network path can't stall the
         // entire relay.
+        let aad = toki_proto::wire::s2c_aad(version, sender_audio_id);
         for target in targets {
             let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&target.key));
             let nonce_bytes = build_nonce(target.seq);
             let nonce = Nonce::from_slice(&nonce_bytes);
             let mut buf_ct = plaintext.clone();
-            // AAD = the *sender's* codec version, which we also stamp into
-            // the S2C header so the receiver picks the matching decoder.
-            let tag = match cipher.encrypt_in_place_detached(nonce, &[version], &mut buf_ct) {
+            // AAD = the sender's codec version + routing id, both stamped
+            // into the S2C header below — a tampered header fails the tag.
+            let tag = match cipher.encrypt_in_place_detached(nonce, &aad, &mut buf_ct) {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(error = %e, "AEAD encrypt failed for outbound peer");
                     continue;
                 }
             };
-            // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
+            // S2C layout: version (1) | sender_id (4 LE) | seq (8) | tag (16) | ciphertext
             let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
             pkt.push(version);
+            pkt.extend_from_slice(&sender_audio_id.to_le_bytes());
             pkt.extend_from_slice(&target.seq.to_le_bytes());
             pkt.extend_from_slice(tag.as_slice());
             pkt.extend_from_slice(&buf_ct);

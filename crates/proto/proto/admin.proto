@@ -43,6 +43,12 @@ service Admin {
   // Clear every channel name in one shot.
   rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
 
+  // Set a frequency's duplex mode (0 = half, 1 = full). Persists
+  // independently of room occupancy; hot-applied to a live room and
+  // pushed to its occupants. INVALID_ARGUMENT for a bad frequency or
+  // an unknown mode value.
+  rpc SetChannelMode(SetChannelModeRequest) returns (SetChannelModeResponse);
+
   // ── Metrics / KPIs / audit ──────────────────────────────────────
   // Time-series of voice-relay bandwidth + peer count, persisted at
   // 1-minute resolution. Server downsamples to a bounded point count
@@ -73,6 +79,10 @@ message Snapshot {
   // (the persisted GetMetrics series is 1-minute granularity).
   uint64 rx_bytes_per_sec = 6;
   uint64 tx_bytes_per_sec = 7;
+  // Per-frequency duplex mode (0 = half, 1 = full), keyed by canonical
+  // frequency. Only non-default (full) channels appear; an absent key
+  // means half-duplex. Persists independently of room occupancy.
+  map<string, uint32> channel_modes = 8;
 }
 
 message Room {
@@ -110,6 +120,10 @@ message ServerConfig {
   // Voice codec/quality clients are asked to use: 0=Raw PCM (no
   // compression), 1=Low (~16k), 2=Standard (~24k), 3=High (~32k Opus).
   uint32 audio_quality = 7;
+  // Gate the per-channel full-duplex feature. When off, every channel is
+  // half-duplex and SetChannelMode is rejected; the UI hides duplex
+  // controls + indicators.
+  bool full_duplex_enabled = 8;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -124,6 +138,7 @@ message UpdateServerConfigRequest {
   uint32 idle_kick_secs = 3;
   bool named_channels_enabled = 4;
   uint32 audio_quality = 5;         // 0=Raw, 1=Low, 2=Standard, 3=High
+  bool full_duplex_enabled = 6;
 }
 
 message SetServerPasswordRequest {
@@ -166,6 +181,12 @@ message SetChannelNameResponse {}
 
 message ClearAllChannelNamesRequest {}
 message ClearAllChannelNamesResponse {}
+
+message SetChannelModeRequest {
+  string frequency = 1;             // canonical "446.05"
+  uint32 mode = 2;                  // 0 = half-duplex, 1 = full-duplex
+}
+message SetChannelModeResponse {}
 
 // ── Metrics ───────────────────────────────────────────────────────
 

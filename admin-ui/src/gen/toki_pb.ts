@@ -2,15 +2,15 @@
 // @generated from file toki.proto (package toki.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
-import { fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenFile, GenMessage, GenService } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, fileDesc, messageDesc, serviceDesc } from "@bufbuild/protobuf/codegenv2";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIlEKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkSFgoOY2xpZW50X3ZlcnNpb24YAyABKAkilQEKEFJlZ2lzdGVyUmVzcG9uc2USEQoJY2xpZW50X2lkGAEgASgJEhMKC2F1ZGlvX3Rva2VuGAIgASgMEhYKDmF1ZGlvX2VuZHBvaW50GAMgASgJEhUKDWF1ZGlvX21hY19rZXkYBCABKAwSFAoMb3B1c19lbmFibGVkGAUgASgIEhQKDG9wdXNfYml0cmF0ZRgGIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2UisgIKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIlIKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIIggKBlB0dEFjazK+AgoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soAWIGcHJvdG8z");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIlEKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkSFgoOY2xpZW50X3ZlcnNpb24YAyABKAkilQEKEFJlZ2lzdGVyUmVzcG9uc2USEQoJY2xpZW50X2lkGAEgASgJEhMKC2F1ZGlvX3Rva2VuGAIgASgMEhYKDmF1ZGlvX2VuZHBvaW50GAMgASgJEhUKDWF1ZGlvX21hY19rZXkYBCABKAwSFAoMb3B1c19lbmFibGVkGAUgASgIEhQKDG9wdXNfYml0cmF0ZRgGIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2Ui7wIKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9tb2RlX2NoYW5nZWQYByABKAsyGy50b2tpLnYxLkNoYW5uZWxNb2RlQ2hhbmdlZEgAQgcKBWV2ZW50IjcKDE1lbWJlckpvaW5lZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIh8KCk1lbWJlckxlZnQSEQoJY2xpZW50X2lkGAEgASgJIiUKEEZyZXF1ZW5jeUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJIj0KEkRpc3BsYXlOYW1lQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjUKEkNoYW5uZWxOYW1lQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSJKChJDaGFubmVsTW9kZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEiEKBG1vZGUYAiABKA4yEy50b2tpLnYxLkR1cGxleE1vZGUiUgoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiCAoGUHR0QWNrKjgKCkR1cGxleE1vZGUSFAoQRFVQTEVYX01PREVfSEFMRhAAEhQKEERVUExFWF9NT0RFX0ZVTEwQATK+AgoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soAWIGcHJvdG8z");
 
 /**
  * @generated from message toki.v1.RegisterRequest
@@ -270,6 +270,18 @@ export type Event = Message<"toki.v1.Event"> & {
      */
     value: ChannelNameChanged;
     case: "channelNameChanged";
+  } | {
+    /**
+     * Sent when a frequency's duplex mode changes, or to deliver the
+     * current mode on Join / ChangeFrequency. HALF (the default) is the
+     * classic single-floor walkie-talkie; FULL lets several members
+     * transmit at once and clients mix the streams. The client compares
+     * `frequency` against its current tuning before applying.
+     *
+     * @generated from field: toki.v1.ChannelModeChanged channel_mode_changed = 7;
+     */
+    value: ChannelModeChanged;
+    case: "channelModeChanged";
   } | { case: undefined; value?: undefined };
 };
 
@@ -386,6 +398,31 @@ export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PUR
   messageDesc(file_toki, 12);
 
 /**
+ * The duplex mode of a frequency channel. Sent on Join/ChangeFrequency
+ * backfill and whenever the admin changes a channel's mode.
+ *
+ * @generated from message toki.v1.ChannelModeChanged
+ */
+export type ChannelModeChanged = Message<"toki.v1.ChannelModeChanged"> & {
+  /**
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: toki.v1.DuplexMode mode = 2;
+   */
+  mode: DuplexMode;
+};
+
+/**
+ * Describes the message toki.v1.ChannelModeChanged.
+ * Use `create(ChannelModeChangedSchema)` to create a new message.
+ */
+export const ChannelModeChangedSchema: GenMessage<ChannelModeChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 13);
+
+/**
  * @generated from message toki.v1.PttEvent
  */
 export type PttEvent = Message<"toki.v1.PttEvent"> & {
@@ -424,7 +461,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 13);
+  messageDesc(file_toki, 14);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -437,7 +474,35 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 14);
+  messageDesc(file_toki, 15);
+
+/**
+ * Per-frequency duplex behaviour.
+ *
+ * @generated from enum toki.v1.DuplexMode
+ */
+export enum DuplexMode {
+  /**
+   * One talker at a time — the PTT floor (classic walkie-talkie). Default.
+   *
+   * @generated from enum value: DUPLEX_MODE_HALF = 0;
+   */
+  HALF = 0,
+
+  /**
+   * Many talkers at once — no floor; the client transmits the instant
+   * PTT is pressed and mixes every concurrent peer's audio.
+   *
+   * @generated from enum value: DUPLEX_MODE_FULL = 1;
+   */
+  FULL = 1,
+}
+
+/**
+ * Describes the enum toki.v1.DuplexMode.
+ */
+export const DuplexModeSchema: GenEnum<DuplexMode> = /*@__PURE__*/
+  enumDesc(file_toki, 0);
 
 /**
  * Signaling service for the Toki walkie-talkie network.

@@ -63,7 +63,7 @@ use crate::audit::AuditSink;
 use crate::config::AdminConfig;
 use crate::metrics::{SharedByteCounters, SharedHealth, SharedLiveRate};
 use crate::server_config::SharedServerConfig;
-use crate::state::{SharedChannelNames, SharedRegistry};
+use crate::state::{DuplexMode, SharedChannelNames, SharedDuplexModes, SharedRegistry};
 use crate::throttle::IpThrottle;
 use crate::tls::TlsMaterial;
 
@@ -123,6 +123,12 @@ pub struct AppState {
     /// broadcaster folds it into each `Snapshot` so the panel can label
     /// every frequency — occupied or not.
     pub channel_names: SharedChannelNames,
+    /// Per-frequency duplex modes (frequency → [`DuplexMode`]). Shared
+    /// with the signaling service (the reader). `SetChannelMode` writes
+    /// this map, the `channel_modes` sqlite table, and any live room's
+    /// `Room.duplex` in lockstep; the broadcaster folds it into each
+    /// `Snapshot`.
+    pub duplex_modes: SharedDuplexModes,
     /// Latest host-health snapshot (CPU / memory / disk), refreshed by
     /// the metrics sampler. `GetServerHealth` clones it out.
     pub health: SharedHealth,
@@ -162,6 +168,7 @@ pub async fn run(
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
+    duplex_modes: SharedDuplexModes,
     byte_counters: SharedByteCounters,
     audit: AuditSink,
     audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
@@ -212,6 +219,20 @@ pub async fn run(
         *channel_names.write().await = loaded;
     }
 
+    // Same for the per-frequency duplex modes: hydrate from the
+    // `channel_modes` table so signaling sees the operator's choices
+    // from request #1 (the stored integer maps 0=half / 1=full).
+    {
+        let loaded = db
+            .load_channel_modes()
+            .await
+            .context("load channel_modes from admin db")?;
+        *duplex_modes.write().await = loaded
+            .into_iter()
+            .map(|(freq, m)| (freq, DuplexMode::from_u32(m)))
+            .collect();
+    }
+
     // Seed `admin` user if the store is empty. We log the generated
     // password once at WARN level — this is the operator's only
     // chance to capture it.
@@ -241,6 +262,7 @@ pub async fn run(
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
         channel_names: channel_names.clone(),
+        duplex_modes: duplex_modes.clone(),
         health: health.clone(),
         live_rate: live_rate.clone(),
         audit,
@@ -267,6 +289,7 @@ pub async fn run(
     tokio::spawn(watch::run_broadcaster(
         registry,
         channel_names,
+        duplex_modes,
         byte_counters,
         live_rate,
         tx,

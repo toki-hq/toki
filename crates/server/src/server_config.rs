@@ -93,6 +93,14 @@ pub struct ServerConfig {
     /// (~32 kbps). See [`opus_settings`]. Advisory — the relay forwards
     /// whatever a client sends and receivers decode per-packet.
     pub audio_quality: u32,
+
+    /// Gate the per-channel **full-duplex** feature. When `false` (the
+    /// default), every channel is half-duplex regardless of any stored
+    /// `channel_modes`: the signaling service reports half + suppresses
+    /// the duplex event, the relay never goes full, `SetChannelMode` is
+    /// rejected, and the UIs hide all duplex controls/indicators. When
+    /// `true`, full-duplex channels behave as configured.
+    pub full_duplex_enabled: bool,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -122,6 +130,9 @@ impl Default for ServerConfig {
             // Standard Opus by default — a fresh deployment compresses
             // voice out of the box (the headline win of this feature).
             audio_quality: 2,
+            // Off by default: a fresh deployment is pure half-duplex
+            // walkie-talkie until an operator opts in.
+            full_duplex_enabled: false,
         }
     }
 }
@@ -179,6 +190,7 @@ mod tests {
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
             audio_quality: 3,
+            full_duplex_enabled: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -187,6 +199,7 @@ mod tests {
         assert!(json.contains("\"grpcPassword\":\"hunter2\""));
         assert!(json.contains("\"namedChannelsEnabled\":true"));
         assert!(json.contains("\"audioQuality\":3"));
+        assert!(json.contains("\"fullDuplexEnabled\":true"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);

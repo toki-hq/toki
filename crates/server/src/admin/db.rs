@@ -204,6 +204,13 @@ impl AdminDb {
                     "INTEGER NOT NULL DEFAULT 2",
                 )
                 .await?;
+                ensure_column_sqlite(
+                    p,
+                    "server_config",
+                    "full_duplex_enabled",
+                    "INTEGER NOT NULL DEFAULT 0",
+                )
+                .await?;
             }
             Pool::MySql(p) => {
                 for stmt in split_ddl(MYSQL_DDL) {
@@ -230,7 +237,7 @@ impl AdminDb {
     /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                   named_channels_enabled, audio_quality \
+                   named_channels_enabled, audio_quality, full_duplex_enabled \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -242,6 +249,7 @@ impl AdminDb {
                     grpc_password: r.try_get::<String, _>(3)?,
                     named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
                     audio_quality: r.try_get::<i64, _>(5)? as u32,
+                    full_duplex_enabled: r.try_get::<i64, _>(6)? != 0,
                 },
                 None => ServerConfig::default(),
             })
@@ -253,7 +261,8 @@ impl AdminDb {
         let now = now_unix();
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
-                 named_channels_enabled = ?, audio_quality = ?, updated_at = ? \
+                 named_channels_enabled = ?, audio_quality = ?, full_duplex_enabled = ?, \
+                 updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
             sqlx::query(&sql)
@@ -263,6 +272,7 @@ impl AdminDb {
                 .bind(cfg.grpc_password.as_str())
                 .bind(cfg.named_channels_enabled as i64)
                 .bind(cfg.audio_quality as i64)
+                .bind(cfg.full_duplex_enabled as i64)
                 .bind(now)
                 .execute(p)
                 .await?;
@@ -932,6 +942,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled INTEGER NOT NULL DEFAULT 0,
     audio_quality   INTEGER NOT NULL DEFAULT 2,
+    full_duplex_enabled INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO server_config (id) VALUES (1);
@@ -984,6 +995,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT NOT NULL DEFAULT 2,
+    full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 INSERT IGNORE INTO server_config (id) VALUES (1);
@@ -1034,6 +1046,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
 INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
@@ -1206,6 +1219,7 @@ mod tests {
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            full_duplex_enabled: true,
         };
         db.save_server_config(&new).await.unwrap();
         let loaded = db.load_server_config().await.unwrap();
@@ -1215,6 +1229,7 @@ mod tests {
         assert_eq!(loaded.grpc_password, "hunter2");
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
+        assert!(loaded.full_duplex_enabled);
     }
 
     #[tokio::test]
@@ -1243,6 +1258,7 @@ mod tests {
             grpc_password: "secret".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            full_duplex_enabled: true,
         })
         .await
         .unwrap();

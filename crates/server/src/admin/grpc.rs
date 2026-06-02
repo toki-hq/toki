@@ -117,6 +117,62 @@ impl AdminApi {
         let _ = self.state.broadcaster.send(snap);
     }
 
+    /// Re-evaluate every live room's effective duplex mode after the
+    /// feature toggle flipped, update `Room.duplex`, and push a
+    /// `ChannelModeChanged` to each occupied room so clients flip
+    /// behaviour + indicators at once. When `enabled` is false every room
+    /// becomes half; when true each room takes its stored mode.
+    async fn resync_duplex_modes(&self, enabled: bool) {
+        let modes = self.state.duplex_modes.read().await.clone();
+        // Under the registry lock: set each room's effective `duplex` and
+        // collect (frequency, effective mode, recipients) for occupied
+        // rooms. Sends happen after the lock is dropped.
+        let updates: Vec<(String, i32, Vec<mpsc::Sender<Event>>)> = {
+            let mut reg = self.state.registry.lock().await;
+            let freqs: Vec<String> = reg.rooms.keys().cloned().collect();
+            let mut out = Vec::new();
+            for freq in freqs {
+                let eff = if enabled {
+                    modes.get(&freq).copied().unwrap_or_default()
+                } else {
+                    DuplexMode::Half
+                };
+                let members = match reg.rooms.get_mut(&freq) {
+                    Some(room) => {
+                        room.duplex = eff;
+                        if !eff.is_full() {
+                            room.active_talkers.clear();
+                        }
+                        room.members.clone()
+                    }
+                    None => continue,
+                };
+                if members.is_empty() {
+                    continue;
+                }
+                let txs: Vec<mpsc::Sender<Event>> = members
+                    .iter()
+                    .filter_map(|id| reg.clients.get(id))
+                    .filter_map(|c| c.events_tx.clone())
+                    .collect();
+                out.push((freq, eff.as_u32() as i32, txs));
+            }
+            out
+        };
+        for (frequency, mode, txs) in updates {
+            let evt = Event {
+                event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
+                    frequency,
+                    mode,
+                })),
+            };
+            for tx in txs {
+                let _ = tx.send(evt.clone()).await;
+            }
+        }
+        self.push_snapshot().await;
+    }
+
     /// Event senders for every client currently in `frequency`'s room.
     /// Empty when the room doesn't exist (no one tuned there) — used by
     /// the channel-name RPCs to push a `ChannelNameChanged` to occupants.
@@ -146,6 +202,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         grpc_password_set: !cfg.grpc_password.is_empty(),
         named_channels_enabled: cfg.named_channels_enabled,
         audio_quality: cfg.audio_quality,
+        full_duplex_enabled: cfg.full_duplex_enabled,
     }
 }
 
@@ -219,16 +276,16 @@ impl Admin for AdminApi {
         }
 
         // Merge with the live config so we don't clobber grpc_password.
-        let merged = {
-            let current = self.state.server_config.read().await.clone();
-            ServerConfig {
-                server_name,
-                max_peers,
-                idle_kick_secs,
-                grpc_password: current.grpc_password,
-                named_channels_enabled: body.named_channels_enabled,
-                audio_quality: body.audio_quality,
-            }
+        let current = self.state.server_config.read().await.clone();
+        let full_duplex_toggled = body.full_duplex_enabled != current.full_duplex_enabled;
+        let merged = ServerConfig {
+            server_name,
+            max_peers,
+            idle_kick_secs,
+            grpc_password: current.grpc_password,
+            named_channels_enabled: body.named_channels_enabled,
+            audio_quality: body.audio_quality,
+            full_duplex_enabled: body.full_duplex_enabled,
         };
         self.state
             .db
@@ -236,6 +293,13 @@ impl Admin for AdminApi {
             .await
             .map_err(internal)?;
         *self.state.server_config.write().await = merged.clone();
+
+        // If the full-duplex feature was just toggled, re-evaluate every
+        // live room's effective mode (off ⇒ all half) and tell occupants
+        // so clients flip behaviour + indicators immediately.
+        if full_duplex_toggled {
+            self.resync_duplex_modes(merged.full_duplex_enabled).await;
+        }
 
         tracing::info!(
             admin_user = %admin.0,
@@ -803,6 +867,11 @@ impl Admin for AdminApi {
         req: Request<pb::SetChannelModeRequest>,
     ) -> Result<Response<pb::SetChannelModeResponse>, Status> {
         let admin = self.authenticated(&req).await?;
+        if !self.state.server_config.read().await.full_duplex_enabled {
+            return Err(Status::failed_precondition(
+                "full-duplex is disabled; enable it in server settings first",
+            ));
+        }
         let pb::SetChannelModeRequest { frequency, mode } = req.into_inner();
         let frequency = validation::frequency(&frequency)
             .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
@@ -1270,6 +1339,7 @@ mod tests {
                     idle_kick_secs: 10,
                     named_channels_enabled: false,
                     audio_quality: 2,
+                    full_duplex_enabled: false,
                 },
                 &token,
             ))

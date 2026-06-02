@@ -120,6 +120,10 @@ message ServerConfig {
   // Voice codec/quality clients are asked to use: 0=Raw PCM (no
   // compression), 1=Low (~16k), 2=Standard (~24k), 3=High (~32k Opus).
   uint32 audio_quality = 7;
+  // Gate the per-channel full-duplex feature. When off, every channel is
+  // half-duplex and SetChannelMode is rejected; the UI hides duplex
+  // controls + indicators.
+  bool full_duplex_enabled = 8;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -134,6 +138,7 @@ message UpdateServerConfigRequest {
   uint32 idle_kick_secs = 3;
   bool named_channels_enabled = 4;
   uint32 audio_quality = 5;         // 0=Raw, 1=Low, 2=Standard, 3=High
+  bool full_duplex_enabled = 6;
 }
 
 message SetServerPasswordRequest {

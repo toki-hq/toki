@@ -678,7 +678,9 @@ struct StateSnapshot {
     holder_name: String,
     is_transmitting: bool,
     /// Whether the current channel is full-duplex (everyone can talk at
-    /// once). Drives a small indicator + the multi-talker status text.
+    /// once). Drives the multi-talker status text + the Rx label. (The
+    /// OLED duplex light reads `duplex_full`/`duplex_known` from state
+    /// directly.)
     duplex_full: bool,
     /// Our own live callsign. Mirrors `ClientState.display_name` and
     /// changes mid-session when the admin renames us — read by the
@@ -1827,10 +1829,15 @@ impl TokiApp {
         // ── Duplex-mode light (top-right, left of ACT) ─────────────
         // Mirrors the ACT light's "caption • dot" layout: a green glowing
         // "FDX" on a full-duplex channel, an amber glowing "HDX" on a
-        // half-duplex one. Hidden while offline (no channel to describe).
-        // Sits left of the ACT group: [FDX •]   [ACT •].
-        if !st.is_transport_down() {
-            let full = self.state.lock().unwrap().duplex_full;
+        // half-duplex one. Shown only when the server reported a mode
+        // (i.e. the full-duplex feature is enabled) and we're online —
+        // otherwise hidden entirely. Sits left of ACT: [FDX •]  [ACT •].
+        let (duplex_full, duplex_known) = {
+            let s = self.state.lock().unwrap();
+            (s.duplex_full, s.duplex_known)
+        };
+        if !st.is_transport_down() && duplex_known {
+            let full = duplex_full;
             let dplx_dot_x = dot_x - 40.0; // clear of the ACT caption + dot
             let (color, label) = if full {
                 (T::PRIMARY, "FDX")

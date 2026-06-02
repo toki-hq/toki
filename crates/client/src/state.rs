@@ -34,6 +34,12 @@ pub struct ClientState {
     /// changes. On full-duplex the client transmits the instant PTT is
     /// pressed (no floor grant) and several members can talk at once.
     pub duplex_full: bool,
+    /// Whether the server has told us this channel's duplex mode at all.
+    /// The server only emits `ChannelModeChanged` while the full-duplex
+    /// feature is enabled, so this stays `false` when the feature is off —
+    /// the UI then hides the duplex indicator entirely. Reset on every
+    /// frequency change / disconnect.
+    pub duplex_known: bool,
     /// On a full-duplex channel, the set of client_ids currently keying
     /// (from `Ptt` broadcasts). Drives the multi-talker roster. Empty on
     /// half-duplex (use `holder` there).

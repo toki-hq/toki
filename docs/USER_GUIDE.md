@@ -361,9 +361,12 @@ letting an incompatible build half-connect into silent dead air.
 
 ### Duplex modes (half / full)
 
-Each channel is **half-duplex** by default, or the operator can switch it to
-**full-duplex** in the admin panel (Channels view). The mode is pushed to
-clients on join / change-frequency and on live changes.
+Full-duplex is gated by a **Settings toggle** (off by default). While off,
+every channel is half-duplex, channels can't be set to full, and the duplex
+controls + indicators are hidden everywhere. With it on, each channel is
+**half-duplex** by default or the operator can switch it to **full-duplex** in
+the admin panel (Channels view). The mode is pushed to clients on join /
+change-frequency and on live changes.
 
 - **Half-duplex** (classic walkie-talkie): one talker at a time per frequency.
   Pressing PTT while someone else is transmitting puts the radio into a "busy"

@@ -362,6 +362,7 @@ async fn boot_with_passwords(
         grpc_password: db_password.to_string(),
         named_channels_enabled: false,
         audio_quality: 2,
+        full_duplex_enabled: false,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -480,6 +481,7 @@ async fn register_rejected_when_at_max_peers() {
         grpc_password: String::new(),
         named_channels_enabled: false,
         audio_quality: 2,
+        full_duplex_enabled: false,
     })
     .await;
     for i in 0..2 {

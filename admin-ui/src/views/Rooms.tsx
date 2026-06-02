@@ -53,6 +53,9 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   // Per-frequency duplex mode (0 = half, 1 = full); absent key = half.
   const modes = snapshot?.channelModes ?? {};
   const [namedEnabled, setNamedEnabled] = useState(false);
+  // Gates all duplex UI (mode editor + badges). When off, full-duplex is
+  // hidden entirely and channels are half-only.
+  const [fdxEnabled, setFdxEnabled] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
@@ -63,7 +66,10 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
     // toggle flipped in Settings is reflected when you return here).
     admin
       .getServerConfig({})
-      .then((c) => setNamedEnabled(c.namedChannelsEnabled))
+      .then((c) => {
+        setNamedEnabled(c.namedChannelsEnabled);
+        setFdxEnabled(c.fullDuplexEnabled);
+      })
       .catch(() => setNamedEnabled(false));
   }, []);
 
@@ -138,6 +144,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
                 room={r}
                 name={names[r.frequency]}
                 mode={modes[r.frequency] ?? 0}
+                showMode={fdxEnabled}
                 selected={current?.frequency === r.frequency}
                 onSelect={() => setSelected(r.frequency)}
               />
@@ -156,6 +163,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               name={names[current.frequency]}
               namedEnabled={namedEnabled}
               mode={modes[current.frequency] ?? 0}
+              modeEnabled={fdxEnabled}
               onRename={setRenaming}
             />
           ) : (
@@ -177,12 +185,14 @@ function ChannelRow({
   room,
   name,
   mode,
+  showMode,
   selected,
   onSelect,
 }: {
   room: Room;
   name?: string;
   mode: number;
+  showMode: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -200,15 +210,16 @@ function ChannelRow({
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="flex items-center gap-1.5 font-mono text-sm tabular">
           {room.frequency}
-          {mode === 1 ? (
-            <span className="rounded bg-primary/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
-              full
-            </span>
-          ) : (
-            <span className="rounded bg-warning/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-warning">
-              half
-            </span>
-          )}
+          {showMode &&
+            (mode === 1 ? (
+              <span className="rounded bg-primary/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
+                full
+              </span>
+            ) : (
+              <span className="rounded bg-warning/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-warning">
+                half
+              </span>
+            ))}
         </span>
         <span
           className={cn(
@@ -232,12 +243,14 @@ function ChannelDetail({
   name,
   namedEnabled,
   mode,
+  modeEnabled,
   onRename,
 }: {
   room: Room;
   name?: string;
   namedEnabled: boolean;
   mode: number;
+  modeEnabled: boolean;
   onRename: (m: Member) => void;
 }) {
   return (
@@ -253,7 +266,7 @@ function ChannelDetail({
         </span>
       </div>
       <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
-      <ModeEditor frequency={room.frequency} mode={mode} />
+      {modeEnabled && <ModeEditor frequency={room.frequency} mode={mode} />}
       <div className="flex-1 overflow-y-auto">
         {room.members.length === 0 && (
           <p className="p-4 text-sm text-muted-foreground">No members on this frequency.</p>

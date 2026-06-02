@@ -233,6 +233,9 @@ async fn handle_cmd(
                 st.connection = ConnState::Disconnected;
                 st.members.clear();
                 st.holder = None;
+                st.talkers.clear();
+                st.duplex_full = false;
+                st.duplex_known = false;
                 st.self_id = None;
                 st.frequency = None;
                 st.channel_name = None;
@@ -743,9 +746,13 @@ impl Session {
                             // on) lands right after this event.
                             st.channel_name = None;
                             // Reset duplex state; the new room's
-                            // ChannelModeChanged lands right after this.
+                            // ChannelModeChanged lands right after this (and
+                            // only if the feature is on, so `duplex_known`
+                            // stays false on a feature-off server → no
+                            // indicator).
                             st.talkers.clear();
                             st.duplex_full = false;
+                            st.duplex_known = false;
                             full_duplex_for_events.store(false, Ordering::Relaxed);
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
@@ -803,6 +810,9 @@ impl Session {
                             if st.frequency.as_deref() == Some(cmc.frequency.as_str()) {
                                 let full = cmc.mode == DuplexMode::Full as i32;
                                 full_duplex_for_events.store(full, Ordering::Relaxed);
+                                // Receiving any mode event means the feature
+                                // is on → show the indicator.
+                                st.duplex_known = true;
                                 if full != st.duplex_full {
                                     st.duplex_full = full;
                                     // Mode flip invalidates the floor/talker
@@ -841,6 +851,9 @@ impl Session {
             st.connection = crate::state::ConnState::Disconnected;
             st.members.clear();
             st.holder = None;
+            st.talkers.clear();
+            st.duplex_full = false;
+            st.duplex_known = false;
             st.frequency = None;
             st.channel_name = None;
             st.log("⚠ disconnected by server");

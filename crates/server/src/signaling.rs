@@ -17,7 +17,7 @@ use toki_proto::v1::{
 use crate::audit::{self, AuditSink};
 use crate::server_config::SharedServerConfig;
 use crate::state::{
-    hash_token, Client, Registry, SharedChannelNames, SharedDuplexModes, SharedRegistry,
+    hash_token, Client, DuplexMode, Registry, SharedChannelNames, SharedDuplexModes, SharedRegistry,
 };
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
@@ -109,24 +109,36 @@ impl SignalingSvc {
         })
     }
 
-    /// Build a `ChannelModeChanged` event carrying `frequency`'s current
-    /// duplex mode (default half if unset). Always emitted on Join /
-    /// ChangeFrequency so the client knows whether to use the local-PTT
-    /// full-duplex path; no feature toggle gates it.
-    async fn channel_mode_event(&self, frequency: &str) -> Event {
-        let mode = self
-            .duplex_modes
+    /// The *effective* duplex mode of a frequency: the stored mode when
+    /// the full-duplex feature is enabled, else `Half` (the feature gate
+    /// forces every channel half-duplex regardless of stored modes).
+    async fn effective_duplex(&self, frequency: &str) -> DuplexMode {
+        if !self.server_config.read().await.full_duplex_enabled {
+            return DuplexMode::Half;
+        }
+        self.duplex_modes
             .read()
             .await
             .get(frequency)
             .copied()
-            .unwrap_or_default();
-        Event {
+            .unwrap_or_default()
+    }
+
+    /// Build a `ChannelModeChanged` event for `frequency`, or `None` when
+    /// the full-duplex feature is disabled (so callers skip the send and
+    /// the client shows no duplex indicator at all). When enabled, carries
+    /// the channel's effective mode so the client picks the right PTT path.
+    async fn channel_mode_event(&self, frequency: &str) -> Option<Event> {
+        if !self.server_config.read().await.full_duplex_enabled {
+            return None;
+        }
+        let mode = self.effective_duplex(frequency).await;
+        Some(Event {
             event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
                 frequency: frequency.to_string(),
                 mode: mode.as_u32() as i32,
             })),
-        }
+        })
     }
 }
 
@@ -401,16 +413,11 @@ impl Signaling for SignalingSvc {
         let frequency = validation::frequency(&req.frequency)?;
         let (tx, rx) = mpsc::channel::<Event>(64);
 
-        // Read the channel's duplex mode before taking the registry lock,
-        // so we can seed a freshly-created room's `duplex` without holding
-        // two locks across an await.
-        let duplex = self
-            .duplex_modes
-            .read()
-            .await
-            .get(&frequency)
-            .copied()
-            .unwrap_or_default();
+        // Read the channel's effective duplex mode (gated by the feature
+        // toggle) before taking the registry lock, so we can seed a
+        // freshly-created room's `duplex` without holding two locks across
+        // an await.
+        let duplex = self.effective_duplex(&frequency).await;
 
         let mut registry = self.registry.lock().await;
 
@@ -498,9 +505,12 @@ impl Signaling for SignalingSvc {
             let _ = tx.send(name_evt).await;
         }
 
-        // Deliver the channel's duplex mode so the client picks the
-        // right PTT path (local-transmit on full, server-grant on half).
-        let _ = tx.send(self.channel_mode_event(&frequency).await).await;
+        // Deliver the channel's duplex mode (only when the feature is on)
+        // so the client picks the right PTT path. When off, no event is
+        // sent and the client shows no duplex indicator.
+        if let Some(mode_evt) = self.channel_mode_event(&frequency).await {
+            let _ = tx.send(mode_evt).await;
+        }
 
         // Announce the new joiner to existing members of this freq.
         for id in other_ids {
@@ -580,13 +590,7 @@ impl Signaling for SignalingSvc {
 
         // Duplex mode of the target channel, read before the registry
         // lock so we can seed a freshly-created room without nesting locks.
-        let new_duplex = self
-            .duplex_modes
-            .read()
-            .await
-            .get(&new_freq)
-            .copied()
-            .unwrap_or_default();
+        let new_duplex = self.effective_duplex(&new_freq).await;
 
         let (
             old_recipients,
@@ -712,9 +716,12 @@ impl Signaling for SignalingSvc {
             if let Some(name_evt) = self.channel_name_event(&new_freq).await {
                 let _ = tx.send(name_evt).await;
             }
-            // Deliver the new channel's duplex mode (always) so the
-            // client switches PTT behaviour for the freq it just moved to.
-            let _ = tx.send(self.channel_mode_event(&new_freq).await).await;
+            // Deliver the new channel's duplex mode (only when the feature
+            // is on) so the client switches PTT behaviour for the freq it
+            // just moved to.
+            if let Some(mode_evt) = self.channel_mode_event(&new_freq).await {
+                let _ = tx.send(mode_evt).await;
+            }
             // Snapshot the new roster's members + names without holding
             // the lock across awaits.
             let new_members: Vec<(String, String)> = {

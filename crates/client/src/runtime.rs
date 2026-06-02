@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use futures::StreamExt;
-use tokio::net::UdpSocket;
+use tokio::net::{lookup_host, UdpSocket};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::ReceiverStream;
@@ -526,7 +526,7 @@ impl Session {
                     toki_proto::wire::MAC_KEY_LEN,
                 )
             })?;
-        let audio_addr = resolve_audio_endpoint(&reg.audio_endpoint, &display_url)?;
+        let audio_addr = resolve_audio_endpoint(&reg.audio_endpoint, &display_url).await?;
         // Session-local sequence counter. Starts at 1 because the
         // server's `audio_last_seq` initialises to 0 and we require
         // strict monotonicity (seq > last_seq) to accept the first
@@ -1346,28 +1346,82 @@ fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) ->
     }
 }
 
-/// The server may advertise its audio endpoint as `0.0.0.0:port`, which
-/// isn't routable from a client. When that happens, substitute the host
-/// portion of the signaling URL.
-fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result<SocketAddr> {
-    let parsed: SocketAddr = advertised
-        .parse()
-        .with_context(|| format!("parse audio endpoint {advertised:?}"))?;
-    if !parsed.ip().is_unspecified() {
-        return Ok(parsed);
+/// Resolve the server's advertised audio endpoint to a concrete `SocketAddr`.
+///
+/// The server may advertise:
+/// - a routable numeric address (`203.0.113.5:50051`) → used as-is;
+/// - an **unspecified** address (`0.0.0.0:port` / `[::]:port`), which isn't
+///   routable from a client → substitute the host of the signaling URL,
+///   keeping the advertised port;
+/// - a **DNS name** (`toki.example.org:50051`), when the operator set
+///   `TOKI_AUDIO_PUBLIC` to a hostname → resolved directly.
+///
+/// In every host-based branch the host can be a DNS name, so we resolve via
+/// [`lookup_host`] rather than `parse::<SocketAddr>()` — the latter only
+/// accepts IP literals and fails on names with "invalid socket address
+/// syntax". When substituting for an unspecified address we keep the
+/// advertised IP family (don't reach a v4 relay over a v6 record, or vice
+/// versa) if the name resolves to both.
+async fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result<SocketAddr> {
+    let (host, port, want_ipv6): (String, u16, Option<bool>) =
+        match advertised.parse::<SocketAddr>() {
+            // Routable numeric address — nothing to resolve.
+            Ok(addr) if !addr.ip().is_unspecified() => return Ok(addr),
+            // Unspecified (0.0.0.0 / [::]) — substitute the signaling host,
+            // keep the advertised port + family.
+            Ok(addr) => (
+                signaling_host(signaling_url)?.to_string(),
+                addr.port(),
+                Some(addr.is_ipv6()),
+            ),
+            // Not a numeric address — treat as `host:port` (a DNS name).
+            Err(_) => {
+                let (h, p) = advertised
+                    .rsplit_once(':')
+                    .ok_or_else(|| anyhow!("audio endpoint missing port: {advertised:?}"))?;
+                let port: u16 = p
+                    .parse()
+                    .with_context(|| format!("audio endpoint port {p:?}"))?;
+                (strip_brackets(h).to_string(), port, None)
+            }
+        };
+
+    let addrs: Vec<SocketAddr> = lookup_host((host.as_str(), port))
+        .await
+        .with_context(|| format!("resolve {host}:{port}"))?
+        .collect();
+    // Prefer the advertised family when we substituted, else first result.
+    if let Some(v6) = want_ipv6 {
+        if let Some(matching) = addrs.iter().find(|a| a.is_ipv6() == v6) {
+            return Ok(*matching);
+        }
     }
-    let host = signaling_url
+    addrs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("no addresses resolved for {host}:{port}"))
+}
+
+/// Extract the host from a signaling URL like `https://host:port/...`.
+fn signaling_host(signaling_url: &str) -> Result<&str> {
+    let host_port = signaling_url
         .trim_start_matches("http://")
         .trim_start_matches("https://")
         .split('/')
         .next()
-        .ok_or_else(|| anyhow!("empty signaling url"))?
+        .ok_or_else(|| anyhow!("empty signaling url"))?;
+    host_port
         .rsplit_once(':')
-        .map(|(host, _port)| host)
-        .ok_or_else(|| anyhow!("signaling url missing port"))?;
-    format!("{host}:{}", parsed.port())
-        .parse()
-        .with_context(|| format!("resolve {host}:{}", parsed.port()))
+        .map(|(host, _port)| strip_brackets(host))
+        .ok_or_else(|| anyhow!("signaling url missing port"))
+}
+
+/// Drop surrounding `[ ]` from an IPv6 literal host (`[::1]` → `::1`); a
+/// no-op for hostnames and IPv4 literals.
+fn strip_brackets(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
 }
 
 #[cfg(test)]
@@ -1475,23 +1529,51 @@ mod tests {
         assert_eq!(result.len(), 2);
     }
 
-    #[test]
-    fn resolve_audio_endpoint_passes_through_routable_addr() {
-        let resolved = resolve_audio_endpoint("203.0.113.5:50052", "https://server:50051").unwrap();
+    #[tokio::test]
+    async fn resolve_audio_endpoint_passes_through_routable_addr() {
+        let resolved = resolve_audio_endpoint("203.0.113.5:50052", "https://server:50051")
+            .await
+            .unwrap();
         assert_eq!(resolved.to_string(), "203.0.113.5:50052");
     }
 
-    #[test]
-    fn resolve_audio_endpoint_substitutes_signaling_host_for_unspecified() {
+    #[tokio::test]
+    async fn resolve_audio_endpoint_substitutes_signaling_host_for_unspecified() {
         // Server commonly advertises 0.0.0.0:port; rewrite to the
-        // host portion of the gRPC URL.
-        let resolved =
-            resolve_audio_endpoint("0.0.0.0:50052", "https://192.168.1.50:50051").unwrap();
+        // host portion of the gRPC URL (an IP literal here).
+        let resolved = resolve_audio_endpoint("0.0.0.0:50052", "https://192.168.1.50:50051")
+            .await
+            .unwrap();
         assert_eq!(resolved.to_string(), "192.168.1.50:50052");
     }
 
-    #[test]
-    fn resolve_audio_endpoint_rejects_malformed_input() {
-        assert!(resolve_audio_endpoint("nope", "https://server:50051").is_err());
+    #[tokio::test]
+    async fn resolve_audio_endpoint_resolves_dns_host_for_unspecified() {
+        // The regression: a *named* signaling host must be DNS-resolved,
+        // not bare-parsed (parse::<SocketAddr>() rejects names). `localhost`
+        // resolves offline via the hosts file; assert we get a loopback addr
+        // on the advertised port.
+        let resolved = resolve_audio_endpoint("0.0.0.0:50052", "https://localhost:50051")
+            .await
+            .unwrap();
+        assert!(resolved.ip().is_loopback(), "got {resolved}");
+        assert_eq!(resolved.port(), 50052);
+    }
+
+    #[tokio::test]
+    async fn resolve_audio_endpoint_resolves_advertised_dns_name() {
+        // Operator set TOKI_AUDIO_PUBLIC to a hostname (not an IP).
+        let resolved = resolve_audio_endpoint("localhost:50052", "https://ignored:50051")
+            .await
+            .unwrap();
+        assert!(resolved.ip().is_loopback(), "got {resolved}");
+        assert_eq!(resolved.port(), 50052);
+    }
+
+    #[tokio::test]
+    async fn resolve_audio_endpoint_rejects_malformed_input() {
+        assert!(resolve_audio_endpoint("nope", "https://server:50051")
+            .await
+            .is_err());
     }
 }

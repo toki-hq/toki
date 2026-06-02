@@ -40,7 +40,7 @@ jobs:
     name: test + coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # The admin SPA is decoupled — it builds + ships as its own image
       # (see the `admin-ui` and `docker-admin-ui-*` jobs below), so the
@@ -75,7 +75,7 @@ jobs:
       - name: cache cargo tool installs
         # `~/.cargo/bin` isn't covered by rust-cache. Pinning on the
         # Cargo.lock hash keeps cargo-llvm-cov hot across runs.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin
           key: cargo-bin-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
@@ -101,7 +101,7 @@ jobs:
         run: bash scripts/coverage.sh --ci
 
       - name: upload lcov
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: coverage-lcov
           path: target/coverage/lcov.info
@@ -116,12 +116,12 @@ jobs:
     name: admin UI (build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: install Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
           cache-dependency-path: admin-ui/package-lock.json
 
@@ -144,7 +144,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -173,7 +173,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -205,7 +205,7 @@ jobs:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up QEMU
         # Needed for linux/arm64 cross-builds on an x86 runner.
@@ -230,7 +230,7 @@ jobs:
           context: .
           file: scripts/server.dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             ellessen/toki-server:${{ steps.tag.outputs.version }}
             ellessen/toki-server:latest
@@ -252,7 +252,7 @@ jobs:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: set up QEMU
         # Needed for linux/arm64 cross-builds on an x86 runner.
@@ -277,7 +277,7 @@ jobs:
           context: .
           file: scripts/admin-ui.dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
             ellessen/toki-admin-ui:${{ steps.tag.outputs.version }}
             ellessen/toki-admin-ui:latest
@@ -314,7 +314,7 @@ jobs:
       OPUS_NO_PKG: "1"
       OPUS_STATIC: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -325,7 +325,7 @@ jobs:
         run: brew install autoconf automake libtool
 
       - name: cache cargo-bundle install
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/.cargo/bin
           key: cargo-bin-macos-${{ hashFiles('**/Cargo.lock') }}
@@ -360,7 +360,7 @@ jobs:
           zip -r "$GITHUB_WORKSPACE/toki-client-${{ steps.tag.outputs.version }}-macos.zip" Toki.app
 
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: toki-client-macos
           path: toki-client-*-macos.zip
@@ -376,7 +376,7 @@ jobs:
     env:
       OPUS_STATIC: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 

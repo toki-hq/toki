@@ -380,18 +380,48 @@ impl TokiApp {
     fn snapshot(&self) -> StateSnapshot {
         let s = self.state.lock().unwrap();
         let self_id = s.self_id.clone();
-        let holder = s.holder.clone();
-        let is_transmitting = self_id.is_some() && holder.as_deref() == self_id.as_deref();
-        let holder_name = if let Some(h) = &holder {
-            s.members.get(h).cloned().unwrap_or_else(|| h.clone())
+        // Half-duplex tracks a single `holder`; full-duplex tracks a set
+        // of `talkers`. Normalise both into the snapshot's holder/holder_
+        // name/is_transmitting fields so the radio-state + status rendering
+        // stay unchanged.
+        let (holder, holder_name, is_transmitting) = if s.duplex_full {
+            let self_talking = self_id
+                .as_ref()
+                .map(|id| s.talkers.contains(id))
+                .unwrap_or(false);
+            // Other people talking (excluding us) → show an Rx indicator.
+            let others: Vec<&String> = s
+                .talkers
+                .iter()
+                .filter(|id| Some(id.as_str()) != self_id.as_deref())
+                .collect();
+            let holder = others.first().map(|id| (*id).clone());
+            let name = match others.len() {
+                0 => String::new(),
+                1 => s
+                    .members
+                    .get(others[0])
+                    .cloned()
+                    .unwrap_or_else(|| others[0].clone()),
+                n => format!("{n} talking"),
+            };
+            (holder, name, self_talking)
         } else {
-            String::new()
+            let holder = s.holder.clone();
+            let is_tx = self_id.is_some() && holder.as_deref() == self_id.as_deref();
+            let name = if let Some(h) = &holder {
+                s.members.get(h).cloned().unwrap_or_else(|| h.clone())
+            } else {
+                String::new()
+            };
+            (holder, name, is_tx)
         };
         StateSnapshot {
             connection: s.connection.clone(),
             holder,
             holder_name,
             is_transmitting,
+            duplex_full: s.duplex_full,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
             log_tail: s.log.iter().next_back().cloned().unwrap_or_default(),
@@ -647,6 +677,9 @@ struct StateSnapshot {
     holder: Option<String>,
     holder_name: String,
     is_transmitting: bool,
+    /// Whether the current channel is full-duplex (everyone can talk at
+    /// once). Drives a small indicator + the multi-talker status text.
+    duplex_full: bool,
     /// Our own live callsign. Mirrors `ClientState.display_name` and
     /// changes mid-session when the admin renames us — read by the
     /// topbar so the change is visible without a reconnect.
@@ -2362,7 +2395,11 @@ impl TokiApp {
                 painter.text(
                     Pos2::new(right_x, status_y),
                     Align2::RIGHT_CENTER,
-                    "RECEIVING",
+                    if snap.duplex_full {
+                        "FDX · RX"
+                    } else {
+                        "RECEIVING"
+                    },
                     font_mono(10.0),
                     T::INK_DIM,
                 );

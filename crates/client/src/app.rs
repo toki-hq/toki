@@ -1824,6 +1824,29 @@ impl TokiApp {
         }
         // Tiny "ACT" caption next to the light, on its left — gives
         // the dot a label without crowding the corner.
+        // ── Duplex-mode light (top-right, left of ACT) ─────────────
+        // Shows the current channel's duplex mode beside the activity
+        // light: a glowing "FDX" dot on a full-duplex channel, a dim
+        // "HDX" dot on a half-duplex one. Hidden while offline (no
+        // channel to describe). The dot sits left of its caption, which
+        // sits left of the ACT group: [• FDX]   [ACT •].
+        let dplx_right = dot_x - 34.0; // clear of the ACT caption+dot
+        if !st.is_transport_down() {
+            let full = self.state.lock().unwrap().duplex_full;
+            painter.text(
+                Pos2::new(dplx_right, dot_y),
+                Align2::RIGHT_CENTER,
+                if full { "FDX" } else { "HDX" },
+                font_mono(7.0),
+                if full { T::PRIMARY_DIM } else { T::INK_MUTE },
+            );
+            let dplx_dot_x = dplx_right - 21.0;
+            if full {
+                glow_dot(painter, Pos2::new(dplx_dot_x, dot_y), 3.0, T::PRIMARY, 1.0);
+            } else {
+                painter.circle_filled(Pos2::new(dplx_dot_x, dot_y), 3.0, T::INK_MUTE);
+            }
+        }
         painter.text(
             Pos2::new(dot_x - 6.0, dot_y),
             Align2::RIGHT_CENTER,
@@ -1847,9 +1870,11 @@ impl TokiApp {
             if !name.is_empty() {
                 // Vertically centered on `dot_y` so the name's midline
                 // matches the ACT caption + activity dot on the right.
+                // Stop short of the duplex (FDX/HDX) + ACT lights on the
+                // right so a long scrolling name never runs under them.
                 let name_region = Rect::from_min_max(
                     Pos2::new(rect.left() + pad_x, dot_y - 6.0),
-                    Pos2::new(dot_x - 26.0, dot_y + 6.0),
+                    Pos2::new(dot_x - 62.0, dot_y + 6.0),
                 );
                 paint_marquee(
                     painter,
@@ -1860,30 +1885,6 @@ impl TokiApp {
                     self.elapsed_secs(),
                 );
             }
-        }
-
-        // ── Duplex-mode light (bottom-left) ────────────────────────
-        // A small dot + caption showing the current channel's duplex
-        // mode: lit (primary, glowing) "FDX" on a full-duplex channel,
-        // dim "HDX" on a half-duplex one. Hidden while the transport is
-        // down (no channel to describe). Bottom-left keeps it clear of
-        // the centered frequency readout and the top-row marquee/ACT dot.
-        if !st.is_transport_down() {
-            let full = self.state.lock().unwrap().duplex_full;
-            let dm_x = rect.left() + pad_x + 3.0;
-            let dm_y = rect.bottom() - pad_y - 4.0;
-            if full {
-                glow_dot(painter, Pos2::new(dm_x, dm_y), 3.0, T::PRIMARY, 1.0);
-            } else {
-                painter.circle_filled(Pos2::new(dm_x, dm_y), 3.0, T::INK_MUTE);
-            }
-            painter.text(
-                Pos2::new(dm_x + 7.0, dm_y),
-                Align2::LEFT_CENTER,
-                if full { "FDX" } else { "HDX" },
-                font_mono(7.0),
-                if full { T::PRIMARY_DIM } else { T::INK_MUTE },
-            );
         }
 
         // ── Frequency readout ──────────────────────────────────────

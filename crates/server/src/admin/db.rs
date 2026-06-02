@@ -27,8 +27,10 @@
 //! from an existing SQLite file.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use sqlx::mysql::MySqlPoolOptions;
@@ -119,19 +121,22 @@ impl AdminDb {
                 // sqlx's MySQL driver expects a `mysql://` scheme; map
                 // the `mariadb://` alias onto it.
                 let url = database_url.replacen("mariadb://", "mysql://", 1);
-                let pool = MySqlPoolOptions::new()
-                    .max_connections(5)
-                    .connect(&url)
-                    .await
-                    .context("connect MariaDB/MySQL admin db")?;
+                // Retry with backoff so a DB container that's still
+                // starting (docker-compose / k8s ordering) gets time to
+                // accept connections instead of failing the boot.
+                let pool = connect_with_retry("MariaDB/MySQL", || {
+                    MySqlPoolOptions::new().max_connections(5).connect(&url)
+                })
+                .await?;
                 Pool::MySql(pool)
             }
             Backend::Postgres => {
-                let pool = PgPoolOptions::new()
-                    .max_connections(5)
-                    .connect(database_url)
-                    .await
-                    .context("connect PostgreSQL admin db")?;
+                let pool = connect_with_retry("PostgreSQL", || {
+                    PgPoolOptions::new()
+                        .max_connections(5)
+                        .connect(database_url)
+                })
+                .await?;
                 Pool::Postgres(pool)
             }
         };
@@ -681,6 +686,66 @@ pub struct AuditRow {
     pub actor: String,
     pub frequency: String,
     pub detail: String,
+}
+
+/// Total time to keep retrying the initial DB connection before giving
+/// up — covers a remote DB container still starting under
+/// docker-compose / k8s. Generous: most DBs accept connections within a
+/// few seconds, but cold starts (volume init, replication) can take longer.
+const CONNECT_RETRY_BUDGET: Duration = Duration::from_secs(60);
+/// First retry delay; doubles each attempt up to [`CONNECT_MAX_DELAY`].
+const CONNECT_INITIAL_DELAY: Duration = Duration::from_millis(500);
+/// Cap on the per-attempt backoff delay.
+const CONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
+
+/// Connect with exponential backoff. Retries transient failures (the DB
+/// isn't accepting connections yet) until [`CONNECT_RETRY_BUDGET`] is
+/// exhausted, then returns the last error. Only used for the remote
+/// backends — a local SQLite open either works or fails for a permanent
+/// reason (bad path/permissions), so retrying it would just stall boot.
+async fn connect_with_retry<T, F, Fut>(label: &str, mut connect: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = std::result::Result<T, sqlx::Error>>,
+{
+    let start = Instant::now();
+    let mut delay = CONNECT_INITIAL_DELAY;
+    let mut attempt = 1u32;
+    loop {
+        match connect().await {
+            Ok(v) => {
+                if attempt > 1 {
+                    tracing::info!(label, attempt, "connected to admin db after retrying");
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                let elapsed = start.elapsed();
+                // Stop once we'd sleep past the budget — surface the
+                // real error (with context) so a genuine misconfig
+                // (bad creds/host) still fails the boot promptly-ish.
+                if elapsed + delay >= CONNECT_RETRY_BUDGET {
+                    return Err(anyhow::Error::new(e)).with_context(|| {
+                        format!(
+                            "connect {label} admin db: gave up after {attempt} attempts \
+                             (~{}s)",
+                            elapsed.as_secs()
+                        )
+                    });
+                }
+                tracing::warn!(
+                    label,
+                    attempt,
+                    retry_in_ms = delay.as_millis() as u64,
+                    error = %e,
+                    "admin db not ready; retrying"
+                );
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(CONNECT_MAX_DELAY);
+                attempt += 1;
+            }
+        }
+    }
 }
 
 /// Map a connection URL's scheme to a backend.
@@ -1237,6 +1302,27 @@ mod tests {
         assert_eq!(pruned, 1);
         assert!(db.lookup_session("active").await.unwrap().is_some());
         assert!(db.lookup_session("stale").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn connect_with_retry_recovers_from_transient_failure() {
+        // First attempt "fails" (DB not up yet), second succeeds. Proves
+        // the backoff loop retries and then returns the value.
+        let calls = std::cell::Cell::new(0u32);
+        let got: Result<u32> = connect_with_retry("test", || {
+            calls.set(calls.get() + 1);
+            let n = calls.get();
+            async move {
+                if n < 2 {
+                    Err(sqlx::Error::PoolClosed)
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await;
+        assert_eq!(got.unwrap(), 42);
+        assert_eq!(calls.get(), 2, "should have retried exactly once");
     }
 
     #[test]

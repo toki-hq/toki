@@ -77,6 +77,7 @@ database_url = "postgres://toki:secret@db.example.com/toki"   # or
 or via env: `TOKI_ADMIN_DB_URL=postgres://toki:secret@db.example.com/toki`.
 
 - Remote backends connect over **TLS** (rustls/ring — no OpenSSL) when the server requires it; the password is redacted from startup logs.
+- **Startup connection retry:** the initial connect to a remote backend retries with exponential backoff (~0.5s → 5s, up to ~60s total) so a DB container that's still starting (docker-compose `depends_on` / k8s ordering) gets time to come up instead of failing the boot. A genuine misconfiguration (bad host/credentials) still surfaces as a clear startup error once the budget is spent.
 - **Fresh start per backend:** pointing at MariaDB/Postgres creates the schema and re-seeds the `admin` user (password logged once) — it does **not** copy an existing `admin.db`. SQLite files keep working unchanged, including the legacy column auto-upgrade.
 - The embedded SQLite driver is statically linked, so the default build stays a self-contained binary.
 

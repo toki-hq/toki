@@ -198,11 +198,59 @@ async fn main() -> anyhow::Result<()> {
         )
         .serve(grpc_addr);
 
+    // Run until a server task exits (error) or we get a shutdown signal.
+    // On SIGTERM/SIGINT we fall through to `Ok(())`; returning from `main`
+    // drops the tokio runtime, which tears down every task and closes the
+    // DB pool + listeners cleanly — a graceful exit (code 0) instead of
+    // waiting to be SIGKILLed.
     tokio::select! {
         res = grpc => res?,
         res = audio_task => res??,
         res = admin_task => res??,
+        _ = shutdown_signal() => {
+            tracing::info!("shutdown signal received — stopping");
+        }
     }
 
     Ok(())
+}
+
+/// Resolve when the process is asked to terminate: **SIGTERM** (what
+/// `docker stop`, `systemctl stop`, and Kubernetes send) or **SIGINT**
+/// (Ctrl-C). SIGKILL cannot be intercepted by any process — the kernel
+/// reaps it immediately — so it's deliberately not (and can't be) handled
+/// here. On non-Unix platforms only Ctrl-C is wired.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        // If a handler can't be installed we log and park forever, so a
+        // signal-registration failure degrades to "no graceful shutdown"
+        // rather than taking the server down at boot.
+        let mut sigterm = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not install SIGTERM handler");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        let mut sigint = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not install SIGINT handler");
+                std::future::pending::<()>().await;
+                return;
+            }
+        };
+        tokio::select! {
+            _ = sigterm.recv() => tracing::info!("received SIGTERM"),
+            _ = sigint.recv() => tracing::info!("received SIGINT"),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        tracing::info!("received Ctrl-C");
+    }
 }

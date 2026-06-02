@@ -9,6 +9,8 @@ import {
   Tag,
   Eraser,
   Check,
+  Radio,
+  Users,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -48,6 +50,8 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   // named frequencies, occupied or not). Names persist even while the
   // feature is off, so the toggle is fetched separately to gate editing.
   const names = snapshot?.channelNames ?? {};
+  // Per-frequency duplex mode (0 = half, 1 = full); absent key = half.
+  const modes = snapshot?.channelModes ?? {};
   const [namedEnabled, setNamedEnabled] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
@@ -150,6 +154,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               room={current}
               name={names[current.frequency]}
               namedEnabled={namedEnabled}
+              mode={modes[current.frequency] ?? 0}
               onRename={setRenaming}
             />
           ) : (
@@ -212,11 +217,13 @@ function ChannelDetail({
   room,
   name,
   namedEnabled,
+  mode,
   onRename,
 }: {
   room: Room;
   name?: string;
   namedEnabled: boolean;
+  mode: number;
   onRename: (m: Member) => void;
 }) {
   return (
@@ -232,6 +239,7 @@ function ChannelDetail({
         </span>
       </div>
       <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
+      <ModeEditor frequency={room.frequency} mode={mode} />
       <div className="flex-1 overflow-y-auto">
         {room.members.length === 0 && (
           <p className="p-4 text-sm text-muted-foreground">No members on this frequency.</p>
@@ -372,6 +380,59 @@ function NameEditor({
           Enable <span className="font-medium">Named channels</span> in Server settings to edit.
         </p>
       )}
+    </div>
+  );
+}
+
+function ModeEditor({ frequency, mode }: { frequency: string; mode: number }) {
+  const [busy, setBusy] = useState(false);
+  const full = mode === 1;
+
+  async function set(next: number) {
+    if (next === mode || busy) return;
+    setBusy(true);
+    try {
+      await admin.setChannelMode({ frequency, mode: next });
+      toast.success(
+        next === 1
+          ? `${frequency} is now full-duplex`
+          : `${frequency} is now half-duplex`,
+      );
+    } catch (e) {
+      toast.error(`Mode change failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-border bg-card/40 p-3">
+      <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Radio className="size-3" /> Duplex mode
+      </Label>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant={full ? "outline" : "default"}
+          disabled={busy}
+          onClick={() => void set(0)}
+        >
+          <Radio /> Half
+        </Button>
+        <Button
+          size="sm"
+          variant={full ? "default" : "outline"}
+          disabled={busy}
+          onClick={() => void set(1)}
+        >
+          <Users /> Full
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          {full
+            ? "Everyone can talk at once (clients mix)."
+            : "One talker at a time (push-to-talk floor)."}
+        </span>
+      </div>
     </div>
   );
 }

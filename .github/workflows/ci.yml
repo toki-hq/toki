@@ -220,9 +220,21 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: derive version from tag
+      - name: derive version + image tags from git tag
         id: tag
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Move :latest only for stable tags. A prerelease tag (one
+          # containing a "-", e.g. v0.5.0-alpha) publishes the versioned
+          # tag alone, so `docker pull ...:latest` keeps tracking the
+          # last *stable* release rather than an untested prerelease.
+          {
+            echo "tags<<EOF"
+            echo "ellessen/toki-server:$version"
+            [[ "$version" == *-* ]] || echo "ellessen/toki-server:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: build + push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v6
@@ -231,9 +243,7 @@ jobs:
           file: scripts/server.dockerfile
           push: true
           platforms: linux/amd64
-          tags: |
-            ellessen/toki-server:${{ steps.tag.outputs.version }}
-            ellessen/toki-server:latest
+          tags: ${{ steps.tag.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -267,9 +277,18 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: derive version from tag
+      - name: derive version + image tags from git tag
         id: tag
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Move :latest only for stable tags (see the server job).
+          {
+            echo "tags<<EOF"
+            echo "ellessen/toki-admin-ui:$version"
+            [[ "$version" == *-* ]] || echo "ellessen/toki-admin-ui:latest"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: build + push (linux/amd64, linux/arm64)
         uses: docker/build-push-action@v6
@@ -278,9 +297,7 @@ jobs:
           file: scripts/admin-ui.dockerfile
           push: true
           platforms: linux/amd64
-          tags: |
-            ellessen/toki-admin-ui:${{ steps.tag.outputs.version }}
-            ellessen/toki-admin-ui:latest
+          tags: ${{ steps.tag.outputs.tags }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |

@@ -200,9 +200,13 @@ function ChannelRow({
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="flex items-center gap-1.5 font-mono text-sm tabular">
           {room.frequency}
-          {mode === 1 && (
+          {mode === 1 ? (
             <span className="rounded bg-primary/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
               full
+            </span>
+          ) : (
+            <span className="rounded bg-warning/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-warning">
+              half
             </span>
           )}
         </span>

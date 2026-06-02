@@ -1825,27 +1825,26 @@ impl TokiApp {
         // Tiny "ACT" caption next to the light, on its left — gives
         // the dot a label without crowding the corner.
         // ── Duplex-mode light (top-right, left of ACT) ─────────────
-        // Shows the current channel's duplex mode beside the activity
-        // light: a glowing "FDX" dot on a full-duplex channel, a dim
-        // "HDX" dot on a half-duplex one. Hidden while offline (no
-        // channel to describe). The dot sits left of its caption, which
-        // sits left of the ACT group: [• FDX]   [ACT •].
-        let dplx_right = dot_x - 34.0; // clear of the ACT caption+dot
+        // Mirrors the ACT light's "caption • dot" layout: a green glowing
+        // "FDX" on a full-duplex channel, an amber glowing "HDX" on a
+        // half-duplex one. Hidden while offline (no channel to describe).
+        // Sits left of the ACT group: [FDX •]   [ACT •].
         if !st.is_transport_down() {
             let full = self.state.lock().unwrap().duplex_full;
-            painter.text(
-                Pos2::new(dplx_right, dot_y),
-                Align2::RIGHT_CENTER,
-                if full { "FDX" } else { "HDX" },
-                font_mono(7.0),
-                if full { T::PRIMARY_DIM } else { T::INK_MUTE },
-            );
-            let dplx_dot_x = dplx_right - 21.0;
-            if full {
-                glow_dot(painter, Pos2::new(dplx_dot_x, dot_y), 3.0, T::PRIMARY, 1.0);
+            let dplx_dot_x = dot_x - 40.0; // clear of the ACT caption + dot
+            let (color, label) = if full {
+                (T::PRIMARY, "FDX")
             } else {
-                painter.circle_filled(Pos2::new(dplx_dot_x, dot_y), 3.0, T::INK_MUTE);
-            }
+                (T::TX, "HDX")
+            };
+            painter.text(
+                Pos2::new(dplx_dot_x - 6.0, dot_y),
+                Align2::RIGHT_CENTER,
+                label,
+                font_mono(7.0),
+                color,
+            );
+            glow_dot(painter, Pos2::new(dplx_dot_x, dot_y), 3.0, color, 1.0);
         }
         painter.text(
             Pos2::new(dot_x - 6.0, dot_y),

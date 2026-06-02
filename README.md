@@ -56,10 +56,30 @@ cargo run -p toki-client
 | `TOKI_ADMIN_BIND` | Admin panel bind interface | `127.0.0.1` |
 | `TOKI_ADMIN_PORT` | Admin panel port | `8000` |
 | `TOKI_ADMIN_DB_PATH` | SQLite path for admin users/sessions/config | `admin.db` (under data dir) |
+| `TOKI_ADMIN_DB_URL` | Admin store connection URL (overrides `DB_PATH`; selects backend) | unset → SQLite from `DB_PATH` |
 | `TOKI_ADMIN_SESSION_TTL_HOURS` | Admin session lifetime | `12` |
 | `TOKI_ADMIN_HTTP_REDIRECT_PORT` | Optional plain-HTTP listener that 308-redirects to HTTPS | unset (disabled) |
 
 Anything in the `[tls]`, `[admin]`, and top-level `password` blocks of `config.toml` is overridden by the matching env var (env > TOML > defaults).
+
+### Admin database backends
+
+The admin store (users, sessions, runtime config, channel names, metrics, audit log) runs on **SQLite by default** — zero-config, embedded, a single `admin.db` file. To use a **remote MariaDB/MySQL or PostgreSQL** server instead, set a connection URL; the backend is chosen by the scheme:
+
+```toml
+[admin]
+# SQLite (default — omit to use the db_path shorthand):
+# database_url = "sqlite:///var/lib/toki/admin.db?mode=rwc"
+database_url = "postgres://toki:secret@db.example.com/toki"   # or
+# database_url = "mysql://toki:secret@db.example.com/toki"    # MariaDB/MySQL (mariadb:// also works)
+```
+
+or via env: `TOKI_ADMIN_DB_URL=postgres://toki:secret@db.example.com/toki`.
+
+- Remote backends connect over **TLS** (rustls/ring — no OpenSSL) when the server requires it; the password is redacted from startup logs.
+- **Startup connection retry:** the initial connect to a remote backend retries with exponential backoff (~0.5s → 5s, up to ~60s total) so a DB container that's still starting (docker-compose `depends_on` / k8s ordering) gets time to come up instead of failing the boot. A genuine misconfiguration (bad host/credentials) still surfaces as a clear startup error once the budget is spent.
+- **Fresh start per backend:** pointing at MariaDB/Postgres creates the schema and re-seeds the `admin` user (password logged once) — it does **not** copy an existing `admin.db`. SQLite files keep working unchanged, including the legacy column auto-upgrade.
+- The embedded SQLite driver is statically linked, so the default build stays a self-contained binary.
 
 ### Docker
 

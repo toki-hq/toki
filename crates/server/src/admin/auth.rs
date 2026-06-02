@@ -364,7 +364,7 @@ mod tests {
 
     #[tokio::test]
     async fn seed_admin_is_idempotent() {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         seed_admin_if_empty(&db).await.unwrap();
         assert_eq!(db.user_count().await.unwrap(), 1);

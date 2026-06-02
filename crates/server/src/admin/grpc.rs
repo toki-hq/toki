@@ -1040,7 +1040,7 @@ mod tests {
     use tonic::Code;
 
     async fn test_api(toml_override: bool) -> (AdminApi, String) {
-        let db = AdminDb::open_in_memory().unwrap();
+        let db = AdminDb::open_in_memory().await.unwrap();
         db.migrate().await.unwrap();
         db.insert_user("admin", &auth::hash_password("hunter2").unwrap())
             .await

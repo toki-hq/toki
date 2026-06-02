@@ -46,12 +46,9 @@ async fn boot() -> (axum::Router, &'static str) {
         audit: toki_server::audit::channel().0,
         toml_password_override: false,
     };
-    // Tests drive the HTTP router standalone (no gRPC merge), so append
-    // the SPA fallback here — production sets it on the merged router.
-    (
-        admin::routes::build(state).fallback(admin::handlers::spa),
-        "hunter2",
-    )
+    // Tests drive the HTTP router standalone (no gRPC merge). The SPA is
+    // served by the standalone UI service now, so there's no fallback.
+    (admin::routes::build(state), "hunter2")
 }
 
 fn extract_session_cookie(set_cookie: &str) -> Option<String> {
@@ -119,43 +116,4 @@ async fn login_success_sets_secure_cookie_then_logout_clears_it() {
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
     let cleared = res.headers()["set-cookie"].to_str().unwrap();
     assert!(cleared.contains("Max-Age=0"));
-}
-
-#[tokio::test]
-async fn spa_serves_index_for_root_and_history_routes() {
-    let (app, _pw) = boot().await;
-    // Root → index.html.
-    let res = app
-        .clone()
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-    let ct = res.headers()["content-type"].to_str().unwrap();
-    assert!(ct.starts_with("text/html"));
-
-    // Extension-less client route → history fallback to index.html (200).
-    let res = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri("/server")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    // A missing *file* (has an extension) → 404.
-    let res = app
-        .oneshot(
-            Request::builder()
-                .uri("/nope.js")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }

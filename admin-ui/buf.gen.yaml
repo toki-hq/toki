@@ -8,4 +8,4 @@ plugins:
     opt:
       - target=ts
 inputs:
-  - directory: ../../proto/proto
+  - directory: ../crates/proto/proto

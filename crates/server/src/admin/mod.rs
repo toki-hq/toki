@@ -1,20 +1,21 @@
 //! Admin web panel.
 //!
-//! A React SPA + a gRPC-Web control-plane service, both served on the
-//! admin TLS listener (default `8000`) in the same process as the gRPC
-//! signaling server. The SPA (built by `admin-ui/`, embedded via
-//! rust-embed) talks gRPC-Web to the [`grpc::AdminApi`] service, which
-//! surfaces live registry state over the streaming `Watch` RPC and
-//! exposes operator actions (kick / move / rename / priority) + runtime
-//! config, all mutating the same `Arc<Mutex<Registry>>` the signaling
-//! handlers use.
+//! A gRPC-Web control-plane service served on the admin TLS listener
+//! (default `8000`) in the same process as the gRPC signaling server. The
+//! admin SPA ships separately (the standalone `admin-ui/` service) and
+//! reaches this listener through a reverse proxy; it talks gRPC-Web to the
+//! [`grpc::AdminApi`] service, which surfaces live registry state over the
+//! streaming `Watch` RPC and exposes operator actions (kick / move /
+//! rename / priority) + runtime config, all mutating the same
+//! `Arc<Mutex<Registry>>` the signaling handlers use.
 //!
 //! # Serving
 //!
 //! One [`axum::Router`] on the TLS listener: the `GrpcWebLayer`-wrapped
 //! `AdminServer` (mounted at `/toki.admin.v1.Admin/*` via tonic's
-//! `Routes::into_axum_router`), the two cookie endpoints
-//! (`/api/login`, `/api/logout`), and the embedded-SPA fallback.
+//! `Routes::into_axum_router`) and the two cookie endpoints
+//! (`/api/login`, `/api/logout`). The server no longer serves any static
+//! assets — that's the standalone UI service's job.
 //!
 //! # Auth
 //!
@@ -277,20 +278,18 @@ pub async fn run(
     // `Routes::into_axum_router`), then layered with `GrpcWebLayer` so the
     // browser can call it over a plain fetch. Its routes live under
     // `/toki.admin.v1.Admin/*`; merging with the HTTP router is
-    // unambiguous (no path overlap with `/api/*` or the SPA fallback).
+    // unambiguous (no path overlap with `/api/*`).
     let admin_grpc =
         AdminServer::with_interceptor(grpc::AdminApi::new(state.clone()), grpc::AuthInterceptor);
     let grpc_router = tonic::service::Routes::new(admin_grpc)
         .into_axum_router()
         .layer(GrpcWebLayer::new());
 
-    // Merge the cookie endpoints (no fallback) with the gRPC router
-    // (carries tonic's fallback), then set the SPA as the single
-    // fallback on the result. gRPC method routes + `/api/*` match by
-    // path first; everything else lands on the SPA (asset or index.html).
-    let router = routes::build(state)
-        .merge(grpc_router)
-        .fallback(handlers::spa);
+    // Merge the cookie endpoints (no fallback) with the gRPC router, which
+    // carries tonic's own fallback for unmatched paths. The SPA is served
+    // by the standalone `admin-ui/` service, which reverse-proxies
+    // `/api/*` + `/toki.admin.v1.Admin/*` back here.
+    let router = routes::build(state).merge(grpc_router);
 
     // Build a RustlsConfig from the PEM bytes we already have in
     // hand. `from_pem` parses them via `rustls-pemfile`; the result

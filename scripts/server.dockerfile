@@ -1,31 +1,30 @@
-# ── Stage 1: build the admin SPA ──────────────────────────────────
-# The React admin UI is embedded into the server binary (rust-embed),
-# so its `dist/` must exist before the cargo build. buf is provided via
-# npm (the proto is read from crates/proto/proto), so no extra toolchain.
-FROM node:20-slim AS ui
-WORKDIR /ui
-COPY crates/server/admin-ui/package.json crates/server/admin-ui/package-lock.json ./
-RUN npm ci
-COPY crates/server/admin-ui/ ./
-COPY crates/proto/proto /proto/proto
-RUN npm run gen && npm run build
+# Pin both stages to the same Debian release. `rust:slim` floats and
+# at the time of writing tracks trixie (Debian 13, glibc 2.41), while
+# the runtime image below is bookworm (glibc 2.36). Mixing them links
+# the binary against GLIBC_2.38+ symbols the runtime can't satisfy
+# ("/lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found").
+# Holding the builder on bookworm keeps both sides on the same libc
+# floor; bump both lines together if you want a newer Debian later.
 
-# ── Stage 2: build the server ─────────────────────────────────────
-# Pin to trixie so the builder's glibc matches the runtime image below.
-FROM rust:slim-trixie AS builder
-
-WORKDIR /app
-
-COPY . .
-# Drop in the freshly-built SPA so rust-embed bakes the real bundle
-# (overwriting the committed placeholder index.html).
-COPY --from=ui /ui/dist crates/server/admin-ui/dist
+# Base stage
+FROM rust:slim-trixie AS base
 
 RUN apt update && apt install -y protobuf-compiler
+
+# Builder stage
+#
+# The admin SPA is no longer embedded into the binary — it ships as the
+# standalone toki-admin-ui image (scripts/admin-ui.dockerfile). So this is
+# a pure Rust build; no Node toolchain required.
+FROM base AS builder
+
+WORKDIR /app
+COPY . .
 RUN cargo build --release --package toki-server
 
-FROM debian:13-slim
 
+# Release stage
+FROM debian:13-slim as release
 COPY --from=builder /app/target/release/toki-server /usr/bin/toki-server
 RUN  chmod +x /usr/bin/toki-server
 
@@ -35,7 +34,7 @@ RUN  chmod +x ./entrypoint.sh
 RUN groupadd -r toki && useradd -r -g toki toki
 
 RUN mkdir -p /data
-RUN chown -R toki:toki /data
+RUN chmod 777 /data
 
 ENV TOKI_CONFIG=/data/config.toml
 

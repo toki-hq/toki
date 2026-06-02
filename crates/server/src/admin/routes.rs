@@ -1,10 +1,9 @@
 //! Axum router for the non-gRPC admin surface.
 //!
-//! Post-migration this is small: the two cookie endpoints
-//! (`/api/login`, `/api/logout`) and a catch-all that serves the embedded
-//! React SPA (with client-side-routing history fallback). The gRPC `Admin`
-//! service is merged in separately by [`super::run`] — its `/toki.admin.v1.Admin/*`
-//! routes take precedence over the SPA fallback, so there's no overlap.
+//! Post-migration this is small: just the two cookie endpoints
+//! (`/api/login`, `/api/logout`). The admin SPA is served by the
+//! standalone `admin-ui/` service, not here. The gRPC `Admin` service is
+//! merged in separately by [`super::run`] under `/toki.admin.v1.Admin/*`.
 
 use axum::{routing::post, Router};
 
@@ -12,11 +11,8 @@ use super::{handlers, AppState};
 
 /// Build the HTTP router: just the two cookie endpoints, with state
 /// applied. **No fallback** — [`super::run`] merges this with the gRPC
-/// router (which carries tonic's own fallback) and then sets
-/// [`handlers::spa`] as the single fallback on the merged router. (axum
-/// panics if you merge two routers that both have a fallback.) Tests that
-/// want the SPA served standalone append `.fallback(handlers::spa)`
-/// themselves.
+/// router, which carries tonic's own fallback for unmatched paths. (axum
+/// panics if you merge two routers that both have a fallback.)
 pub fn build(state: AppState) -> Router {
     Router::new()
         .route("/api/login", post(handlers::login))

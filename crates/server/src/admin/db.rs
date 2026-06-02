@@ -318,6 +318,48 @@ impl AdminDb {
         })
     }
 
+    /// Load every non-default channel duplex mode (canonical frequency →
+    /// integer mode, 0 = half / 1 = full). Half-duplex frequencies are
+    /// not stored (an absent key is half), so the map is usually small.
+    pub async fn load_channel_modes(&self) -> Result<HashMap<String, u32>> {
+        on_pool!(self, p, {
+            let rows = sqlx::query("SELECT frequency, mode FROM channel_modes")
+                .fetch_all(p)
+                .await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(r.try_get::<String, _>(0)?, r.try_get::<i64, _>(1)? as u32);
+            }
+            Ok(map)
+        })
+    }
+
+    /// Upsert a single channel's duplex mode (caller validated freq +
+    /// mode). Half-duplex (`0`) is stored too — the caller clears the row
+    /// when resetting to default rather than relying on absence here.
+    pub async fn set_channel_mode(&self, frequency: &str, mode: u32) -> Result<()> {
+        let now = now_unix();
+        let sql = self.mode_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(frequency)
+                .bind(mode as i64)
+                .bind(now)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Delete a single channel's stored duplex mode (back to half-duplex).
+    pub async fn clear_channel_mode(&self, frequency: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM channel_modes WHERE frequency = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(frequency).execute(p).await?;
+            Ok(())
+        })
+    }
+
     // ── Metrics time-series ───────────────────────────────────────────
 
     /// Append one metrics sample (1-minute cadence). Upserts on the `ts`
@@ -616,6 +658,25 @@ impl AdminDb {
         }
     }
 
+    fn mode_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES (?, ?, ?) \
+                 ON CONFLICT(frequency) DO UPDATE SET mode = excluded.mode, \
+                 updated_at = excluded.updated_at"
+            }
+            Backend::MySql => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES (?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE mode = VALUES(mode), updated_at = VALUES(updated_at)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES ($1, $2, $3) \
+                 ON CONFLICT(frequency) DO UPDATE SET mode = excluded.mode, \
+                 updated_at = excluded.updated_at"
+            }
+        }
+    }
+
     fn metrics_upsert_sql(&self) -> &'static str {
         match self.backend {
             Backend::Sqlite => {
@@ -879,6 +940,11 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    mode       INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           INTEGER PRIMARY KEY NOT NULL,
     rx_bps       INTEGER NOT NULL,
@@ -926,6 +992,11 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       VARCHAR(255) NOT NULL,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  VARCHAR(32) PRIMARY KEY NOT NULL,
+    mode       BIGINT NOT NULL DEFAULT 0,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
     rx_bps       BIGINT NOT NULL,
@@ -969,6 +1040,11 @@ INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 CREATE TABLE IF NOT EXISTS channel_names (
     frequency  TEXT PRIMARY KEY NOT NULL,
     name       TEXT NOT NULL,
+    updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_modes (
+    frequency  TEXT PRIMARY KEY NOT NULL,
+    mode       BIGINT NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
@@ -1208,6 +1284,26 @@ mod tests {
 
         db.clear_all_channel_names().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_modes_crud_roundtrips() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_channel_modes().await.unwrap().is_empty());
+
+        db.set_channel_mode("446.05", 1).await.unwrap(); // full
+        db.set_channel_mode("447.00", 1).await.unwrap();
+        db.set_channel_mode("446.05", 0).await.unwrap(); // upsert back to half
+        let modes = db.load_channel_modes().await.unwrap();
+        assert_eq!(modes.len(), 2);
+        assert_eq!(modes.get("446.05").copied(), Some(0));
+        assert_eq!(modes.get("447.00").copied(), Some(1));
+
+        db.clear_channel_mode("446.05").await.unwrap();
+        let modes = db.load_channel_modes().await.unwrap();
+        assert_eq!(modes.len(), 1);
+        assert!(!modes.contains_key("446.05"));
     }
 
     #[tokio::test]

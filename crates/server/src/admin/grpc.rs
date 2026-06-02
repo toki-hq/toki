@@ -23,11 +23,12 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+use crate::state::DuplexMode;
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged, MemberJoined,
-    MemberLeft, PttEvent,
+    event, ChannelModeChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
+    MemberJoined, MemberLeft, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -107,6 +108,7 @@ impl AdminApi {
         let snap = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.duplex_modes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -164,6 +166,7 @@ impl Admin for AdminApi {
         let first = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.duplex_modes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -795,6 +798,85 @@ impl Admin for AdminApi {
         Ok(Response::new(pb::SetChannelNameResponse {}))
     }
 
+    async fn set_channel_mode(
+        &self,
+        req: Request<pb::SetChannelModeRequest>,
+    ) -> Result<Response<pb::SetChannelModeResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetChannelModeRequest { frequency, mode } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+        if mode > 1 {
+            return Err(Status::invalid_argument("unknown duplex mode"));
+        }
+        let duplex = DuplexMode::from_u32(mode);
+
+        // Persist + update the shared map in lockstep. Half-duplex is the
+        // default, so we clear the row (absent = half) to keep the table +
+        // snapshot carrying only the non-default channels.
+        if duplex.is_full() {
+            self.state
+                .db
+                .set_channel_mode(&frequency, duplex.as_u32())
+                .await
+                .map_err(internal)?;
+            self.state
+                .duplex_modes
+                .write()
+                .await
+                .insert(frequency.clone(), duplex);
+        } else {
+            self.state
+                .db
+                .clear_channel_mode(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.duplex_modes.write().await.remove(&frequency);
+        }
+
+        // Hot-apply to a live room so the relay switches immediately
+        // without waiting for the next join.
+        if let Some(room) = self.state.registry.lock().await.rooms.get_mut(&frequency) {
+            room.duplex = duplex;
+            // Leaving full→half drops the floor-less talker set; the
+            // half-duplex path will re-establish a single holder.
+            if !duplex.is_full() {
+                room.active_talkers.clear();
+            }
+        }
+
+        tracing::info!(
+            admin_user = %admin.0,
+            frequency = %frequency,
+            mode = if duplex.is_full() { "full" } else { "half" },
+            "admin set channel duplex mode",
+        );
+        audit::record(
+            &self.state.audit,
+            "channel-mode",
+            &admin.0,
+            &frequency,
+            if duplex.is_full() {
+                "set the channel to full-duplex"
+            } else {
+                "set the channel to half-duplex"
+            },
+        );
+
+        // Tell occupants so their clients switch PTT behaviour live.
+        let evt = Event {
+            event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
+                frequency: frequency.clone(),
+                mode: duplex.as_u32() as i32,
+            })),
+        };
+        for tx in self.room_recipients(&frequency).await {
+            let _ = tx.send(evt.clone()).await;
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelModeResponse {}))
+    }
+
     async fn clear_all_channel_names(
         &self,
         req: Request<pb::ClearAllChannelNamesRequest>,
@@ -1060,6 +1142,7 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            duplex_modes: crate::state::shared_duplex_modes(Default::default()),
             health: crate::metrics::shared_health(),
             live_rate: crate::metrics::shared_live_rate(),
             audit: crate::audit::channel().0,
@@ -1094,6 +1177,7 @@ mod tests {
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
             audio_last_seq: 0,
             audio_outbound_seq: 1,
+            audio_id: 0,
             audio_addr: None,
             events_tx: None,
             current_frequency: freq.map(str::to_string),

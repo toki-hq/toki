@@ -96,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
     // off by default, the signaling path never consults it anyway.
     let channel_names = state::shared_channel_names(std::collections::HashMap::new());
 
+    // Per-frequency duplex modes (half/full). Same bootstrap dance as
+    // channel names: starts empty (all-half), and the admin task loads
+    // the persisted `channel_modes` from sqlite right after it opens.
+    let duplex_modes = state::shared_duplex_modes(std::collections::HashMap::new());
+
     // Runtime-mutable server settings. Starts at hardcoded defaults
     // (same values the code shipped before this lived in the db);
     // the admin task, if enabled, will overwrite from sqlite right
@@ -163,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         tls_material.clone(),
         server_config.clone(),
         channel_names.clone(),
+        duplex_modes.clone(),
         byte_counters.clone(),
         audit_tx,
         audit_rx,
@@ -192,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
                 password,
                 server_config.clone(),
                 channel_names,
+                duplex_modes,
                 audit_tx_sig,
             )
             .max_decoding_message_size(8 * 1024),

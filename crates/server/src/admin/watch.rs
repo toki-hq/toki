@@ -22,7 +22,7 @@ use tonic::Status;
 use toki_proto::admin::v1 as pb;
 
 use crate::metrics::{SharedByteCounters, SharedLiveRate};
-use crate::state::{SharedChannelNames, SharedRegistry};
+use crate::state::{SharedChannelNames, SharedDuplexModes, SharedRegistry};
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
 /// result out to `Watch` subscribers. 1 Hz is plenty for an admin
@@ -36,6 +36,7 @@ pub const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 pub async fn run_broadcaster(
     registry: SharedRegistry,
     channel_names: SharedChannelNames,
+    duplex_modes: SharedDuplexModes,
     counters: SharedByteCounters,
     live_rate: SharedLiveRate,
     tx: Sender<pb::Snapshot>,
@@ -69,6 +70,7 @@ pub async fn run_broadcaster(
         let snapshot = snapshot_now(
             &registry,
             &channel_names,
+            &duplex_modes,
             &live_rate,
             next_generation(),
             started_at,
@@ -91,13 +93,20 @@ pub fn next_generation() -> u64 {
 pub async fn snapshot_now(
     registry: &SharedRegistry,
     channel_names: &SharedChannelNames,
+    duplex_modes: &SharedDuplexModes,
     live_rate: &SharedLiveRate,
     generation: u64,
     started_at: Instant,
 ) -> pb::Snapshot {
-    // Snapshot the name map up front (its own lock, held only here) so
-    // the registry lock below never overlaps it.
+    // Snapshot the name + mode maps up front (their own locks, held only
+    // here) so the registry lock below never overlaps them.
     let names = channel_names.read().await.clone();
+    let modes: std::collections::HashMap<String, u32> = duplex_modes
+        .read()
+        .await
+        .iter()
+        .map(|(freq, m)| (freq.clone(), m.as_u32()))
+        .collect();
     let r = registry.lock().await;
     let now = Instant::now();
 
@@ -156,6 +165,8 @@ pub async fn snapshot_now(
         // Latest 1 Hz throughput, for the dashboard's live bandwidth trace.
         rx_bytes_per_sec: live_rate.rx.load(Ordering::Relaxed),
         tx_bytes_per_sec: live_rate.tx.load(Ordering::Relaxed),
+        // Only the non-default (full-duplex) frequencies; absent = half.
+        channel_modes: modes,
     }
 }
 
@@ -185,6 +196,7 @@ mod tests {
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
             audio_last_seq: 0,
             audio_outbound_seq: 1,
+            audio_id: 0,
             audio_addr: None,
             events_tx: None,
             current_frequency: freq.map(str::to_string),
@@ -215,7 +227,15 @@ mod tests {
         let names = crate::state::shared_channel_names(Default::default());
         let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, &lr, 7, Instant::now()).await;
+        let snap = snapshot_now(
+            &registry,
+            &names,
+            &crate::state::shared_duplex_modes(Default::default()),
+            &lr,
+            7,
+            Instant::now(),
+        )
+        .await;
         assert_eq!(snap.generation, 7);
         assert_eq!(snap.rooms.len(), 1);
         assert_eq!(snap.rooms[0].frequency, "446.05");
@@ -246,7 +266,15 @@ mod tests {
         let names = crate::state::shared_channel_names(Default::default());
         let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, &lr, 1, Instant::now()).await;
+        let snap = snapshot_now(
+            &registry,
+            &names,
+            &crate::state::shared_duplex_modes(Default::default()),
+            &lr,
+            1,
+            Instant::now(),
+        )
+        .await;
         let members: HashMap<_, _> = snap.rooms[0]
             .members
             .iter()
@@ -278,7 +306,15 @@ mod tests {
         let names = crate::state::shared_channel_names(seed);
         let lr = crate::metrics::shared_live_rate();
 
-        let snap = snapshot_now(&registry, &names, &lr, 1, Instant::now()).await;
+        let snap = snapshot_now(
+            &registry,
+            &names,
+            &crate::state::shared_duplex_modes(Default::default()),
+            &lr,
+            1,
+            Instant::now(),
+        )
+        .await;
         assert_eq!(
             snap.channel_names.get("446.05").map(String::as_str),
             Some("Ops Net")

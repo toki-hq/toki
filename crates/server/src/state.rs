@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Instant;
@@ -6,6 +6,38 @@ use std::time::Instant;
 use tokio::sync::{mpsc, Mutex, RwLock};
 
 use toki_proto::v1::Event;
+
+/// Per-frequency duplex behaviour. `Half` (the default) is the classic
+/// single-PTT-floor walkie-talkie; `Full` lets several members transmit
+/// at once and clients mix the concurrent streams.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum DuplexMode {
+    #[default]
+    Half,
+    Full,
+}
+
+impl DuplexMode {
+    /// Decode the wire/db integer (0 = half, 1 = full); anything else
+    /// falls back to the safe default (half).
+    pub fn from_u32(v: u32) -> Self {
+        match v {
+            1 => DuplexMode::Full,
+            _ => DuplexMode::Half,
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        match self {
+            DuplexMode::Half => 0,
+            DuplexMode::Full => 1,
+        }
+    }
+
+    pub fn is_full(self) -> bool {
+        matches!(self, DuplexMode::Full)
+    }
+}
 
 /// Length of the BLAKE3 digest we use to key the token table. The
 /// full 32-byte BLAKE3 output is overkill for a 16-byte preimage —
@@ -41,6 +73,12 @@ pub struct Client {
     /// inbound counter — the AEAD nonce space is per-direction, and
     /// the peer's playback-side replay check uses this directly.
     pub audio_outbound_seq: u64,
+    /// Compact per-session id stamped into the S2C audio header so a
+    /// receiver can route this sender's packets to their own decoder +
+    /// jitter buffer when mixing concurrent talkers on a full-duplex
+    /// channel. Assigned once at register from `Registry::alloc_audio_id`;
+    /// opaque (not an identity), unique among live sessions.
+    pub audio_id: u32,
     pub audio_addr: Option<SocketAddr>,
     pub events_tx: Option<mpsc::Sender<Event>>,
     /// The frequency room the client is currently in. `None` between
@@ -87,9 +125,19 @@ pub struct Client {
 #[derive(Default)]
 pub struct Room {
     pub members: Vec<String>,
+    /// Duplex behaviour of this channel. Cached here (the source of truth
+    /// is `SharedDuplexModes` + the `channel_modes` db table) so the audio
+    /// relay can branch without a second lock. Initialised from the shared
+    /// map on room creation and updated when an admin changes the mode.
+    pub duplex: DuplexMode,
     /// Walkie-talkie lock: client_id of the current PTT holder. At most one
     /// member may transmit at a time. `None` means the room is free.
+    /// **Half-duplex only** — unused on full-duplex channels.
     pub holder: Option<String>,
+    /// On a **full-duplex** channel, the set of members currently keying
+    /// (PTT held). There's no single floor; this drives the multi-talker
+    /// roster indicators. Empty on half-duplex channels.
+    pub active_talkers: HashSet<String>,
     /// The most recent holder and the instant they released the floor,
     /// set whenever `holder` transitions to `None`. The audio relay keeps
     /// forwarding *this* client's packets for a brief grace window after
@@ -113,6 +161,22 @@ pub struct Registry {
     /// 16-byte token; the relay hashes it and looks up here. The
     /// raw token is never persisted server-side after registration.
     pub tokens: HashMap<[u8; TOKEN_HASH_LEN], String>,
+    /// Monotonic source for per-session `Client.audio_id`. Starts at 0;
+    /// `alloc_audio_id` pre-increments so ids begin at 1 (0 is never a
+    /// live sender). Wraps after 2^32 sessions — astronomically beyond
+    /// any real uptime, and old ids are long gone by then.
+    next_audio_id: u32,
+}
+
+impl Registry {
+    /// Allocate the next per-session audio routing id (≥ 1).
+    pub fn alloc_audio_id(&mut self) -> u32 {
+        self.next_audio_id = self.next_audio_id.wrapping_add(1);
+        if self.next_audio_id == 0 {
+            self.next_audio_id = 1;
+        }
+        self.next_audio_id
+    }
 }
 
 /// BLAKE3 the raw token and truncate to `TOKEN_HASH_LEN` bytes for
@@ -145,6 +209,22 @@ pub type SharedChannelNames = Arc<RwLock<HashMap<String, String>>>;
 /// Build a shared channel-name map from an initial snapshot (typically
 /// `AdminDb::load_channel_names` at boot, or empty for headless runs).
 pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNames {
+    Arc::new(RwLock::new(initial))
+}
+
+/// Admin-assigned per-frequency duplex modes (canonical frequency →
+/// [`DuplexMode`]), shared between the admin mutation handlers (writers)
+/// and the signaling service (reader, on `Join` / `ChangeFrequency`).
+/// Loaded from the `channel_modes` table at startup. Same rationale as
+/// [`SharedChannelNames`]: modes persist independently of room occupancy
+/// and reads dominate, so it lives off the registry `Mutex`. Only
+/// non-default (full-duplex) frequencies need an entry; an absent key is
+/// half-duplex.
+pub type SharedDuplexModes = Arc<RwLock<HashMap<String, DuplexMode>>>;
+
+/// Build a shared duplex-mode map from an initial snapshot (typically
+/// `AdminDb::load_channel_modes` at boot, or empty for headless runs).
+pub fn shared_duplex_modes(initial: HashMap<String, DuplexMode>) -> SharedDuplexModes {
     Arc::new(RwLock::new(initial))
 }
 

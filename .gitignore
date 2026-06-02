@@ -57,6 +57,10 @@ design/
 /data/
 
 # Stray runtime artifacts if a server is ever launched from the admin-ui dir.
-/crates/server/admin-ui/admin.db
-/crates/server/admin-ui/admin.db-*
-/crates/server/admin-ui/tls/
+/admin-ui/admin.db
+/admin-ui/admin.db-*
+/admin-ui/tls/
+
+# Local Claude Code settings (per-operator permissions, not shared).
+# The shareable bits — the skills under .claude/skills/ — are tracked.
+.claude/settings.local.json

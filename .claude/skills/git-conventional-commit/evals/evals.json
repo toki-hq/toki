@@ -1,0 +1,23 @@
+{
+  "skill_name": "git-conventional-commit",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I've staged some changes in /tmp/test-repos/repo-bugfix — can you write a conventional commit message for them and commit? The project uses commitlint.",
+      "expected_output": "A fix(auth): commit message derived from the staged diff, using a scope from commitlint.config.js (should be 'auth'), with a confirmation step before actually committing.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Please commit the staged changes in /tmp/test-repos/repo-breaking. I removed the old /users/:id endpoint and replaced it with /v2/users/:uuid — heads up it's a breaking change.",
+      "expected_output": "A feat(api)!: commit with a BREAKING CHANGE footer explaining the migration path from /users/:id to /v2/users/:uuid.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Commit the staged changes in /tmp/test-repos/repo-refactor. I cleaned up the payment module.",
+      "expected_output": "A refactor(payments): or refactor: commit message derived from the diff, with a 'Refs: PAY-512' footer picked up from the branch name feature/PAY-512-refactor-payment-module.",
+      "files": []
+    }
+  ]
+}

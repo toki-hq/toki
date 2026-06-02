@@ -35,11 +35,15 @@ Voice is **Opus** by default (~24 kbps/stream of audio — a ~15–20× cut vs t
 - Inbound gRPC messages are capped at 8 KB; a `max_peers` ceiling and an idle reaper bound resource use.
 - **Version gate**: clients send their version on `Register`; the server requires a matching **MAJOR.MINOR** (patch may differ — patches are wire-compatible) and rejects a mismatch with `FAILED_PRECONDITION` and a "please update" message. The UDP audio wire format can change across minor versions, so this turns silent dead-air into an actionable error rather than letting incompatible builds half-connect.
 
+## Documentation
+
+A full operator/user guide — install, config, env vars, admin panel, recipes, troubleshooting, architecture — lives at [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
+
 ## Running
 
 ```sh
 # server — gRPC TCP :50051, UDP audio :50051 (same number, different
-# protocol), admin panel HTTPS :8000
+# protocol), admin control-plane HTTPS :8000
 cargo run -p toki-server
 
 # client

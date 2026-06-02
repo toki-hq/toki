@@ -1,30 +1,51 @@
-# Pin both stages to the same Debian release. `rust:slim` floats and
-# at the time of writing tracks trixie (Debian 13, glibc 2.41), while
-# the runtime image below is bookworm (glibc 2.36). Mixing them links
-# the binary against GLIBC_2.38+ symbols the runtime can't satisfy
-# ("/lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.38' not found").
-# Holding the builder on bookworm keeps both sides on the same libc
-# floor; bump both lines together if you want a newer Debian later.
-
-# Base stage
-FROM rust:slim-trixie AS base
-
-RUN apt update && apt install -y protobuf-compiler
-
-# Builder stage
+# Build the server with cargo-chef so third-party dependencies compile in
+# a *separate, cached* layer ahead of the app code. Without this, the
+# single `COPY . . && cargo build` recompiled every dependency on any
+# source change. Now the dep layer only busts when Cargo.lock / the proto
+# (build-script input) change — app-only edits reuse the cooked deps.
 #
-# The admin SPA is no longer embedded into the binary — it ships as the
-# standalone toki-admin-ui image (scripts/admin-ui.dockerfile). So this is
-# a pure Rust build; no Node toolchain required.
-FROM base AS builder
+# Keep the builder and runtime on the same Debian release (both trixie =
+# Debian 13, glibc 2.41). Mixing a newer builder with an older runtime
+# links the binary against GLIBC symbols the runtime can't satisfy
+# ("version `GLIBC_2.xx' not found"). Bump both `FROM` lines together.
 
+# Base: toolchain + protoc. Also the `target` the docker-compose dev
+# service builds (it bind-mounts the source and runs `cargo run`), so keep
+# it lean — no cargo-chef here.
+FROM rust:slim-trixie AS base
+RUN apt update && apt install -y protobuf-compiler
 WORKDIR /app
+
+# Chef: base + cargo-chef, shared by the planner & builder stages below.
+FROM base AS chef
+RUN cargo install cargo-chef --locked
+
+# Planner: distil the dependency graph into a recipe. Runs on the full
+# source but emits only recipe.json, so editing app code doesn't change
+# this layer's output unless the dependency set actually changed.
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Builder: cook the dependencies (the cached layer), then build the app.
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+# toki-proto's build.rs invokes protoc on these during the deps cook, so
+# they must be present before `cargo chef cook` — this small COPY only
+# busts the cook layer when the .proto files change.
+COPY crates/proto/proto crates/proto/proto
+# Scope to the server's dependency graph: cooking the whole workspace
+# would drag in the client's eframe/cpal/winit native deps (and their
+# system libs, absent here). `--package toki-server` keeps it lean.
+RUN cargo chef cook --release --package toki-server --recipe-path recipe.json
+# Real source: from here only the workspace crates (toki-proto, toki-
+# server) recompile — the cooked third-party deps are reused from target/.
 COPY . .
 RUN cargo build --release --package toki-server
 
 
 # Release stage
-FROM debian:13-slim as release
+FROM debian:13-slim AS release
 COPY --from=builder /app/target/release/toki-server /usr/bin/toki-server
 RUN  chmod +x /usr/bin/toki-server
 
@@ -42,7 +63,7 @@ USER toki
 
 # gRPC + audio share port 50051 (TCP for gRPC, UDP for audio — the
 # kernel keys binds by `(protocol, port)`, so they coexist). 8000
-# is the admin web panel. Declaring the protocol explicitly so
+# is the admin control-plane. Declaring the protocol explicitly so
 # `docker run -P` / `docker inspect` know to publish the UDP side
 # as well — bare `EXPOSE 50051` defaults to TCP only.
 EXPOSE 50051/tcp 50051/udp 8000/tcp

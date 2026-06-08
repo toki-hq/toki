@@ -215,11 +215,12 @@ pub struct TokiApp {
 }
 
 /// In-flight press gesture on a single memory button. A short left
-/// release recalls/saves; a held left press (≥ [`MEM_HOLD`]) overwrites;
-/// a held right press frees. Each side latches on press-start and only
-/// resolves when its global mouse button goes up, so it survives the
-/// transient `is_pointer_button_down_on()` flicker documented on the
-/// PTT handler.
+/// release recalls/saves; a held left press (≥ [`MEM_HOLD`]) (re)assigns
+/// the slot to the current frequency; a right click frees a saved slot
+/// (released over it — dragging off aborts).
+/// Each side latches on press-start and only resolves when its mouse
+/// button goes up, so it survives the transient
+/// `is_pointer_button_down_on()` flicker documented on the PTT handler.
 #[derive(Default, Clone, Copy)]
 struct MemPress {
     /// When the left button went down on this widget, if it's down.
@@ -227,16 +228,16 @@ struct MemPress {
     /// Whether the long-press overwrite already fired this gesture, so
     /// the subsequent release doesn't *also* fire the short-click recall.
     primary_fired: bool,
-    /// When the right button went down on this widget, if it's down.
-    secondary_since: Option<Instant>,
-    /// Whether the long-press free already fired this gesture.
-    secondary_fired: bool,
+    /// Whether the right button is latched on this widget. Unlike the
+    /// left side this carries no timestamp — the right gesture has no
+    /// hold, it just clears a *saved* slot on a clean release over it.
+    secondary_latched: bool,
 }
 
-/// How long either mouse button must be held on a memory button before
-/// the hold gesture (overwrite on left, free on right) fires. Short
-/// enough to feel responsive, long enough that an ordinary click never
-/// trips it.
+/// How long the left button must be held on a memory button before the
+/// (re)assign gesture fires (a short left click recalls/saves instead).
+/// Short enough to feel responsive, long enough that an ordinary click
+/// never trips it. The right button frees on click, so it has no hold.
 const MEM_HOLD: Duration = Duration::from_millis(450);
 
 /// Which binding an in-progress key-capture session will write to.
@@ -2018,12 +2019,13 @@ impl TokiApp {
     ///
     /// Gestures (all latched in `self.mem_press[i]` so an egui hit-test
     /// flicker mid-hold doesn't reset them):
-    ///   * **Left click** — empty slot saves the current frequency;
+    ///   * **Left click** — an empty slot saves the current frequency;
     ///     a filled slot recalls it (switches the tuner). Recall is
     ///     gated on `can_switch`, exactly like the chevrons.
-    ///   * **Left hold** (≥ `MEM_HOLD`) — overwrite the slot with the
+    ///   * **Left hold** (≥ `MEM_HOLD`) — (re)assign the slot to the
     ///     current frequency, even if it was already set.
-    ///   * **Right hold** (≥ `MEM_HOLD`) — free the slot.
+    ///   * **Right click** — clear a saved slot; releasing off the slot
+    ///     aborts. A right-click on an empty slot does nothing.
     ///
     /// A filled slot pulses in the amber memory color so it's instantly
     /// distinguishable from an empty (dim, static) one.
@@ -2078,27 +2080,31 @@ impl TokiApp {
                     mp.primary_since = None;
                     mp.primary_fired = false;
                 }
-            } else if started_here && primary_down && !secondary_down {
+            } else if started_here && primary_down && !mp.secondary_latched {
                 mp.primary_since = Some(now);
                 mp.primary_fired = false;
             }
 
-            // ── Right (secondary): hold = free. Plain right-click does
-            // nothing (freeing is destructive, so we require the hold).
-            if mp.secondary_since.is_some() {
-                if secondary_down {
-                    let held = now.duration_since(mp.secondary_since.unwrap());
-                    if !mp.secondary_fired && held >= MEM_HOLD {
-                        mp.secondary_fired = true;
+            // ── Right (secondary): a click clears a saved slot. We fire
+            // on release (not press) so the held-down frames can paint
+            // the "about to erase" preview, and a right-click on an empty
+            // slot resolves to nothing. The clear only lands if the
+            // pointer is still over the slot at release, so dragging off
+            // aborts — and a latch left stale by a focus/visibility loss
+            // mid-gesture can't fire a phantom clear on resume.
+            if mp.secondary_latched {
+                if !secondary_down {
+                    // Don't let a destructive clear clobber a save/recall
+                    // the left block already resolved this frame (a chord
+                    // where both buttons release together): the left
+                    // gesture wins, the stray right release is dropped.
+                    if matches!(act, Act::None) && saved.is_some() && resp.hovered() {
                         act = Act::Free;
                     }
-                } else {
-                    mp.secondary_since = None;
-                    mp.secondary_fired = false;
+                    mp.secondary_latched = false;
                 }
-            } else if started_here && secondary_down && !primary_down {
-                mp.secondary_since = Some(now);
-                mp.secondary_fired = false;
+            } else if started_here && secondary_down && mp.primary_since.is_none() {
+                mp.secondary_latched = true;
             }
         }
 
@@ -2128,17 +2134,22 @@ impl TokiApp {
         //   * empty       → dim, static
         let filled = saved.is_some();
         let on_this = filled && saved.as_deref() == Some(current_label.as_str());
-        let (primary_holding, secondary_holding) = {
-            let mp = &self.mem_press[i];
-            (mp.primary_since.is_some(), mp.secondary_since.is_some())
-        };
+        let primary_holding = self.mem_press[i].primary_since.is_some();
+        // `will_free` is the single source of truth shared with the
+        // resolve block above: a right-press latched over a saved slot
+        // with the pointer still on it would clear it on release. Driving
+        // the erase preview off the same predicate keeps the "about to
+        // erase" paint from ever disagreeing with what release does.
+        let will_free = self.mem_press[i].secondary_latched && filled && resp.hovered();
 
         let t = ui.input(|inp| inp.time) as f32;
         let pulse = 0.5 + 0.5 * (t * 3.6).sin();
         let radius = CornerRadius::same(T::RADIUS_CHEVRON as u8);
 
-        let (border, text_col) = if secondary_holding {
-            // Erasing: shift dark + grey while the right button is held.
+        let (border, text_col) = if will_free {
+            // Erasing: shift dark + grey while the right button is held
+            // over a saved slot (releasing clears it). An empty slot has
+            // nothing to erase, so it ignores the right press.
             painter.rect_filled(
                 rect,
                 radius,

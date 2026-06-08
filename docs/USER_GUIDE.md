@@ -271,8 +271,10 @@ Schema:
 | `[audio]` `input_gain` | f32 | `1.0` | Linear mic gain. UI range 0.0–2.0; clipped at i16 boundary. |
 | `[audio]` `output_gain` | f32 | `1.0` | Linear playback gain. Same range / clipping. |
 | `[audio]` `balance` | f32 | `0.0` | Stereo pan for received audio + beeps (−1.0 left … +1.0 right). |
-| `[hotkey]` `key` | string? | `"Backquote"` | PTT keyboard binding (`keyboard_types::Code` variant name, e.g. `F8`, `Space`). |
-| `[hotkey]` `mouse_button` | string? | unset | PTT mouse binding (`Left`, `Right`, `Middle`, `Mouse4`, …). Takes precedence over `key` if both are set. |
+| `[hotkey]` `binding` | string? | unset | Primary PTT binding, tagged form for any peripheral (e.g. `key:F8`, `mouse:Middle`, `gamepad:0:South`, `streamdeck:0x0fd9:0x0080:3`, `hid:0x046d:0xc52b:2:4`). Preferred over the legacy `key`/`mouse_button` below; written by all new saves. |
+| `[hotkey]` `secondary` | string? | unset | Optional fallback PTT binding (same tagged form). PTT fires while *either* the primary or this is held — e.g. a keyboard key backing up a gamepad button. |
+| `[hotkey]` `key` | string? | `"Backquote"` | Legacy PTT keyboard binding (`keyboard_types::Code` variant name). Read-only fallback used only when `binding` is absent. |
+| `[hotkey]` `mouse_button` | string? | unset | Legacy PTT mouse binding (`Left`, `Right`, `Middle`, `Mouse4`, …). Read-only fallback used only when `binding` is absent. |
 | `[beeps]` `preset` | string | `"default"` | Roger-beep preset id. Unknown ids resolve to `default` at load time. |
 | `[beeps]` `volume` | f32 | `0.05` | Beep volume (linear). |
 | `[updates]` `auto_check` | bool | `true` | Check GitHub Releases for a newer version on launch + periodically. Notify-only. |
@@ -333,15 +335,37 @@ The UI is a single landscape "strip" widget. The main controls:
   the channel's name scrolls as a marquee.
 - **Memory presets (M1–M4)** — left-click to save/recall a frequency, left-hold
   to overwrite, right-hold to clear.
-- **PTT button** — hold the configured key (default: `` ` ``) or click and hold
+- **PTT button** — hold the configured input (default: `` ` ``) or click and hold
   the on-screen button to transmit. A 30-second transmission cap is enforced
   client-side (`TX_LIMIT_MS = 30_000`) — release and re-press to keep talking.
 - **Roster / event log** — current members with talking indicators, plus a
   connection/event log.
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio +
   beeps toward one ear).
-- **Settings** — input/output devices, gains, PTT binding (keyboard or mouse),
-  roger-beep preset, global hotkeys, and the update-check toggle.
+- **Settings** — input/output devices, gains, PTT binding, roger-beep preset,
+  global hotkeys, and the update-check toggle.
+
+#### Binding any input device
+
+PTT, the memory recalls (M1–M4), and the tune up/down hotkeys can each be bound
+to **any connected peripheral**: a keyboard key, a mouse button, a game
+controller / joystick button, an Elgato Stream Deck key, or a button on an
+arbitrary USB HID device. In **Settings**, click **BIND** on a row and *hold the
+button you want for ~1 second* — the hold avoids capturing a stray click. The
+PTT row also has a **PTT (2ND)** row for an optional **fallback** binding: PTT
+fires while either the primary or the secondary is held (e.g. a Stream Deck key
+backed up by a keyboard key).
+
+Notes:
+- **Keyboard and mouse stay passthrough** — the focused app still receives the
+  keystroke. Gamepad / Stream Deck / HID buttons are capture-only (the OS
+  doesn't route those to focused apps anyway), and Toki never opens a device
+  exclusively, so a game keeps receiving your joystick input.
+- **macOS** may require **Input Monitoring** (System Settings → Privacy &
+  Security → Input Monitoring) for keyboard/mouse/HID capture. Without it those
+  silently see no input; controllers (GameController framework) are unaffected.
+- A bound device that's unplugged still shows its label in Settings and simply
+  does nothing until reconnected.
 
 ### Connecting to a remote server
 
@@ -511,17 +535,27 @@ volumes:
 The repo's [docker-compose.yml](../docker-compose.yml) ships a source-mounted
 dev variant of this stack (`cargo run` + Vite dev server).
 
-### 5. Customizing the PTT key from the CLI
+### 5. Customizing the PTT binding from the CLI
 
 ```toml
 [hotkey]
-key = "F8"
-mouse_button = ""   # clear any mouse binding
+binding   = "key:F8"          # primary trigger
+secondary = "gamepad:0:South" # optional fallback (PTT fires if either is held)
 ```
 
-Valid `key` values are `keyboard_types::Code` variant names (`Backquote`,
-`Space`, `F1`–`F24`, letter keys like `KeyA`, etc.). Restart the client to pick
-up the change.
+The `binding` / `secondary` values use the tagged form:
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| `key:<Code>` | `key:F8` | `keyboard_types::Code` variant name (`Backquote`, `Space`, `F1`–`F24`, `KeyA`, …) |
+| `mouse:<label>` | `mouse:Middle` | Mouse button (`Left`, `Right`, `Middle`, `Mouse4`, …) |
+| `gamepad:<index>:<button>` | `gamepad:0:South` | Controller button; `index` selects the pad when several are connected (`0` = first) |
+| `streamdeck:<vid>:<pid>:<key>` | `streamdeck:0x0fd9:0x0080:3` | Stream Deck key (0-based) |
+| `hid:<vid>:<pid>:<byte>:<bit>` | `hid:0x046d:0xc52b:2:4` | Generic HID report bit |
+
+It's easiest to set these from the in-app **Settings** BIND flow rather than by
+hand. Restart the client to pick up a hand-edited change. Legacy configs using
+`key`/`mouse_button` (without `binding`) still work unchanged.
 
 ## Troubleshooting
 
@@ -594,6 +628,28 @@ The Windows release build uses `windows_subsystem = "windows"`, which detaches
 from the console. `tracing` writes are silently dropped. Use a debug build
 (`cargo run -p toki-client`) for log output.
 
+### Cross-compiling a Windows `.exe` from macOS
+
+The shipped Windows binary is built by CI on a native `windows-latest` MSVC
+runner (`.github/workflows/ci.yml`). For **local testing** you can cross-compile
+a `windows-gnu` (mingw) `.exe` from macOS, but `audiopus_sys` (Opus) can't build
+its C library for Windows on a Mac host, so you must supply a prebuilt mingw
+libopus:
+
+```sh
+brew install mingw-w64 automake autoconf libtool pkg-config
+rustup target add x86_64-pc-windows-gnu
+
+scripts/build-opus-mingw.sh        # builds vendor/opus-mingw/.../libopus.a (once)
+scripts/build-windows-cross.sh --release
+# → target/x86_64-pc-windows-gnu/release/toki.exe
+```
+
+The wrapper sets `OPUS_LIB_DIR` / `OPUS_STATIC` / `OPUS_NO_PKG` only for the
+cross-build (they'd break a native macOS build) and clears the `audiopus_sys`
+build cache so cargo re-resolves the link path. This produces a GNU-ABI binary
+for testing — not the MSVC binary that's actually released.
+
 ## Architecture Overview
 
 The repo is a Cargo workspace (three crates) plus a standalone web UI:
@@ -636,7 +692,8 @@ Key client modules ([crates/client/src/](../crates/client/src/)):
   (incl. Opus encode/decode and PTT-release flush).
 - `audio.rs` — cpal input/output on a dedicated thread; PTT-gated capture;
   inbound feeds a latency-managed playback ring.
-- `hotkey.rs` — global keyboard/mouse hotkey.
+- `hotkey.rs` — global input binding across keyboard/mouse (device_query),
+  gamepads (gilrs), and Stream Deck / HID (hidapi); passive, non-exclusive.
 - `update.rs` — GitHub Releases update check (notify-only).
 - `config.rs` — persisted user preferences.
 - `state.rs` — connection + UI state shared between runtime and GUI.

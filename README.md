@@ -141,7 +141,7 @@ Grab the seeded `admin` password from the server's startup log. The panel offers
 
 - **Tuner** — step through the 41-channel band with the ◀ ▶ chevrons; the channel's admin-assigned name scrolls as a marquee in the screen's upper-left when the server has named channels enabled.
 - **Memory presets (M1–M4)** — left-click to save/recall a frequency, left-hold to overwrite, right-hold to free; colour-coded (green when you're parked on it, amber when stored).
-- **Global hotkeys** (Settings) — PTT (any key or mouse button, default backtick), recall M1–M4, and tune up/down.
+- **Global hotkeys** (Settings) — bind PTT, the M1–M4 recalls, and tune up/down to *any* peripheral: keyboard, mouse, game controller/joystick, Elgato Stream Deck, or generic USB HID. PTT (default backtick) also takes an optional secondary/fallback binding. Keyboard/mouse stay passthrough; other devices are capture-only.
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio + beeps toward one ear for a mono-earpiece feel).
 - **Roger beeps** — selectable take-/clear-floor tone presets, with a fixed two-tone cue for priority traffic.
 - **Update check** — on launch (and periodically), the client checks GitHub Releases for a newer version and shows an "Update available" pill that opens the download page. Notify-only — it never replaces itself. Toggle and current version live in Settings → Updates.

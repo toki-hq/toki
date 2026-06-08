@@ -406,7 +406,7 @@ jobs:
           Compress-Archive -Path target/release/toki.exe -DestinationPath $out
 
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: toki-client-windows
           path: toki-client-*-windows-x86_64.zip
@@ -418,7 +418,7 @@ jobs:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -456,7 +456,7 @@ jobs:
           zip "$GITHUB_WORKSPACE/toki-client-${{ steps.tag.outputs.version }}-linux-x86_64.zip" toki
 
       - name: upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: toki-client-linux
           path: toki-client-*-linux-x86_64.zip
@@ -478,10 +478,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: download all client artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts
           pattern: toki-client-*

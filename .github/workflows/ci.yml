@@ -67,7 +67,8 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
             libopus-dev
-          version: 1.1
+            libudev-dev
+          version: 1.2
 
       - name: cache cargo registry + target
         uses: Swatinem/rust-cache@v2
@@ -439,7 +440,8 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev
             libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
             libopus-dev
-          version: 1.1
+            libudev-dev
+          version: 1.2
 
       - name: derive version from tag
         id: tag

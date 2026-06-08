@@ -33,8 +33,9 @@ a home lab.
                    libxcursor-dev libxi-dev libxkbcommon-dev \
                    libxkbcommon-x11-dev libxcb1-dev \
                    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-                   libopus-dev
+                   libopus-dev libudev-dev
   ```
+  (`libudev-dev` is needed by the client's HID input backend.)
 - **Node.js 24** — only needed to build the standalone admin UI (`admin-ui/`).
   Not required to build or run the server/client.
 - **Headphones** — both client and host grab the system default microphone and

@@ -245,8 +245,11 @@ const MEM_HOLD: Duration = Duration::from_millis(450);
 /// input); the app decides where the captured value lands.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecordTarget {
-    /// The push-to-talk trigger.
+    /// The primary push-to-talk trigger.
     Ptt,
+    /// The secondary/fallback push-to-talk trigger. PTT fires while
+    /// either the primary or this is held.
+    PttSecondary,
     /// Memory-recall hotkey for preset slot `0..4`.
     Memory(usize),
     /// Tune one channel up.
@@ -303,6 +306,7 @@ impl TokiApp {
         let installed = hotkey::install(
             cmd_tx.clone(),
             initial,
+            config.hotkey.to_input_secondary(),
             config.hotkey.memory_inputs(),
             config.hotkey.freq_inputs(),
         );
@@ -1282,6 +1286,14 @@ impl eframe::App for TokiApp {
                             tracing::warn!(error = %e, "PTT rebind failed");
                         } else {
                             self.config.hotkey.set_ptt(input);
+                            self.config.save();
+                        }
+                    }
+                    RecordTarget::PttSecondary => {
+                        if let Err(e) = self.hotkey.rebind_secondary(Some(input)) {
+                            tracing::warn!(error = %e, "secondary PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_ptt_secondary(Some(input));
                             self.config.save();
                         }
                     }
@@ -3382,6 +3394,7 @@ impl TokiApp {
     fn bind_row(&mut self, ui: &mut egui::Ui, label: &str, target: RecordTarget) {
         let current = match target {
             RecordTarget::Ptt => self.config.hotkey.to_input(),
+            RecordTarget::PttSecondary => self.config.hotkey.to_input_secondary(),
             RecordTarget::Memory(i) => self.config.hotkey.memory(i).to_input(),
             RecordTarget::FreqUp => self.config.hotkey.freq_up.to_input(),
             RecordTarget::FreqDown => self.config.hotkey.freq_down.to_input(),
@@ -3391,7 +3404,7 @@ impl TokiApp {
         settings_row(ui, label, |ui| {
             if self.recording && self.recording_target == target {
                 let progress = self.hotkey.hold_progress();
-                ui.colored_label(T::TX, "hold a key for 1s…");
+                ui.colored_label(T::TX, "hold any button for 1s…");
                 ui.add(
                     egui::ProgressBar::new(progress)
                         .desired_width(80.0)
@@ -3415,14 +3428,18 @@ impl TokiApp {
                         self.recording_target = target;
                     }
                 }
-                // The action hotkeys are optional, so offer an explicit
-                // unbind. (PTT has no CLEAR — there's always meant to be
-                // a transmit trigger.)
+                // The action hotkeys and the secondary PTT are optional,
+                // so offer an explicit unbind. (The PRIMARY PTT has no
+                // CLEAR — there's always meant to be a transmit trigger.)
                 if !matches!(target, RecordTarget::Ptt)
                     && current.is_some()
                     && ui.button("CLEAR").clicked()
                 {
                     match target {
+                        RecordTarget::PttSecondary => {
+                            let _ = self.hotkey.rebind_secondary(None);
+                            self.config.hotkey.set_ptt_secondary(None);
+                        }
                         RecordTarget::Memory(i) => {
                             self.hotkey.rebind_memory(i, None);
                             self.config.hotkey.set_memory(i, HotkeyBinding::default());
@@ -3449,6 +3466,10 @@ impl TokiApp {
         section_header(ui, "CUSTOMIZATION");
 
         self.bind_row(ui, "PTT", RecordTarget::Ptt);
+        // Optional fallback trigger — bind a second device (e.g. a
+        // keyboard key backing up a gamepad button). PTT fires while
+        // either is held.
+        self.bind_row(ui, "PTT (2ND)", RecordTarget::PttSecondary);
 
         ui.add_space(14.0);
         section_header(ui, "MEMORY HOTKEYS");

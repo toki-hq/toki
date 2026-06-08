@@ -389,8 +389,87 @@ mod tests {
         hk.set_memory(1, HotkeyBinding::from_input(Input::Key(Code::F2)));
         // Rebinding PTT must not clobber the M2 hotkey.
         hk.set_ptt(Input::Key(Code::KeyT));
-        assert_eq!(hk.key.as_deref(), Some("KeyT"));
+        // set_ptt now writes the tagged `binding` form and clears legacy.
+        assert_eq!(hk.binding.as_deref(), Some("key:KeyT"));
+        assert_eq!(hk.key, None);
+        assert_eq!(hk.to_input(), Some(Input::Key(Code::KeyT)));
         assert_eq!(hk.memory_inputs()[1], Some(Input::Key(Code::F2)));
+    }
+
+    #[test]
+    fn tagged_binding_round_trips_for_a_gamepad() {
+        use crate::hotkey::{GamepadButton, GamepadCode, Input};
+        let mut hk = HotkeyConfig::default();
+        let input = Input::Gamepad(GamepadButton {
+            button: GamepadCode::South,
+            index: 0,
+        });
+        hk.set_ptt(input);
+        hk.set_memory(0, HotkeyBinding::from_input(input));
+
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.to_input(), Some(input));
+        assert_eq!(back.memory_inputs()[0], Some(input));
+    }
+
+    #[test]
+    fn legacy_key_only_config_still_parses() {
+        use crate::hotkey::Input;
+        // A config written before any-device binding: only `key`, no
+        // `binding`. PTT must still resolve.
+        let raw = "[hotkey]\nkey = \"F8\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.to_input(), Some(Input::Key(Code::F8)));
+    }
+
+    #[test]
+    fn legacy_mouse_only_config_still_parses() {
+        use crate::hotkey::{Input, MouseButton};
+        let raw = "[hotkey]\nmouse_button = \"Middle\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            cfg.hotkey.to_input(),
+            Some(Input::Mouse(MouseButton::Middle))
+        );
+    }
+
+    #[test]
+    fn tagged_binding_wins_over_legacy_fields() {
+        use crate::hotkey::Input;
+        // When both the new `binding` and a legacy `key` are present,
+        // the tagged form takes precedence.
+        let raw = "[hotkey]\nbinding = \"key:F8\"\nkey = \"Backquote\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.to_input(), Some(Input::Key(Code::F8)));
+    }
+
+    #[test]
+    fn legacy_memory_binding_still_parses() {
+        use crate::hotkey::Input;
+        // A memory slot written in the legacy shape (no `binding`).
+        let raw = "[hotkey.m1]\nkey = \"F1\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.memory_inputs()[0], Some(Input::Key(Code::F1)));
+    }
+
+    #[test]
+    fn secondary_ptt_round_trips_and_defaults_unbound() {
+        use crate::hotkey::Input;
+        let mut hk = HotkeyConfig::default();
+        // Unbound by default and absent from the serialized form.
+        assert_eq!(hk.to_input_secondary(), None);
+        assert!(!toml::to_string(&hk).unwrap().contains("secondary"));
+
+        hk.set_ptt_secondary(Some(Input::Key(Code::Backquote)));
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.to_input_secondary(), Some(Input::Key(Code::Backquote)));
+
+        // Clearing removes it again.
+        let mut back = back;
+        back.set_ptt_secondary(None);
+        assert_eq!(back.to_input_secondary(), None);
     }
 
     #[test]
@@ -510,14 +589,29 @@ impl Default for AudioConfig {
 /// chords. The `key` value is just a physical key code.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HotkeyConfig {
-    /// `keyboard_types::Code` variant name, e.g. `"Backquote"`, `"F8"`.
-    /// `None` when the bound input is a mouse button.
+    /// Tagged PTT binding for any peripheral (e.g. `"key:Backquote"`,
+    /// `"gamepad:0:South"`, `"streamdeck:0x0fd9:0x0080:3"`). Preferred
+    /// over the legacy `key` / `mouse_button` fields; written by all new
+    /// saves. Absent on configs written before any-device binding — the
+    /// resolver then falls back to `key`/`mouse_button` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    /// Legacy: `keyboard_types::Code` variant name, e.g. `"Backquote"`,
+    /// `"F8"`. Read-only fallback when `binding` is absent. Still
+    /// defaults to `Backquote` so a brand-new config keeps PTT on the
+    /// backquote key.
     #[serde(default = "default_key")]
     pub key: Option<String>,
-    /// Stable mouse button label (`"Left"`, `"Right"`, `"Middle"`,
-    /// `"Mouse4"`, …). `None` when the bound input is a keyboard key.
+    /// Legacy: stable mouse button label (`"Left"`, `"Middle"`,
+    /// `"Mouse4"`, …). Read-only fallback when `binding` is absent.
     #[serde(default)]
     pub mouse_button: Option<String>,
+    /// Optional secondary/fallback PTT binding (tagged form, any
+    /// peripheral). PTT engages while either the primary `binding` or
+    /// this is held — e.g. a keyboard key backing up a gamepad button.
+    /// Unbound (omitted) by default; no legacy equivalent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<String>,
     /// Optional global hotkeys that recall memory presets M1–M4. Each
     /// is an independent [`HotkeyBinding`]; an unbound slot is an empty
     /// (omitted) table. Pressing the bound key/button switches the
@@ -540,11 +634,18 @@ pub struct HotkeyConfig {
     pub freq_down: HotkeyBinding,
 }
 
-/// One key/mouse binding, in the same on-disk shape as the PTT binding
-/// (`key` xor `mouse_button`). Used for the four memory-recall hotkeys.
-/// Both fields `None` = unbound.
+/// One binding for any peripheral, used for the four memory-recall and
+/// the freq up/down hotkeys. All fields `None` = unbound.
+///
+/// `binding` is the current tagged form (e.g. `"gamepad:0:South"`,
+/// `"key:F8"`) and is what new saves write. The legacy `key` /
+/// `mouse_button` fields are kept **read-only** for back-compat with
+/// configs written before any-device binding existed: when `binding`
+/// is absent we fall through to them.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct HotkeyBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,29 +653,45 @@ pub struct HotkeyBinding {
 }
 
 impl HotkeyBinding {
-    /// Parse into an [`Input`], mouse-then-key like [`HotkeyConfig`].
+    /// Parse into an [`Input`], preferring the tagged `binding` form and
+    /// falling back to the legacy `mouse_button` then `key` fields.
     /// `None` when unbound or unparseable.
     pub fn to_input(&self) -> Option<crate::hotkey::Input> {
-        if let Some(label) = self.mouse_button.as_deref() {
-            return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
-        }
-        let code = Code::from_str(self.key.as_deref()?).ok()?;
-        Some(crate::hotkey::Input::Key(code))
+        resolve_binding(
+            self.binding.as_deref(),
+            self.mouse_button.as_deref(),
+            self.key.as_deref(),
+        )
     }
 
-    /// Build from a captured [`Input`].
+    /// Build from a captured [`Input`]. Writes the tagged `binding`
+    /// form and leaves the legacy fields empty.
     pub fn from_input(input: crate::hotkey::Input) -> Self {
-        match input {
-            crate::hotkey::Input::Key(code) => Self {
-                key: Some(code.to_string()),
-                mouse_button: None,
-            },
-            crate::hotkey::Input::Mouse(b) => Self {
-                key: None,
-                mouse_button: Some(b.label()),
-            },
+        Self {
+            binding: Some(input.to_token()),
+            key: None,
+            mouse_button: None,
         }
     }
+}
+
+/// Shared resolution used by both [`HotkeyBinding`] and the PTT slot on
+/// [`HotkeyConfig`]: tagged `binding` wins, then legacy `mouse_button`,
+/// then legacy `key`. Centralized so the precedence can't drift between
+/// the two call sites.
+fn resolve_binding(
+    binding: Option<&str>,
+    mouse_button: Option<&str>,
+    key: Option<&str>,
+) -> Option<crate::hotkey::Input> {
+    if let Some(token) = binding {
+        return crate::hotkey::Input::from_token(token);
+    }
+    if let Some(label) = mouse_button {
+        return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
+    }
+    let code = Code::from_str(key?).ok()?;
+    Some(crate::hotkey::Input::Key(code))
 }
 
 fn default_key() -> Option<String> {
@@ -584,8 +701,10 @@ fn default_key() -> Option<String> {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
+            binding: None,
             key: Some("Backquote".into()),
             mouse_button: None,
+            secondary: None,
             m1: HotkeyBinding::default(),
             m2: HotkeyBinding::default(),
             m3: HotkeyBinding::default(),
@@ -597,31 +716,34 @@ impl Default for HotkeyConfig {
 }
 
 impl HotkeyConfig {
-    /// Parsed form suitable for handing to [`crate::hotkey::install`].
-    /// Returns `None` if neither field is set, or the set field is
-    /// unparseable. Mouse takes precedence if both are somehow set.
+    /// Parsed PTT form suitable for handing to [`crate::hotkey::install`].
+    /// Prefers the tagged `binding`, falling back to the legacy
+    /// `mouse_button` then `key`. `None` if nothing parses.
     pub fn to_input(&self) -> Option<crate::hotkey::Input> {
-        if let Some(label) = self.mouse_button.as_deref() {
-            return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
-        }
-        let key = self.key.as_deref()?;
-        let code = Code::from_str(key).ok()?;
-        Some(crate::hotkey::Input::Key(code))
+        resolve_binding(
+            self.binding.as_deref(),
+            self.mouse_button.as_deref(),
+            self.key.as_deref(),
+        )
     }
 
     /// Update the PTT binding in place, leaving the memory bindings
-    /// untouched.
+    /// untouched. Writes the tagged `binding` form and clears the legacy
+    /// fields so the two can't disagree.
     pub fn set_ptt(&mut self, input: crate::hotkey::Input) {
-        match input {
-            crate::hotkey::Input::Key(code) => {
-                self.key = Some(code.to_string());
-                self.mouse_button = None;
-            }
-            crate::hotkey::Input::Mouse(b) => {
-                self.key = None;
-                self.mouse_button = Some(b.label());
-            }
-        }
+        self.binding = Some(input.to_token());
+        self.key = None;
+        self.mouse_button = None;
+    }
+
+    /// Parsed secondary/fallback PTT binding, or `None` when unbound.
+    pub fn to_input_secondary(&self) -> Option<crate::hotkey::Input> {
+        crate::hotkey::Input::from_token(self.secondary.as_deref()?)
+    }
+
+    /// Set (or clear, with `None`) the secondary/fallback PTT binding.
+    pub fn set_ptt_secondary(&mut self, input: Option<crate::hotkey::Input>) {
+        self.secondary = input.map(|i| i.to_token());
     }
 
     /// Borrow the memory-recall binding for slot `i` (0..4).

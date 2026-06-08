@@ -4945,7 +4945,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "toki-client"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "audiopus",
@@ -4985,7 +4985,7 @@ dependencies = [
 
 [[package]]
 name = "toki-proto"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "prost",
  "tonic",
@@ -4994,7 +4994,7 @@ dependencies = [
 
 [[package]]
 name = "toki-server"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "argon2",

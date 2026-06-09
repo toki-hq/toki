@@ -9,6 +9,7 @@ import {
   Tag,
   Eraser,
   Check,
+  Fingerprint,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -261,6 +262,7 @@ function ChannelDetail({
                     <Zap className="size-2.5" /> PRIO
                   </Badge>
                 )}
+                <IdentityBadge member={m} />
               </span>
               <span
                 className={cn(
@@ -373,6 +375,48 @@ function NameEditor({
         </p>
       )}
     </div>
+  );
+}
+
+/// Keypair-identity badge for a member row. Shows the durable identity
+/// string (e.g. COTON-7Q4XF9KB) next to the freely-chosen display name;
+/// hovering reveals the full public key, the machine-hash prefix, and
+/// when this identity was first seen by the server. Members that
+/// registered without an identity (pre-identity clients) render nothing.
+function IdentityBadge({ member }: { member: Member }) {
+  if (!member.identity) return null;
+  const firstSeen =
+    member.identityFirstSeenUnix > 0n
+      ? new Date(Number(member.identityFirstSeenUnix) * 1000).toLocaleString()
+      : "—";
+  return (
+    <span className="group relative inline-flex">
+      <Badge variant="primary" className="cursor-default">
+        <Fingerprint className="size-2.5" />
+        {member.identity}
+      </Badge>
+      <div className="absolute left-0 top-full z-50 mt-1 hidden w-80 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-xl group-hover:block">
+        <p className="mb-2 font-mono text-xs font-semibold">{member.identity}</p>
+        <dl className="space-y-1.5 text-[10px]">
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">Public key</dt>
+            <dd className="break-all font-mono text-foreground/80">{member.identityPubkey}</dd>
+          </div>
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">Machine</dt>
+            <dd className="font-mono text-foreground/80">
+              {member.identityMachineHash
+                ? `${member.identityMachineHash.slice(0, 16)}…`
+                : "not reported"}
+            </dd>
+          </div>
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">First seen</dt>
+            <dd className="font-mono text-foreground/80">{firstSeen}</dd>
+          </div>
+        </dl>
+      </div>
+    </span>
   );
 }
 

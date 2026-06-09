@@ -169,10 +169,43 @@ impl AdminDb {
 
     /// Apply the schema. Idempotent (`CREATE TABLE IF NOT EXISTS`). Each
     /// backend gets its own DDL block (autoincrement / text-PK / index
-    /// syntax differ). The legacy `ALTER TABLE ADD COLUMN` upgrade path
-    /// runs **only** for SQLite (pre-existing files); fresh-start
-    /// MySQL/Postgres schemas already include every current column.
+    /// syntax differ).
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is a **no-op against a table that
+    /// already exists**, so a column added to the DDL in a later release
+    /// never lands on a database created by an older build. Every backend
+    /// therefore runs an additive `ALTER TABLE ADD COLUMN` upgrade pass
+    /// for the columns that postdate the original `server_config` shape
+    /// (`grpc_password`, `named_channels_enabled`, `audio_quality`).
+    /// Each add is guarded so it's a no-op when the column is already
+    /// present — making the whole `migrate()` idempotent across fresh
+    /// installs *and* in-place upgrades on all three backends.
     pub async fn migrate(&self) -> Result<()> {
+        // Columns added after the original `server_config` baseline
+        // (`id, server_name, max_peers, idle_kick_secs, updated_at`),
+        // each with its SQL type spec per dialect. Adding a new mutable
+        // setting means appending one row here (plus the DDL + struct).
+        // `(column, sqlite_spec, pg_spec, mysql_spec)`.
+        const SERVER_CONFIG_ADDED_COLUMNS: &[(&str, &str, &str, &str)] = &[
+            (
+                "grpc_password",
+                "TEXT NOT NULL DEFAULT ''",
+                "TEXT NOT NULL DEFAULT ''",
+                "VARCHAR(255) NOT NULL DEFAULT ''",
+            ),
+            (
+                "named_channels_enabled",
+                "INTEGER NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+            ),
+            (
+                "audio_quality",
+                "INTEGER NOT NULL DEFAULT 2",
+                "BIGINT NOT NULL DEFAULT 2",
+                "BIGINT NOT NULL DEFAULT 2",
+            ),
+        ];
         match &self.pool {
             Pool::Sqlite(p) => {
                 for stmt in split_ddl(SQLITE_DDL) {
@@ -181,29 +214,11 @@ impl AdminDb {
                         .await
                         .with_context(|| format!("sqlite ddl: {stmt}"))?;
                 }
-                // Upgrade pre-existing SQLite files that predate later
-                // columns (CREATE TABLE IF NOT EXISTS won't add them).
-                ensure_column_sqlite(
-                    p,
-                    "server_config",
-                    "grpc_password",
-                    "TEXT NOT NULL DEFAULT ''",
-                )
-                .await?;
-                ensure_column_sqlite(
-                    p,
-                    "server_config",
-                    "named_channels_enabled",
-                    "INTEGER NOT NULL DEFAULT 0",
-                )
-                .await?;
-                ensure_column_sqlite(
-                    p,
-                    "server_config",
-                    "audio_quality",
-                    "INTEGER NOT NULL DEFAULT 2",
-                )
-                .await?;
+                // Upgrade pre-existing files that predate later columns
+                // (CREATE TABLE IF NOT EXISTS won't add them).
+                for (column, spec, _, _) in SERVER_CONFIG_ADDED_COLUMNS {
+                    ensure_column_sqlite(p, "server_config", column, spec).await?;
+                }
             }
             Pool::MySql(p) => {
                 for stmt in split_ddl(MYSQL_DDL) {
@@ -212,6 +227,10 @@ impl AdminDb {
                         .await
                         .with_context(|| format!("mysql ddl: {stmt}"))?;
                 }
+                // Upgrade pre-existing schemas that predate later columns.
+                for (column, _, _, spec) in SERVER_CONFIG_ADDED_COLUMNS {
+                    ensure_column_mysql(p, "server_config", column, spec).await?;
+                }
             }
             Pool::Postgres(p) => {
                 for stmt in split_ddl(POSTGRES_DDL) {
@@ -219,6 +238,10 @@ impl AdminDb {
                         .execute(p)
                         .await
                         .with_context(|| format!("postgres ddl: {stmt}"))?;
+                }
+                // Upgrade pre-existing schemas that predate later columns.
+                for (column, _, spec, _) in SERVER_CONFIG_ADDED_COLUMNS {
+                    ensure_column_pg(p, "server_config", column, spec).await?;
                 }
             }
         }
@@ -818,6 +841,50 @@ async fn ensure_column_sqlite(
             .execute(pool)
             .await
             .with_context(|| format!("alter {table} add {column}"))?;
+    }
+    Ok(())
+}
+
+/// Idempotently add a column to a Postgres table. Postgres has supported
+/// `ADD COLUMN IF NOT EXISTS` since 9.6, so a single statement is both the
+/// add and the guard. `table`/`column`/`spec` are hardcoded (never user
+/// input), so the format-string interpolation is safe.
+async fn ensure_column_pg(pool: &PgPool, table: &str, column: &str, spec: &str) -> Result<()> {
+    sqlx::query(&format!(
+        "ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {spec}"
+    ))
+    .execute(pool)
+    .await
+    .with_context(|| format!("alter {table} add {column} (pg)"))?;
+    Ok(())
+}
+
+/// Idempotently add a column to a MySQL/MariaDB table. MySQL (< 8.0.29)
+/// has no `ADD COLUMN IF NOT EXISTS`, so we check `information_schema`
+/// first and only `ALTER` when the column is absent — portable across
+/// MariaDB and every MySQL 8 point release. `table`/`column`/`spec` are
+/// hardcoded; only `table`/`column` reach the prepared lookup as binds.
+async fn ensure_column_mysql(
+    pool: &MySqlPool,
+    table: &str,
+    column: &str,
+    spec: &str,
+) -> Result<()> {
+    let exists: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("information_schema check {table}.{column}"))?
+    .try_get::<i64, _>(0)?;
+    if exists == 0 {
+        sqlx::query(&format!("ALTER TABLE {table} ADD COLUMN {column} {spec}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} add {column} (mysql)"))?;
     }
     Ok(())
 }

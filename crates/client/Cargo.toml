@@ -118,6 +118,14 @@ serde_json = "1"
 # Pure-Rust semver comparison for the version check (handles pre-release
 # / build metadata correctly, unlike a naive string/tuple compare).
 semver = "1"
+# Keypair-backed client identity: the identity IS an ed25519 public key
+# (see `toki_proto::identity` for the shared derivation contract). Pure
+# Rust, no C deps; the server verifies with the same crate.
+ed25519-dalek = "2"
+# OS-entropy seed for identity keygen. Already in the tree transitively
+# (rustls/ring pull it); a direct dep just for the 32 seed bytes —
+# lighter than adding `rand` for one call.
+getrandom = "0.2"
 
 # hidapi's Linux build requires exactly one backend feature; because we
 # turned default-features off (to get `macos-shared-device`), we re-add

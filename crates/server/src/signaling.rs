@@ -52,15 +52,32 @@ pub struct SignalingSvc {
     /// Audit-log sink. Records peer connects (on `Register`), explicit
     /// disconnects (on `Leave`), and failed password attempts.
     audit: AuditSink,
+    /// Identity records seen by this server, hydrated from the
+    /// `identities` table at boot by the admin task. `Register` is
+    /// the writer: it merges the verified identity against the prior
+    /// record (the stored first callsign pins the display id) and
+    /// pushes the result onto `identity_tx` for persistence.
+    identities: crate::state::SharedIdentities,
+    /// Persistence side of the identity pipeline — drained by the
+    /// admin task into the `identities` table, mirroring the audit
+    /// channel split (signaling produces, the db owner writes).
+    identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
+    /// Per-boot key for the stateless register-challenge nonces.
+    /// Restarting the server invalidates outstanding challenges —
+    /// harmless, the client just registers with a fresh one.
+    challenge_key: crate::identity::ChallengeKey,
 }
 
 impl SignalingSvc {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: SharedRegistry,
         audio_endpoint: String,
         toml_password: Option<String>,
         server_config: SharedServerConfig,
         channel_names: SharedChannelNames,
+        identities: crate::state::SharedIdentities,
+        identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
         audit: AuditSink,
     ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
@@ -71,7 +88,61 @@ impl SignalingSvc {
             server_config,
             channel_names,
             audit,
+            identities,
+            identity_tx,
+            challenge_key: crate::identity::ChallengeKey::generate(),
         })
+    }
+
+    /// Verify and record a register request's identity fields.
+    ///
+    /// `Ok(None)` for an identity-less register; `Ok(Some(_))` once
+    /// possession of the key is proven — with the side effects that
+    /// make it durable: the merged record lands in the shared
+    /// identity map and is queued for the admin task to persist.
+    /// The merge pins `first_callsign` / `first_seen` / a non-empty
+    /// `origin_client_id` to their stored values, so a returning
+    /// identity can't rewrite its history by claiming differently.
+    async fn process_identity(
+        &self,
+        req: &RegisterRequest,
+        display_name: &str,
+        peer_ip: Option<std::net::IpAddr>,
+    ) -> Result<Option<crate::state::ClientIdentity>, Status> {
+        let now = crate::admin::db::now_unix();
+        let Some(verified) =
+            crate::identity::verify_register(&self.challenge_key, req, now as u64)?
+        else {
+            return Ok(None);
+        };
+
+        let mut map = self.identities.write().await;
+        let prior = map.get(&verified.pubkey_hex).cloned();
+        let session = crate::identity::merged_identity(&verified, prior.as_ref(), now);
+        let record = crate::state::IdentityRecord {
+            display_id: session.display_id.clone(),
+            first_callsign: prior
+                .as_ref()
+                .map(|r| r.first_callsign.clone())
+                .unwrap_or_else(|| verified.first_callsign.clone()),
+            last_callsign: display_name.to_string(),
+            machine_hash: verified.machine_hash.clone(),
+            origin_client_id: match prior.as_ref().map(|r| r.origin_client_id.as_str()) {
+                Some(stored) if !stored.is_empty() => stored.to_string(),
+                _ => verified.origin_client_id.clone(),
+            },
+            first_seen: session.first_seen,
+            last_seen: now,
+            last_ip: peer_ip.map(|i| i.to_string()).unwrap_or_default(),
+        };
+        map.insert(verified.pubkey_hex.clone(), record.clone());
+        drop(map);
+
+        // Fire-and-forget persistence — a closed channel (admin task
+        // torn down) costs durability for this update, never the
+        // session itself.
+        let _ = self.identity_tx.send((verified.pubkey_hex, record));
+        Ok(Some(session))
     }
 
     /// Build a `ChannelNameChanged` event for `frequency` if the
@@ -244,6 +315,12 @@ impl Signaling for SignalingSvc {
             self.throttle.record_auth_success(ip).await;
         }
 
+        // Optional keypair identity: verify (a present-but-invalid one
+        // rejects the register — never a silent downgrade to anonymous)
+        // and merge into the identity store. After the password gate so
+        // unauthenticated callers can't probe identity verification.
+        let identity = self.process_identity(&req, &display_name, peer_ip).await?;
+
         // Capacity gate: refuse new registrations once the registry
         // has reached the operator-configured ceiling. Checked after
         // the password + throttle gates so a flooder can't burn this
@@ -312,6 +389,7 @@ impl Signaling for SignalingSvc {
             // audio-hijack path. Unix-socket transports have no IP;
             // we accept any UDP source for those.
             expected_ip: peer_ip,
+            identity: identity.clone(),
         };
 
         let mut registry = self.registry.lock().await;
@@ -323,18 +401,22 @@ impl Signaling for SignalingSvc {
         info!(
             client_id = %id,
             name = %display_name,
+            identity = identity.as_ref().map(|i| i.display_id.as_str()).unwrap_or("-"),
             total_clients = total,
             "client registered",
         );
+        let from_ip = peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into());
         audit::record(
             &self.audit,
             "connect",
             &display_name,
             "",
-            &format!(
-                "from {}",
-                peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
-            ),
+            // Identity in the detail ties the audit trail to the
+            // durable "who" rather than the freely-chosen callsign.
+            &match &identity {
+                Some(i) => format!("from {from_ip} as {}", i.display_id),
+                None => format!("from {from_ip}"),
+            },
         );
 
         // Advertise the operator's chosen voice codec/quality so the
@@ -353,19 +435,18 @@ impl Signaling for SignalingSvc {
         }))
     }
 
-    /// Client-identity challenge — **not implemented yet**. The proto
-    /// contract landed ahead of the server-side identity work; until
-    /// the stateless HMAC nonce issuance ships, probing clients get a
-    /// clean UNIMPLEMENTED (which they treat as "this server has no
-    /// identity support" and register identity-less) rather than a
-    /// junk nonce that would fail verification later.
+    /// Issue a register-challenge nonce for the optional identity
+    /// handshake. Stateless: the nonce carries its own timestamp +
+    /// keyed tag (see `crate::identity`), so there's nothing to
+    /// store, rate-limit, or clean up — an unauthenticated caller
+    /// hammering this RPC gets back self-expiring blobs.
     async fn identity_challenge(
         &self,
         _request: Request<IdentityChallengeRequest>,
     ) -> Result<Response<IdentityChallengeResponse>, Status> {
-        Err(Status::unimplemented(
-            "client identity is not yet supported on this server",
-        ))
+        Ok(Response::new(IdentityChallengeResponse {
+            nonce: crate::identity::issue(&self.challenge_key, crate::admin::db::now_unix() as u64),
+        }))
     }
 
     async fn join(

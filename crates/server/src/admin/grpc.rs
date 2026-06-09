@@ -1089,6 +1089,7 @@ mod tests {
     fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         Client {
             id: id.to_string(),
+            identity: None,
             display_name: name.to_string(),
             audio_token_hash: [0u8; TOKEN_HASH_LEN],
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],

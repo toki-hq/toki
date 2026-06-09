@@ -39,6 +39,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{MySqlPool, PgPool, Row, SqlitePool};
 
 use crate::server_config::ServerConfig;
+use crate::state::IdentityRecord;
 
 /// Which SQL dialect the open connection speaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -341,6 +342,61 @@ impl AdminDb {
         })
     }
 
+    // ── Client identities ─────────────────────────────────────────────
+
+    /// Load every known identity into a `pubkey-hex → record` map —
+    /// the boot-time hydration of `SharedIdentities`.
+    pub async fn load_identities(&self) -> Result<HashMap<String, IdentityRecord>> {
+        let sql = "SELECT pubkey, display_id, first_callsign, last_callsign, machine_hash, \
+                   origin_client_id, first_seen, last_seen, last_ip FROM identities";
+        on_pool!(self, p, {
+            let rows = sqlx::query(sql).fetch_all(p).await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(
+                    r.try_get::<String, _>(0)?,
+                    IdentityRecord {
+                        display_id: r.try_get::<String, _>(1)?,
+                        first_callsign: r.try_get::<String, _>(2)?,
+                        last_callsign: r.try_get::<String, _>(3)?,
+                        machine_hash: r.try_get::<String, _>(4)?,
+                        origin_client_id: r.try_get::<String, _>(5)?,
+                        first_seen: r.try_get::<i64, _>(6)?,
+                        last_seen: r.try_get::<i64, _>(7)?,
+                        last_ip: r.try_get::<String, _>(8)?,
+                    },
+                );
+            }
+            Ok(map)
+        })
+    }
+
+    /// Upsert one identity record. On conflict the *immutable* facts
+    /// keep their stored values — `display_id`, `first_callsign`,
+    /// `first_seen` never change once written, and `origin_client_id`
+    /// is first-non-empty-wins — so a record fed through a boot race
+    /// (register before the hydration finished) can't rewrite an
+    /// identity's history. The mutable last-* columns track the most
+    /// recent register.
+    pub async fn upsert_identity(&self, pubkey: &str, rec: &IdentityRecord) -> Result<()> {
+        let sql = self.identity_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(pubkey)
+                .bind(rec.display_id.as_str())
+                .bind(rec.first_callsign.as_str())
+                .bind(rec.last_callsign.as_str())
+                .bind(rec.machine_hash.as_str())
+                .bind(rec.origin_client_id.as_str())
+                .bind(rec.first_seen)
+                .bind(rec.last_seen)
+                .bind(rec.last_ip.as_str())
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
     // ── Metrics time-series ───────────────────────────────────────────
 
     /// Append one metrics sample (1-minute cadence). Upserts on the `ts`
@@ -635,6 +691,48 @@ impl AdminDb {
                 "INSERT INTO channel_names (frequency, name, updated_at) VALUES ($1, $2, $3) \
                  ON CONFLICT(frequency) DO UPDATE SET name = excluded.name, \
                  updated_at = excluded.updated_at"
+            }
+        }
+    }
+
+    /// Identity upsert. The non-updated columns on conflict are the
+    /// deliberate immutability story — see [`AdminDb::upsert_identity`].
+    fn identity_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 origin_client_id = CASE WHEN identities.origin_client_id = '' \
+                   THEN excluded.origin_client_id ELSE identities.origin_client_id END, \
+                 last_seen = excluded.last_seen, \
+                 last_ip = excluded.last_ip"
+            }
+            Backend::MySql => {
+                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE \
+                 last_callsign = VALUES(last_callsign), \
+                 machine_hash = VALUES(machine_hash), \
+                 origin_client_id = IF(origin_client_id = '', VALUES(origin_client_id), origin_client_id), \
+                 last_seen = VALUES(last_seen), \
+                 last_ip = VALUES(last_ip)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 origin_client_id = CASE WHEN identities.origin_client_id = '' \
+                   THEN excluded.origin_client_id ELSE identities.origin_client_id END, \
+                 last_seen = excluded.last_seen, \
+                 last_ip = excluded.last_ip"
             }
         }
     }
@@ -946,6 +1044,17 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           TEXT PRIMARY KEY NOT NULL,
+    display_id       TEXT NOT NULL,
+    first_callsign   TEXT NOT NULL,
+    last_callsign    TEXT NOT NULL DEFAULT '',
+    machine_hash     TEXT NOT NULL DEFAULT '',
+    origin_client_id TEXT NOT NULL DEFAULT '',
+    first_seen       INTEGER NOT NULL,
+    last_seen        INTEGER NOT NULL,
+    last_ip          TEXT NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           INTEGER PRIMARY KEY NOT NULL,
     rx_bps       INTEGER NOT NULL,
@@ -993,6 +1102,17 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       VARCHAR(255) NOT NULL,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           VARCHAR(64) PRIMARY KEY NOT NULL,
+    display_id       VARCHAR(32) NOT NULL,
+    first_callsign   VARCHAR(16) NOT NULL,
+    last_callsign    VARCHAR(16) NOT NULL DEFAULT '',
+    machine_hash     VARCHAR(64) NOT NULL DEFAULT '',
+    origin_client_id VARCHAR(64) NOT NULL DEFAULT '',
+    first_seen       BIGINT NOT NULL,
+    last_seen        BIGINT NOT NULL,
+    last_ip          VARCHAR(64) NOT NULL DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
     rx_bps       BIGINT NOT NULL,
@@ -1037,6 +1157,17 @@ CREATE TABLE IF NOT EXISTS channel_names (
     frequency  TEXT PRIMARY KEY NOT NULL,
     name       TEXT NOT NULL,
     updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           TEXT PRIMARY KEY NOT NULL,
+    display_id       TEXT NOT NULL,
+    first_callsign   TEXT NOT NULL,
+    last_callsign    TEXT NOT NULL DEFAULT '',
+    machine_hash     TEXT NOT NULL DEFAULT '',
+    origin_client_id TEXT NOT NULL DEFAULT '',
+    first_seen       BIGINT NOT NULL,
+    last_seen        BIGINT NOT NULL,
+    last_ip          TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
@@ -1275,6 +1406,71 @@ mod tests {
 
         db.clear_all_channel_names().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    fn identity_record(first_seen: i64) -> IdentityRecord {
+        IdentityRecord {
+            display_id: "COTON-FLNIHQMB".into(),
+            first_callsign: "COTON".into(),
+            last_callsign: "coton".into(),
+            machine_hash: "ab".repeat(32),
+            origin_client_id: String::new(),
+            first_seen,
+            last_seen: first_seen,
+            last_ip: "10.0.0.1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn identities_upsert_and_load_round_trip() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_identities().await.unwrap().is_empty());
+
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .unwrap();
+        let map = db.load_identities().await.unwrap();
+        assert_eq!(map.len(), 1);
+        let rec = &map["aa11"];
+        assert_eq!(rec.display_id, "COTON-FLNIHQMB");
+        assert_eq!(rec.first_seen, 100);
+        assert_eq!(rec.machine_hash, "ab".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn identities_conflict_keeps_immutable_facts() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .unwrap();
+
+        // A later register (even one fed through a boot race claiming a
+        // different history) must not rewrite first_seen/first_callsign,
+        // and origin is first-non-empty-wins.
+        let mut later = identity_record(999); // wrong first_seen on purpose
+        later.first_callsign = "IMPOSTOR".into();
+        later.last_callsign = "renamed".into();
+        later.last_seen = 200;
+        later.last_ip = "10.0.0.2".into();
+        later.origin_client_id = "origin-1".into();
+        db.upsert_identity("aa11", &later).await.unwrap();
+
+        let rec = &db.load_identities().await.unwrap()["aa11"];
+        assert_eq!(rec.first_seen, 100, "first_seen immutable");
+        assert_eq!(rec.first_callsign, "COTON", "first_callsign immutable");
+        assert_eq!(rec.last_callsign, "renamed");
+        assert_eq!(rec.last_seen, 200);
+        assert_eq!(rec.last_ip, "10.0.0.2");
+        assert_eq!(rec.origin_client_id, "origin-1", "filled once");
+
+        // A third upsert with a different origin doesn't overwrite it.
+        let mut third = identity_record(100);
+        third.origin_client_id = "origin-2".into();
+        db.upsert_identity("aa11", &third).await.unwrap();
+        let rec = &db.load_identities().await.unwrap()["aa11"];
+        assert_eq!(rec.origin_client_id, "origin-1", "first non-empty wins");
     }
 
     #[tokio::test]

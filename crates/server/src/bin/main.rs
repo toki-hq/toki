@@ -96,6 +96,15 @@ async fn main() -> anyhow::Result<()> {
     // off by default, the signaling path never consults it anyway.
     let channel_names = state::shared_channel_names(std::collections::HashMap::new());
 
+    // Client identities seen by this server. Same bootstrap dance:
+    // starts empty, hydrated from the `identities` table by the admin
+    // task. Signaling's Register merges into the map and pushes each
+    // change onto the channel below; the admin task drains it into
+    // the db (mirroring the audit pipeline's producer/writer split).
+    let identities = state::shared_identities(std::collections::HashMap::new());
+    let (identity_tx, identity_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, state::IdentityRecord)>();
+
     // Runtime-mutable server settings. Starts at hardcoded defaults
     // (same values the code shipped before this lived in the db);
     // the admin task, if enabled, will overwrite from sqlite right
@@ -163,6 +172,8 @@ async fn main() -> anyhow::Result<()> {
         tls_material.clone(),
         server_config.clone(),
         channel_names.clone(),
+        identities.clone(),
+        identity_rx,
         byte_counters.clone(),
         audit_tx,
         audit_rx,
@@ -192,6 +203,8 @@ async fn main() -> anyhow::Result<()> {
                 password,
                 server_config.clone(),
                 channel_names,
+                identities,
+                identity_tx,
                 audit_tx_sig,
             )
             .max_decoding_message_size(8 * 1024),

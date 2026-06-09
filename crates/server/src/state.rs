@@ -79,6 +79,29 @@ pub struct Client {
     /// "token-capture → audio hijack" path. The *port* is allowed to
     /// vary because NAT will usually pick a different one for UDP.
     pub expected_ip: Option<IpAddr>,
+    /// Verified keypair identity, when the client presented one at
+    /// register (see `crate::identity::verify_register`). `None` for
+    /// pre-identity clients and identity-less registers. Denormalized
+    /// onto the session so snapshots + audit lines never have to
+    /// touch the shared identity map.
+    pub identity: Option<ClientIdentity>,
+}
+
+/// The session-facing slice of a verified identity — exactly what
+/// admin snapshots and audit lines need.
+#[derive(Clone, Debug)]
+pub struct ClientIdentity {
+    /// Human-readable identity string, e.g. `COTON-7Q4XF9KB`. Derived
+    /// from the *stored* first callsign for a returning identity, so
+    /// a client can't rename its identity string later.
+    pub display_id: String,
+    /// Full ed25519 public key, lowercase hex — the canonical key.
+    pub pubkey_hex: String,
+    /// Salted machine-fingerprint hash presented this session (empty
+    /// on platforms without a machine id).
+    pub machine_hash: String,
+    /// Unix seconds this identity was first seen by this server.
+    pub first_seen: i64,
 }
 
 /// One frequency channel. Each holds its own member list and PTT lock —
@@ -145,6 +168,48 @@ pub type SharedChannelNames = Arc<RwLock<HashMap<String, String>>>;
 /// Build a shared channel-name map from an initial snapshot (typically
 /// `AdminDb::load_channel_names` at boot, or empty for headless runs).
 pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNames {
+    Arc::new(RwLock::new(initial))
+}
+
+/// Everything this server remembers about one client identity,
+/// keyed by the pubkey hex in [`SharedIdentities`] and mirrored to
+/// the `identities` table by the admin task.
+#[derive(Clone, Debug)]
+pub struct IdentityRecord {
+    /// Human-readable identity string (`COTON-7Q4XF9KB`). Derived
+    /// once from `first_callsign` + pubkey and stored so audit rows
+    /// can be joined against it without re-deriving.
+    pub display_id: String,
+    /// Callsign captured the first time this identity registered
+    /// here — the display-id prefix, frozen forever.
+    pub first_callsign: String,
+    /// Display name used at the most recent register.
+    pub last_callsign: String,
+    /// Most recent machine-fingerprint hash (claimed; may be empty).
+    pub machine_hash: String,
+    /// Claimed provenance: the first session id any server ever
+    /// assigned this identity. Recorded once, first non-empty wins.
+    pub origin_client_id: String,
+    /// Unix seconds of first / most recent register on this server.
+    pub first_seen: i64,
+    pub last_seen: i64,
+    /// Source IP of the most recent register (empty when the
+    /// transport exposed none).
+    pub last_ip: String,
+}
+
+/// Identity records seen by this server (pubkey hex → record).
+/// Hydrated from the `identities` table at boot by the admin task;
+/// the signaling `Register` handler is the writer (merge + insert),
+/// pushing each change to the admin task for persistence over the
+/// identity channel — same split as the audit pipeline. Same
+/// rationale as [`SharedChannelNames`] for living off the registry
+/// `Mutex`: records outlive sessions and reads dominate.
+pub type SharedIdentities = Arc<RwLock<HashMap<String, IdentityRecord>>>;
+
+/// Build a shared identity map from an initial snapshot (typically
+/// `AdminDb::load_identities` at boot, or empty for tests).
+pub fn shared_identities(initial: HashMap<String, IdentityRecord>) -> SharedIdentities {
     Arc::new(RwLock::new(initial))
 }
 

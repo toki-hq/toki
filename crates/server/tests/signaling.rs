@@ -32,6 +32,8 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
         password.map(|s| s.to_string()),
         server_config::shared_default(),
         state::shared_channel_names(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
         toki_server::audit::channel().0,
     );
 
@@ -327,6 +329,8 @@ async fn boot_with_config(
         None,
         server_config,
         state::shared_channel_names(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -377,6 +381,8 @@ async fn boot_with_passwords(
         toml_password.map(|s| s.to_string()),
         server_config,
         state::shared_channel_names(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -529,4 +535,114 @@ async fn leave_unknown_client_is_noop() {
         })
         .await
         .expect("leave of unknown client should be a no-op");
+}
+
+// ── Client identity handshake ───────────────────────────────────────
+
+/// Sign `nonce` exactly like the real client does (domain-separated
+/// payload, ed25519) and build the register request around it.
+fn identity_register(
+    signing: &ed25519_dalek::SigningKey,
+    nonce: Vec<u8>,
+    first_callsign: &str,
+) -> RegisterRequest {
+    use ed25519_dalek::Signer as _;
+    let signature = signing
+        .sign(&toki_proto::identity::signing_payload(&nonce))
+        .to_vec();
+    RegisterRequest {
+        display_name: "anon".into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        identity_pubkey: signing.verifying_key().to_bytes().to_vec(),
+        challenge_nonce: nonce,
+        identity_signature: signature,
+        first_callsign: first_callsign.into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_challenge_then_register_succeeds() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .expect("challenge should be issued")
+        .into_inner()
+        .nonce;
+    assert!(!nonce.is_empty());
+
+    let resp = client
+        .register(identity_register(&signing, nonce, "coton"))
+        .await
+        .expect("identity-ful register should succeed")
+        .into_inner();
+    assert!(!resp.client_id.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_rejects_wrong_key_signature() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let impostor = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+
+    // Claim signing's pubkey but sign with the impostor's key.
+    let mut req = identity_register(&signing, nonce.clone(), "coton");
+    use ed25519_dalek::Signer as _;
+    req.identity_signature = impostor
+        .sign(&toki_proto::identity::signing_payload(&nonce))
+        .to_vec();
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_rejects_forged_nonce() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    // A self-invented nonce was never issued by this server boot.
+    let forged = vec![0u8; 56];
+    let err = client
+        .register(identity_register(&signing, forged, "coton"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_pins_display_id_to_first_callsign() {
+    // Two registers with the same key but different claimed first
+    // callsigns: the identity string must keep the original prefix.
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+
+    for claimed in ["original", "impostor"] {
+        let nonce = client
+            .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+            .await
+            .unwrap()
+            .into_inner()
+            .nonce;
+        client
+            .register(identity_register(&signing, nonce, claimed))
+            .await
+            .expect("register should succeed");
+    }
+    // The shared identity map isn't reachable through the public gRPC
+    // surface in this test harness; the merge semantics are covered by
+    // the unit tests (identity::merged_identity + db upsert). Here we
+    // only prove the double-register path itself stays healthy.
 }

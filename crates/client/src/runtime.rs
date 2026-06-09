@@ -186,6 +186,20 @@ async fn handle_cmd(
             frequency,
             password,
         } => {
+            // Reap a session whose event stream has already died (server
+            // shutdown or admin kick): the GUI shows us offline, but the
+            // stale `Session` is still here. Without this, the guard below
+            // would treat the reconnect as a redundant "already connected"
+            // and the user would be stuck on the offline screen until they
+            // restart the app.
+            if session
+                .as_ref()
+                .is_some_and(|s| !s.alive.load(Ordering::Relaxed))
+            {
+                if let Some(s) = session.take() {
+                    s.close().await;
+                }
+            }
             if session.is_some() {
                 state.lock().unwrap().log("already connected");
                 // Already-connected is a soft no-op, not a shutdown
@@ -439,6 +453,11 @@ struct Session {
     /// codec). Behind a mutex because `send_audio` takes `&self`; the
     /// lock is held only to produce packets, never across an `await`.
     encode: StdMutex<AudioEncoder>,
+    /// `false` once the event stream has closed (server shutdown or admin
+    /// kick). The events task is the sole writer; the runtime loop reads
+    /// it to reap a dead session so a reconnect isn't blocked by the
+    /// already-connected guard. See `Session::open`.
+    alive: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -561,6 +580,14 @@ impl Session {
             .await?;
         let mut events = events_resp.into_inner();
         let state_for_events = state.clone();
+        // Liveness flag. The events task is the canonical signal that the
+        // session has ended: when the server-side stream closes (graceful
+        // shutdown *or* an admin kick) the task flips this to `false`. The
+        // runtime loop reaps a session whose `alive` has gone false so a
+        // subsequent reconnect isn't swallowed by the already-connected
+        // guard in `Cmd::Connect`.
+        let alive = Arc::new(AtomicBool::new(true));
+        let alive_for_events = alive.clone();
         let self_id_for_events = client_id.clone();
         let ptt_atomic = Arc::new(AtomicBool::new(false));
         let ptt_for_events = ptt_atomic.clone();
@@ -783,6 +810,10 @@ impl Session {
             // here — both look like a graceful EOF — so the log
             // message is deliberately generic.
             info!("event stream closed; transitioning to Disconnected");
+            // Mark the session dead first so the runtime loop reaps the
+            // stale `Session` and a reconnect is accepted (otherwise the
+            // client is stuck on the offline screen until app restart).
+            alive_for_events.store(false, Ordering::Relaxed);
             let mut st = state_for_events.lock().unwrap();
             st.connection = crate::state::ConnState::Disconnected;
             st.members.clear();
@@ -919,6 +950,7 @@ impl Session {
             udp,
             signaling,
             encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
+            alive,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
     }

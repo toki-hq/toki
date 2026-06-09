@@ -136,9 +136,9 @@ export type Member = Message<"toki.admin.v1.Member"> & {
   priority: boolean;
 
   /**
-   * Human-readable identity string, e.g. "COTON-7Q4XF9KB" (first
-   * callsign + 8-char base32 fingerprint of the public key). Stable
-   * across sessions and display-name changes — the durable "who".
+   * Human-readable identity string, e.g. "7Q4XF9KB" (8-char base32
+   * fingerprint of the public key). Stable across sessions and
+   * display-name changes — the durable "who".
    *
    * @generated from field: string identity = 5;
    */

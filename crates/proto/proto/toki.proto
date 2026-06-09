@@ -62,7 +62,7 @@ message RegisterRequest {
 
   // ── Optional client identity ──────────────────────────────────────
   // A self-generated, keypair-backed identity (see notes in the repo's
-  // identity spec). All six fields are either present together or all
+  // identity spec). All five fields are either present together or all
   // absent; an absent identity (empty `identity_pubkey`) is accepted —
   // the session simply has no identity. A *present but invalid* one
   // (bad signature, stale nonce, malformed key) is rejected with
@@ -90,12 +90,6 @@ message RegisterRequest {
   // server, recorded at identity generation. Informational/claimed —
   // a provenance breadcrumb, not an authenticated fact.
   string origin_client_id = 8;
-  // Display name in use when the identity was generated, normalized
-  // (uppercase A-Z0-9, ≤10 chars). Embedded as the human-readable
-  // prefix of the identity display string, e.g. "COTON-7Q4XF9KB".
-  // Fixed at generation time — changing your display name later does
-  // not change your identity string.
-  string first_callsign = 9;
 }
 
 message RegisterResponse {

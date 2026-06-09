@@ -55,7 +55,7 @@ pub struct SignalingSvc {
     /// Identity records seen by this server, hydrated from the
     /// `identities` table at boot by the admin task. `Register` is
     /// the writer: it merges the verified identity against the prior
-    /// record (the stored first callsign pins the display id) and
+    /// record (stored `first_seen` / `origin_client_id` win) and
     /// pushes the result onto `identity_tx` for persistence.
     identities: crate::state::SharedIdentities,
     /// Persistence side of the identity pipeline — drained by the
@@ -100,9 +100,9 @@ impl SignalingSvc {
     /// possession of the key is proven — with the side effects that
     /// make it durable: the merged record lands in the shared
     /// identity map and is queued for the admin task to persist.
-    /// The merge pins `first_callsign` / `first_seen` / a non-empty
-    /// `origin_client_id` to their stored values, so a returning
-    /// identity can't rewrite its history by claiming differently.
+    /// The merge pins `first_seen` and a non-empty `origin_client_id`
+    /// to their stored values, so a returning identity can't rewrite
+    /// its history by claiming differently.
     async fn process_identity(
         &self,
         req: &RegisterRequest,
@@ -121,10 +121,6 @@ impl SignalingSvc {
         let session = crate::identity::merged_identity(&verified, prior.as_ref(), now);
         let record = crate::state::IdentityRecord {
             display_id: session.display_id.clone(),
-            first_callsign: prior
-                .as_ref()
-                .map(|r| r.first_callsign.clone())
-                .unwrap_or_else(|| verified.first_callsign.clone()),
             last_callsign: display_name.to_string(),
             machine_hash: verified.machine_hash.clone(),
             origin_client_id: match prior.as_ref().map(|r| r.origin_client_id.as_str()) {

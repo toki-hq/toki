@@ -541,11 +541,7 @@ async fn leave_unknown_client_is_noop() {
 
 /// Sign `nonce` exactly like the real client does (domain-separated
 /// payload, ed25519) and build the register request around it.
-fn identity_register(
-    signing: &ed25519_dalek::SigningKey,
-    nonce: Vec<u8>,
-    first_callsign: &str,
-) -> RegisterRequest {
+fn identity_register(signing: &ed25519_dalek::SigningKey, nonce: Vec<u8>) -> RegisterRequest {
     use ed25519_dalek::Signer as _;
     let signature = signing
         .sign(&toki_proto::identity::signing_payload(&nonce))
@@ -556,7 +552,6 @@ fn identity_register(
         identity_pubkey: signing.verifying_key().to_bytes().to_vec(),
         challenge_nonce: nonce,
         identity_signature: signature,
-        first_callsign: first_callsign.into(),
         ..Default::default()
     }
 }
@@ -576,7 +571,7 @@ async fn identity_challenge_then_register_succeeds() {
     assert!(!nonce.is_empty());
 
     let resp = client
-        .register(identity_register(&signing, nonce, "coton"))
+        .register(identity_register(&signing, nonce))
         .await
         .expect("identity-ful register should succeed")
         .into_inner();
@@ -598,7 +593,7 @@ async fn identity_register_rejects_wrong_key_signature() {
         .nonce;
 
     // Claim signing's pubkey but sign with the impostor's key.
-    let mut req = identity_register(&signing, nonce.clone(), "coton");
+    let mut req = identity_register(&signing, nonce.clone());
     use ed25519_dalek::Signer as _;
     req.identity_signature = impostor
         .sign(&toki_proto::identity::signing_payload(&nonce))
@@ -615,7 +610,7 @@ async fn identity_register_rejects_forged_nonce() {
     // A self-invented nonce was never issued by this server boot.
     let forged = vec![0u8; 56];
     let err = client
-        .register(identity_register(&signing, forged, "coton"))
+        .register(identity_register(&signing, forged))
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
@@ -623,13 +618,15 @@ async fn identity_register_rejects_forged_nonce() {
 
 #[tokio::test]
 #[serial_test::serial]
-async fn identity_register_pins_display_id_to_first_callsign() {
-    // Two registers with the same key but different claimed first
-    // callsigns: the identity string must keep the original prefix.
+async fn identity_register_twice_with_same_key_succeeds() {
+    // Two registers with the same key (reconnect): the second must be
+    // accepted; the identity string is purely key-derived, so it's
+    // identical both times. The first_seen/origin merge semantics are
+    // covered by the unit tests (identity::merged_identity + db upsert).
     let mut client = boot(None).await;
     let signing = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
 
-    for claimed in ["original", "impostor"] {
+    for _ in 0..2 {
         let nonce = client
             .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
             .await
@@ -637,12 +634,8 @@ async fn identity_register_pins_display_id_to_first_callsign() {
             .into_inner()
             .nonce;
         client
-            .register(identity_register(&signing, nonce, claimed))
+            .register(identity_register(&signing, nonce))
             .await
             .expect("register should succeed");
     }
-    // The shared identity map isn't reachable through the public gRPC
-    // surface in this test harness; the merge semantics are covered by
-    // the unit tests (identity::merged_identity + db upsert). Here we
-    // only prove the double-register path itself stays healthy.
 }

@@ -524,7 +524,7 @@ impl Session {
         // Any other challenge failure also degrades to identity-less
         // (with a warning): in this release identity is informational,
         // so a transient hiccup shouldn't cost the user the connection.
-        let mut identity = crate::identity::Identity::load_or_generate(display_name);
+        let mut identity = crate::identity::Identity::load_or_generate();
         let (identity_pubkey, challenge_nonce, identity_signature) = match signaling
             .identity_challenge(IdentityChallengeRequest {})
             .await
@@ -562,11 +562,6 @@ impl Session {
                 },
                 origin_client_id: if presenting_identity {
                     identity.origin_client_id.clone()
-                } else {
-                    String::new()
-                },
-                first_callsign: if presenting_identity {
-                    identity.first_callsign.clone()
                 } else {
                     String::new()
                 },

@@ -347,7 +347,7 @@ impl AdminDb {
     /// Load every known identity into a `pubkey-hex → record` map —
     /// the boot-time hydration of `SharedIdentities`.
     pub async fn load_identities(&self) -> Result<HashMap<String, IdentityRecord>> {
-        let sql = "SELECT pubkey, display_id, first_callsign, last_callsign, machine_hash, \
+        let sql = "SELECT pubkey, display_id, last_callsign, machine_hash, \
                    origin_client_id, first_seen, last_seen, last_ip FROM identities";
         on_pool!(self, p, {
             let rows = sqlx::query(sql).fetch_all(p).await?;
@@ -357,13 +357,12 @@ impl AdminDb {
                     r.try_get::<String, _>(0)?,
                     IdentityRecord {
                         display_id: r.try_get::<String, _>(1)?,
-                        first_callsign: r.try_get::<String, _>(2)?,
-                        last_callsign: r.try_get::<String, _>(3)?,
-                        machine_hash: r.try_get::<String, _>(4)?,
-                        origin_client_id: r.try_get::<String, _>(5)?,
-                        first_seen: r.try_get::<i64, _>(6)?,
-                        last_seen: r.try_get::<i64, _>(7)?,
-                        last_ip: r.try_get::<String, _>(8)?,
+                        last_callsign: r.try_get::<String, _>(2)?,
+                        machine_hash: r.try_get::<String, _>(3)?,
+                        origin_client_id: r.try_get::<String, _>(4)?,
+                        first_seen: r.try_get::<i64, _>(5)?,
+                        last_seen: r.try_get::<i64, _>(6)?,
+                        last_ip: r.try_get::<String, _>(7)?,
                     },
                 );
             }
@@ -372,9 +371,9 @@ impl AdminDb {
     }
 
     /// Upsert one identity record. On conflict the *immutable* facts
-    /// keep their stored values — `display_id`, `first_callsign`,
-    /// `first_seen` never change once written, and `origin_client_id`
-    /// is first-non-empty-wins — so a record fed through a boot race
+    /// keep their stored values — `display_id` and `first_seen` never
+    /// change once written, and `origin_client_id` is
+    /// first-non-empty-wins — so a record fed through a boot race
     /// (register before the hydration finished) can't rewrite an
     /// identity's history. The mutable last-* columns track the most
     /// recent register.
@@ -384,7 +383,6 @@ impl AdminDb {
             sqlx::query(sql)
                 .bind(pubkey)
                 .bind(rec.display_id.as_str())
-                .bind(rec.first_callsign.as_str())
                 .bind(rec.last_callsign.as_str())
                 .bind(rec.machine_hash.as_str())
                 .bind(rec.origin_client_id.as_str())
@@ -700,9 +698,9 @@ impl AdminDb {
     fn identity_upsert_sql(&self) -> &'static str {
         match self.backend {
             Backend::Sqlite => {
-                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
                  machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(pubkey) DO UPDATE SET \
                  last_callsign = excluded.last_callsign, \
                  machine_hash = excluded.machine_hash, \
@@ -712,9 +710,9 @@ impl AdminDb {
                  last_ip = excluded.last_ip"
             }
             Backend::MySql => {
-                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
                  machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
                  ON DUPLICATE KEY UPDATE \
                  last_callsign = VALUES(last_callsign), \
                  machine_hash = VALUES(machine_hash), \
@@ -723,9 +721,9 @@ impl AdminDb {
                  last_ip = VALUES(last_ip)"
             }
             Backend::Postgres => {
-                "INSERT INTO identities (pubkey, display_id, first_callsign, last_callsign, \
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
                  machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
                  ON CONFLICT(pubkey) DO UPDATE SET \
                  last_callsign = excluded.last_callsign, \
                  machine_hash = excluded.machine_hash, \
@@ -1047,7 +1045,6 @@ CREATE TABLE IF NOT EXISTS channel_names (
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           TEXT PRIMARY KEY NOT NULL,
     display_id       TEXT NOT NULL,
-    first_callsign   TEXT NOT NULL,
     last_callsign    TEXT NOT NULL DEFAULT '',
     machine_hash     TEXT NOT NULL DEFAULT '',
     origin_client_id TEXT NOT NULL DEFAULT '',
@@ -1105,7 +1102,6 @@ CREATE TABLE IF NOT EXISTS channel_names (
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           VARCHAR(64) PRIMARY KEY NOT NULL,
     display_id       VARCHAR(32) NOT NULL,
-    first_callsign   VARCHAR(16) NOT NULL,
     last_callsign    VARCHAR(16) NOT NULL DEFAULT '',
     machine_hash     VARCHAR(64) NOT NULL DEFAULT '',
     origin_client_id VARCHAR(64) NOT NULL DEFAULT '',
@@ -1161,7 +1157,6 @@ CREATE TABLE IF NOT EXISTS channel_names (
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           TEXT PRIMARY KEY NOT NULL,
     display_id       TEXT NOT NULL,
-    first_callsign   TEXT NOT NULL,
     last_callsign    TEXT NOT NULL DEFAULT '',
     machine_hash     TEXT NOT NULL DEFAULT '',
     origin_client_id TEXT NOT NULL DEFAULT '',
@@ -1410,8 +1405,7 @@ mod tests {
 
     fn identity_record(first_seen: i64) -> IdentityRecord {
         IdentityRecord {
-            display_id: "COTON-FLNIHQMB".into(),
-            first_callsign: "COTON".into(),
+            display_id: "FLNIHQMB".into(),
             last_callsign: "coton".into(),
             machine_hash: "ab".repeat(32),
             origin_client_id: String::new(),
@@ -1433,7 +1427,7 @@ mod tests {
         let map = db.load_identities().await.unwrap();
         assert_eq!(map.len(), 1);
         let rec = &map["aa11"];
-        assert_eq!(rec.display_id, "COTON-FLNIHQMB");
+        assert_eq!(rec.display_id, "FLNIHQMB");
         assert_eq!(rec.first_seen, 100);
         assert_eq!(rec.machine_hash, "ab".repeat(32));
     }
@@ -1447,10 +1441,9 @@ mod tests {
             .unwrap();
 
         // A later register (even one fed through a boot race claiming a
-        // different history) must not rewrite first_seen/first_callsign,
-        // and origin is first-non-empty-wins.
+        // different history) must not rewrite first_seen, and origin is
+        // first-non-empty-wins.
         let mut later = identity_record(999); // wrong first_seen on purpose
-        later.first_callsign = "IMPOSTOR".into();
         later.last_callsign = "renamed".into();
         later.last_seen = 200;
         later.last_ip = "10.0.0.2".into();
@@ -1459,7 +1452,6 @@ mod tests {
 
         let rec = &db.load_identities().await.unwrap()["aa11"];
         assert_eq!(rec.first_seen, 100, "first_seen immutable");
-        assert_eq!(rec.first_callsign, "COTON", "first_callsign immutable");
         assert_eq!(rec.last_callsign, "renamed");
         assert_eq!(rec.last_seen, 200);
         assert_eq!(rec.last_ip, "10.0.0.2");

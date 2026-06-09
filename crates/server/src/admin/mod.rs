@@ -215,10 +215,9 @@ pub async fn run(
     }
 
     // Hydrate the shared identity map. Same dance again: signaling
-    // merges every identity-ful register against this map (the stored
-    // first callsign pins the display id, first_seen survives
-    // restarts), so it must hold the persisted records before the
-    // first register lands.
+    // merges every identity-ful register against this map (first_seen
+    // and a recorded origin survive restarts), so it must hold the
+    // persisted records before the first register lands.
     {
         let loaded = db
             .load_identities()

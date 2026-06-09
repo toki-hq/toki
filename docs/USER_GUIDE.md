@@ -296,9 +296,8 @@ and stores it next to the config as `identity.toml` (chmod `0600` — the key
 is exactly as sensitive as the stored server password):
 
 - The identity **is** an ed25519 public key. It's displayed everywhere as
-  `CALLSIGN-FINGERPRINT` (e.g. `COTON-7Q4XF9KB`): your display name at the
-  moment of generation, plus an 8-character fingerprint of the key. Renaming
-  yourself later does **not** change your identity string.
+  the key's 8-character fingerprint (e.g. `7Q4XF9KB`) — purely derived from
+  the key, so renaming yourself never changes your identity string.
 - At register, the client signs a server-issued challenge with the private
   key, so an identity string seen in the admin panel or audit log can't be
   claimed by someone who merely saw it.
@@ -450,7 +449,7 @@ Per-client actions in the roster: **kick**, **move** (to another frequency),
 priority speaker on a channel).
 
 Members that registered with a verified **client identity** show a
-fingerprint badge with their durable identity string (e.g. `COTON-7Q4XF9KB`)
+fingerprint badge with their durable identity string (e.g. `7Q4XF9KB`)
 next to the display name; hover it for the full public key, the machine-hash
 prefix, and when this identity was first seen by the server. The connect line
 in the audit log carries the same identity, so a renamed or reconnected

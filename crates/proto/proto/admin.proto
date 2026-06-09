@@ -92,9 +92,9 @@ message Member {
   // identity; all four fields are empty/zero for identity-less
   // sessions (pre-identity clients, or identity disabled client-side).
 
-  // Human-readable identity string, e.g. "COTON-7Q4XF9KB" (first
-  // callsign + 8-char base32 fingerprint of the public key). Stable
-  // across sessions and display-name changes — the durable "who".
+  // Human-readable identity string, e.g. "7Q4XF9KB" (8-char base32
+  // fingerprint of the public key). Stable across sessions and
+  // display-name changes — the durable "who".
   string identity = 5;
   // Full 32-byte ed25519 public key as lowercase hex — the canonical
   // identity key, shown in the panel's hover detail and used to

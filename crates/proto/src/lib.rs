@@ -169,18 +169,15 @@ pub mod version {
 /// fields), so an identity string seen in the admin panel or audit log
 /// cannot be replayed by an observer.
 ///
-/// The derivations below are a **cross-version contract**: the display
-/// string and machine hash must compute identically on every client and
-/// server build, forever — changing them silently renames every user.
-/// Hence the pinned golden vectors in the tests.
+/// The derivations below are a **cross-version contract**: the
+/// fingerprint and machine hash must compute identically on every client
+/// and server build, forever — changing them silently renames every
+/// user. Hence the pinned golden vectors in the tests.
 pub mod identity {
     /// ed25519 public-key length, bytes.
     pub const PUBKEY_LEN: usize = 32;
     /// ed25519 signature length, bytes.
     pub const SIGNATURE_LEN: usize = 64;
-    /// Longest callsign embedded in a display id — matches the client's
-    /// display-name length limit.
-    pub const MAX_CALLSIGN_LEN: usize = 10;
 
     /// Domain-separation prefix for register-challenge signatures. The
     /// client signs `SIGN_DOMAIN || nonce`, never the bare nonce, so a
@@ -202,46 +199,15 @@ pub mod identity {
         out
     }
 
-    /// Normalize a raw display name into the callsign embedded in a
-    /// display id: ASCII-alphanumeric only, uppercased, truncated to
-    /// [`MAX_CALLSIGN_LEN`]. An input that normalizes to nothing (e.g.
-    /// all emoji) falls back to `"TOKI"` so the display id always has a
-    /// readable prefix.
-    pub fn normalize_callsign(raw: &str) -> String {
-        let cleaned: String = raw
-            .chars()
-            .filter(char::is_ascii_alphanumeric)
-            .map(|c| c.to_ascii_uppercase())
-            .take(MAX_CALLSIGN_LEN)
-            .collect();
-        if cleaned.is_empty() {
-            "TOKI".into()
-        } else {
-            cleaned
-        }
-    }
-
-    /// 8-character base32 fingerprint of a public key: the first 5 bytes
-    /// (40 bits) of `BLAKE3(pubkey)`, RFC 4648 alphabet, no padding.
-    /// Collision-safe for *display* (the canonical key server-side is
-    /// always the full pubkey), wide enough that two members matching by
-    /// accident is a non-event.
+    /// 8-character base32 fingerprint of a public key — the identity's
+    /// human-readable display string (e.g. `7Q4XF9KB`): the first 5
+    /// bytes (40 bits) of `BLAKE3(pubkey)`, RFC 4648 alphabet, no
+    /// padding. Collision-safe for *display* (the canonical key
+    /// server-side is always the full pubkey), wide enough that two
+    /// members matching by accident is a non-event.
     pub fn fingerprint(pubkey: &[u8]) -> String {
         let hash = blake3::hash(pubkey);
         base32_40bits(&hash.as_bytes()[..5])
-    }
-
-    /// Human-readable identity string: `<CALLSIGN>-<FINGERPRINT>`, e.g.
-    /// `COTON-7Q4XF9KB`. The callsign is fixed at identity generation
-    /// (it does not track later display-name changes); the fingerprint
-    /// derives from the public key alone, so the id survives moving the
-    /// key file to a new machine.
-    pub fn display_id(first_callsign: &str, pubkey: &[u8]) -> String {
-        format!(
-            "{}-{}",
-            normalize_callsign(first_callsign),
-            fingerprint(pubkey)
-        )
     }
 
     /// Salted machine-fingerprint hash, lowercase hex:
@@ -287,15 +253,6 @@ mod identity_tests {
     }
 
     #[test]
-    fn normalize_callsign_cleans_and_truncates() {
-        assert_eq!(normalize_callsign("coton"), "COTON");
-        assert_eq!(normalize_callsign("Coton 42!"), "COTON42");
-        assert_eq!(normalize_callsign("ABCDEFGHIJKLMNOP"), "ABCDEFGHIJ"); // ≤10
-        assert_eq!(normalize_callsign("🦀🦀🦀"), "TOKI"); // nothing left → fallback
-        assert_eq!(normalize_callsign(""), "TOKI");
-    }
-
-    #[test]
     fn fingerprint_is_8_base32_chars_and_key_specific() {
         let fp_a = fingerprint(&[0xAA; 32]);
         let fp_b = fingerprint(&[0xBB; 32]);
@@ -305,14 +262,6 @@ mod identity_tests {
             .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
         assert_ne!(fp_a, fp_b);
         assert_eq!(fp_a, fingerprint(&[0xAA; 32]), "deterministic");
-    }
-
-    #[test]
-    fn display_id_formats_callsign_dash_fingerprint() {
-        let id = display_id("coton", &[0xAA; 32]);
-        let (callsign, fp) = id.split_once('-').expect("dash separator");
-        assert_eq!(callsign, "COTON");
-        assert_eq!(fp, fingerprint(&[0xAA; 32]));
     }
 
     #[test]

@@ -379,7 +379,7 @@ function NameEditor({
 }
 
 /// Keypair-identity badge for a member row. Shows the durable identity
-/// string (e.g. COTON-7Q4XF9KB) next to the freely-chosen display name;
+/// string (e.g. 7Q4XF9KB) next to the freely-chosen display name;
 /// hovering reveals the full public key, the machine-hash prefix, and
 /// when this identity was first seen by the server. Members that
 /// registered without an identity (pre-identity clients) render nothing.

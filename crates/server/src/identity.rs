@@ -112,14 +112,10 @@ pub fn verify_nonce(key: &ChallengeKey, nonce: &[u8], now_unix: u64) -> Result<(
 
 /// The verified outcome of a register's identity fields, minus the
 /// bookkeeping the caller fills from the shared identity map
-/// (`display_id` derives from the *stored* first callsign for a
-/// returning identity, and `first_seen` comes from the map).
+/// (`first_seen` comes from the prior record, when one exists).
 #[derive(Debug)]
 pub struct VerifiedIdentity {
     pub pubkey_hex: String,
-    /// Server-side normalization of the claimed generation-time
-    /// callsign — never the client's raw string.
-    pub first_callsign: String,
     /// Lowercased 64-hex machine hash, or empty when the client had
     /// no machine id to hash.
     pub machine_hash: String,
@@ -190,28 +186,22 @@ pub fn verify_register(
 
     Ok(Some(VerifiedIdentity {
         pubkey_hex: hex(&pubkey_bytes),
-        first_callsign: id::normalize_callsign(&req.first_callsign),
         machine_hash,
         origin_client_id,
     }))
 }
 
-/// Build the registry-facing identity for a verified register,
-/// merging against the prior record for this pubkey (if any): the
-/// display id always derives from the *first* callsign this server
-/// ever stored for the key, so a client can't rename its identity
-/// string by replaying a different `first_callsign` later.
+/// Build the registry-facing identity for a verified register. The
+/// display id is purely key-derived (the 8-char fingerprint), so the
+/// only merge against the prior record is `first_seen`.
 pub fn merged_identity(
     verified: &VerifiedIdentity,
     prior: Option<&crate::state::IdentityRecord>,
     now_unix: i64,
 ) -> ClientIdentity {
-    let first_callsign = prior
-        .map(|r| r.first_callsign.clone())
-        .unwrap_or_else(|| verified.first_callsign.clone());
     let pubkey_bytes = unhex32(&verified.pubkey_hex);
     ClientIdentity {
-        display_id: id::display_id(&first_callsign, &pubkey_bytes),
+        display_id: id::fingerprint(&pubkey_bytes),
         pubkey_hex: verified.pubkey_hex.clone(),
         machine_hash: verified.machine_hash.clone(),
         first_seen: prior.map(|r| r.first_seen).unwrap_or(now_unix),
@@ -244,7 +234,6 @@ mod tests {
             identity_pubkey: signing.verifying_key().to_bytes().to_vec(),
             challenge_nonce: nonce,
             identity_signature: signature,
-            first_callsign: "coton".into(),
             ..Default::default()
         }
     }
@@ -288,13 +277,12 @@ mod tests {
     }
 
     #[test]
-    fn register_with_valid_identity_verifies_and_normalizes() {
+    fn register_with_valid_identity_verifies() {
         let key = ChallengeKey::generate();
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let req = test_request(&signing, issue(&key, 1_000_000));
         let verified = verify_register(&key, &req, 1_000_000).unwrap().unwrap();
         assert_eq!(verified.pubkey_hex.len(), 64);
-        assert_eq!(verified.first_callsign, "COTON", "normalized server-side");
         assert!(verified.machine_hash.is_empty());
     }
 
@@ -346,22 +334,25 @@ mod tests {
     }
 
     #[test]
-    fn merged_identity_pins_display_id_to_stored_first_callsign() {
+    fn merged_identity_derives_display_id_and_pins_first_seen() {
         let key = ChallengeKey::generate();
         let signing = SigningKey::from_bytes(&[7u8; 32]);
         let req = test_request(&signing, issue(&key, 1_000_000));
         let verified = verify_register(&key, &req, 1_000_000).unwrap().unwrap();
 
-        // No prior record → claimed callsign + first_seen = now.
+        // No prior record → first_seen = now; display id is the bare
+        // key fingerprint.
         let fresh = merged_identity(&verified, None, 42);
-        assert!(fresh.display_id.starts_with("COTON-"));
+        assert_eq!(
+            fresh.display_id,
+            id::fingerprint(&signing.verifying_key().to_bytes())
+        );
         assert_eq!(fresh.first_seen, 42);
 
-        // Prior record → its callsign + first_seen win, whatever the
-        // client claims this time.
+        // Prior record → its first_seen wins; the display id is the
+        // same either way (purely key-derived).
         let prior = crate::state::IdentityRecord {
             display_id: String::new(), // derived, not read back
-            first_callsign: "ORIGINAL".into(),
             last_callsign: "anon".into(),
             machine_hash: String::new(),
             origin_client_id: String::new(),
@@ -370,7 +361,7 @@ mod tests {
             last_ip: String::new(),
         };
         let merged = merged_identity(&verified, Some(&prior), 42);
-        assert!(merged.display_id.starts_with("ORIGINAL-"));
+        assert_eq!(merged.display_id, fresh.display_id);
         assert_eq!(merged.first_seen, 7);
     }
 }

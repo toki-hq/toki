@@ -91,9 +91,9 @@ pub struct Client {
 /// admin snapshots and audit lines need.
 #[derive(Clone, Debug)]
 pub struct ClientIdentity {
-    /// Human-readable identity string, e.g. `COTON-7Q4XF9KB`. Derived
-    /// from the *stored* first callsign for a returning identity, so
-    /// a client can't rename its identity string later.
+    /// Human-readable identity string — the 8-char base32 fingerprint
+    /// of the public key, e.g. `7Q4XF9KB`. Purely key-derived, so it's
+    /// stable across renames, sessions, and machines.
     pub display_id: String,
     /// Full ed25519 public key, lowercase hex — the canonical key.
     pub pubkey_hex: String,
@@ -176,13 +176,10 @@ pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNa
 /// the `identities` table by the admin task.
 #[derive(Clone, Debug)]
 pub struct IdentityRecord {
-    /// Human-readable identity string (`COTON-7Q4XF9KB`). Derived
-    /// once from `first_callsign` + pubkey and stored so audit rows
+    /// Human-readable identity string (`7Q4XF9KB` — the 8-char key
+    /// fingerprint). Derived from the pubkey and stored so audit rows
     /// can be joined against it without re-deriving.
     pub display_id: String,
-    /// Callsign captured the first time this identity registered
-    /// here — the display-id prefix, frozen forever.
-    pub first_callsign: String,
     /// Display name used at the most recent register.
     pub last_callsign: String,
     /// Most recent machine-fingerprint hash (claimed; may be empty).

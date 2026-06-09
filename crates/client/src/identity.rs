@@ -7,13 +7,14 @@
 //! `Signaling.IdentityChallenge`), so the identity string shown in admin
 //! panels and audit logs cannot be claimed by an observer.
 //!
-//! Alongside the key the file records:
-//!   * `first_callsign` — the display name in use at generation time,
-//!     normalized; the human-readable prefix of the display id
-//!     (`COTON-7Q4XF9KB`). Fixed forever — later renames don't touch it.
-//!   * `origin_client_id` — the first session id any server ever
-//!     assigned this identity. A claimed provenance breadcrumb,
-//!     recorded once after the first identity-ful register.
+//! Alongside the key the file records `origin_client_id` — the first
+//! session id any server ever assigned this identity. A claimed
+//! provenance breadcrumb, recorded once after the first identity-ful
+//! register.
+//!
+//! The identity displays as the 8-char fingerprint of the public key
+//! (`7Q4XF9KB`) — derived, never stored, independent of the
+//! freely-chosen display name.
 //!
 //! The **machine hash** ([`machine_hash`]) is deliberately *not* stored
 //! in this file: it's derived fresh from the OS machine id on every
@@ -49,8 +50,6 @@ struct IdentityFile {
     secret_key: String,
     /// Unix seconds at generation. Informational.
     created_at: u64,
-    /// Normalized callsign captured at generation (display-id prefix).
-    first_callsign: String,
     /// First server-assigned session id this identity ever received.
     /// Empty until the first successful identity-ful register.
     #[serde(default)]
@@ -61,7 +60,6 @@ struct IdentityFile {
 pub struct Identity {
     signing: SigningKey,
     pub created_at: u64,
-    pub first_callsign: String,
     pub origin_client_id: String,
     /// `None` when no config dir could be resolved — the identity then
     /// lives for this process only (and a fresh one is minted next run;
@@ -71,18 +69,17 @@ pub struct Identity {
 
 impl Identity {
     /// Load the persisted identity, or generate + persist a new one.
-    /// `display_name` seeds `first_callsign` only on generation.
     ///
     /// A corrupt or unreadable file is treated as absent (a fresh
     /// identity is minted over it) — the alternative, refusing to
     /// connect, would brick the client over a damaged optional file.
-    pub fn load_or_generate(display_name: &str) -> Self {
-        Self::load_or_generate_at(default_path(), display_name)
+    pub fn load_or_generate() -> Self {
+        Self::load_or_generate_at(default_path())
     }
 
     /// Path-injectable core of [`Self::load_or_generate`] (tests point
     /// it at a temp dir).
-    fn load_or_generate_at(path: Option<PathBuf>, display_name: &str) -> Self {
+    fn load_or_generate_at(path: Option<PathBuf>) -> Self {
         if let Some(p) = &path {
             match fs::read_to_string(p) {
                 Ok(s) => match toml::from_str::<IdentityFile>(&s)
@@ -93,7 +90,6 @@ impl Identity {
                         return Self {
                             signing,
                             created_at: f.created_at,
-                            first_callsign: f.first_callsign,
                             origin_client_id: f.origin_client_id,
                             path,
                         }
@@ -118,7 +114,6 @@ impl Identity {
         let identity = Self {
             signing,
             created_at: now_unix(),
-            first_callsign: id::normalize_callsign(display_name),
             origin_client_id: String::new(),
             path,
         };
@@ -132,9 +127,10 @@ impl Identity {
         self.signing.verifying_key().to_bytes()
     }
 
-    /// Human-readable identity string, e.g. `COTON-7Q4XF9KB`.
+    /// Human-readable identity string — the 8-char key fingerprint,
+    /// e.g. `7Q4XF9KB`.
     pub fn display_id(&self) -> String {
-        id::display_id(&self.first_callsign, &self.pubkey_bytes())
+        id::fingerprint(&self.pubkey_bytes())
     }
 
     /// Sign a register challenge: ed25519 over the domain-separated
@@ -168,7 +164,6 @@ impl Identity {
         let file = IdentityFile {
             secret_key: seed_to_hex(&self.signing.to_bytes()),
             created_at: self.created_at,
-            first_callsign: self.first_callsign.clone(),
             origin_client_id: self.origin_client_id.clone(),
         };
         match toml::to_string_pretty(&file) {
@@ -308,14 +303,13 @@ mod tests {
         let path = temp_identity_path("roundtrip");
         let _ = fs::remove_dir_all(path.parent().unwrap());
 
-        let fresh = Identity::load_or_generate_at(Some(path.clone()), "coton");
-        assert_eq!(fresh.first_callsign, "COTON");
+        let fresh = Identity::load_or_generate_at(Some(path.clone()));
         assert!(fresh.origin_client_id.is_empty());
+        assert_eq!(fresh.display_id().len(), 8, "bare key fingerprint");
 
-        let reloaded = Identity::load_or_generate_at(Some(path.clone()), "OTHER-NAME");
-        // Same key, and first_callsign stays the generation-time one.
+        let reloaded = Identity::load_or_generate_at(Some(path.clone()));
+        // Same key → same identity.
         assert_eq!(reloaded.pubkey_bytes(), fresh.pubkey_bytes());
-        assert_eq!(reloaded.first_callsign, "COTON");
         assert_eq!(reloaded.display_id(), fresh.display_id());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -328,10 +322,10 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, "secret_key = \"not hex at all\"").unwrap();
 
-        let identity = Identity::load_or_generate_at(Some(path.clone()), "anyone");
+        let identity = Identity::load_or_generate_at(Some(path.clone()));
         assert_eq!(identity.pubkey_bytes().len(), 32);
         // And the rewrite is loadable again.
-        let reloaded = Identity::load_or_generate_at(Some(path.clone()), "x");
+        let reloaded = Identity::load_or_generate_at(Some(path.clone()));
         assert_eq!(reloaded.pubkey_bytes(), identity.pubkey_bytes());
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -339,7 +333,7 @@ mod tests {
 
     #[test]
     fn challenge_signature_verifies_against_pubkey() {
-        let identity = Identity::load_or_generate_at(None, "coton");
+        let identity = Identity::load_or_generate_at(None);
         let nonce = b"server-issued-nonce";
         let sig_bytes = identity.sign_challenge(nonce);
         assert_eq!(sig_bytes.len(), toki_proto::identity::SIGNATURE_LEN);
@@ -359,11 +353,11 @@ mod tests {
         let path = temp_identity_path("origin");
         let _ = fs::remove_dir_all(path.parent().unwrap());
 
-        let mut identity = Identity::load_or_generate_at(Some(path.clone()), "coton");
+        let mut identity = Identity::load_or_generate_at(Some(path.clone()));
         identity.record_origin("session-1");
         identity.record_origin("session-2"); // ignored — already recorded
 
-        let reloaded = Identity::load_or_generate_at(Some(path.clone()), "x");
+        let reloaded = Identity::load_or_generate_at(Some(path.clone()));
         assert_eq!(reloaded.origin_client_id, "session-1");
 
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -376,7 +370,7 @@ mod tests {
         let path = temp_identity_path("perms");
         let _ = fs::remove_dir_all(path.parent().unwrap());
 
-        let _identity = Identity::load_or_generate_at(Some(path.clone()), "coton");
+        let _identity = Identity::load_or_generate_at(Some(path.clone()));
         let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "identity seed must be owner-only");
 

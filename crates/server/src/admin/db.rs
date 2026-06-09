@@ -207,6 +207,15 @@ impl AdminDb {
                 "BIGINT NOT NULL DEFAULT 2",
             ),
         ];
+        // Columns that existed in pre-release dev builds and were later
+        // removed from the schema. A `NOT NULL` stray blocks inserts
+        // that no longer supply it, so migrate() drops them when found.
+        // No-op on any database that never had them. `(table, column)`.
+        const DROPPED_COLUMNS: &[(&str, &str)] = &[
+            // Identity display ids were briefly callsign-prefixed; the
+            // prefix column was removed before the 0.5.0 release.
+            ("identities", "first_callsign"),
+        ];
         match &self.pool {
             Pool::Sqlite(p) => {
                 for stmt in split_ddl(SQLITE_DDL) {
@@ -220,6 +229,9 @@ impl AdminDb {
                 for (column, spec, _, _) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_sqlite(p, "server_config", column, spec).await?;
                 }
+                for (table, column) in DROPPED_COLUMNS {
+                    drop_column_sqlite(p, table, column).await?;
+                }
             }
             Pool::MySql(p) => {
                 for stmt in split_ddl(MYSQL_DDL) {
@@ -232,6 +244,9 @@ impl AdminDb {
                 for (column, _, _, spec) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_mysql(p, "server_config", column, spec).await?;
                 }
+                for (table, column) in DROPPED_COLUMNS {
+                    drop_column_mysql(p, table, column).await?;
+                }
             }
             Pool::Postgres(p) => {
                 for stmt in split_ddl(POSTGRES_DDL) {
@@ -243,6 +258,14 @@ impl AdminDb {
                 // Upgrade pre-existing schemas that predate later columns.
                 for (column, _, spec, _) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_pg(p, "server_config", column, spec).await?;
+                }
+                for (table, column) in DROPPED_COLUMNS {
+                    sqlx::query(&format!(
+                        "ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"
+                    ))
+                    .execute(p)
+                    .await
+                    .with_context(|| format!("drop {table}.{column} (pg)"))?;
                 }
             }
         }
@@ -985,6 +1008,52 @@ async fn ensure_column_mysql(
     Ok(())
 }
 
+/// Idempotently drop a column from a SQLite table (SQLite has no
+/// `DROP COLUMN IF EXISTS`): `PRAGMA table_info` check, then `ALTER`.
+/// Heals databases created by builds whose schema briefly carried the
+/// column. `table`/`column` are hardcoded.
+async fn drop_column_sqlite(pool: &SqlitePool, table: &str, column: &str) -> Result<()> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("pragma table_info({table})"))?;
+    let exists = rows.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .map(|n| n == column)
+            .unwrap_or(false)
+    });
+    if exists {
+        sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} drop {column}"))?;
+    }
+    Ok(())
+}
+
+/// Idempotently drop a column from a MySQL/MariaDB table — same
+/// `information_schema` guard as [`ensure_column_mysql`] (MySQL has no
+/// portable `DROP COLUMN IF EXISTS`).
+async fn drop_column_mysql(pool: &MySqlPool, table: &str, column: &str) -> Result<()> {
+    let exists: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("information_schema check {table}.{column}"))?
+    .try_get::<i64, _>(0)?;
+    if exists > 0 {
+        sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} drop {column} (mysql)"))?;
+    }
+    Ok(())
+}
+
 /// `chmod 0600` the admin db file (file-backed SQLite only). Best-effort.
 #[cfg(unix)]
 fn tighten_db_perms(path: &Path) {
@@ -1413,6 +1482,36 @@ mod tests {
             last_seen: first_seen,
             last_ip: "10.0.0.1".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn migrate_drops_stale_first_callsign_column() {
+        // A database created by a pre-release dev build has an
+        // `identities` table with a NOT NULL `first_callsign` column
+        // the current schema no longer supplies — inserts would
+        // violate the constraint. migrate() must drop it.
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.exec_raw(
+            "CREATE TABLE identities (
+                pubkey           TEXT PRIMARY KEY NOT NULL,
+                display_id       TEXT NOT NULL,
+                first_callsign   TEXT NOT NULL,
+                last_callsign    TEXT NOT NULL DEFAULT '',
+                machine_hash     TEXT NOT NULL DEFAULT '',
+                origin_client_id TEXT NOT NULL DEFAULT '',
+                first_seen       INTEGER NOT NULL,
+                last_seen        INTEGER NOT NULL,
+                last_ip          TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .await
+        .unwrap();
+        db.migrate().await.unwrap();
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .expect("upsert must work after the stale column is dropped");
+        db.migrate().await.unwrap(); // still idempotent
+        assert_eq!(db.load_identities().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

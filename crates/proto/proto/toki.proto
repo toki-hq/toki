@@ -20,6 +20,27 @@ service Signaling {
   // Server multicasts these as Events to every other member of
   // the sender's current frequency room.
   rpc PushToTalk(stream PttEvent) returns (PttAck);
+
+  // Fetch a short-lived challenge nonce to sign in the subsequent
+  // `Register` call. Part of the optional client-identity handshake:
+  // the client proves possession of its ed25519 private key by signing
+  // the nonce (see `RegisterRequest.identity_signature`), which stops
+  // anyone who merely *sees* an identity string (admin panel, audit
+  // log) from impersonating it. The nonce is opaque to the client —
+  // echo it back verbatim. It expires after ~60 s; on a stale-nonce
+  // rejection from Register, fetch a fresh one and retry.
+  // Identity-less clients never call this.
+  rpc IdentityChallenge(IdentityChallengeRequest) returns (IdentityChallengeResponse);
+}
+
+message IdentityChallengeRequest {}
+
+message IdentityChallengeResponse {
+  // Opaque challenge blob. Stateless on the server side (it embeds a
+  // timestamp + HMAC, so no per-nonce table is kept); the client signs
+  // the domain-separated payload `"toki-register-v1" || nonce` and
+  // sends both the nonce and the signature in `Register`.
+  bytes nonce = 1;
 }
 
 message RegisterRequest {
@@ -38,6 +59,37 @@ message RegisterRequest {
   // change across minor versions). Empty / unparseable is treated as
   // incompatible (pre-gate clients predate the matching wire format).
   string client_version = 3;
+
+  // ── Optional client identity ──────────────────────────────────────
+  // A self-generated, keypair-backed identity (see notes in the repo's
+  // identity spec). All five fields are either present together or all
+  // absent; an absent identity (empty `identity_pubkey`) is accepted —
+  // the session simply has no identity. A *present but invalid* one
+  // (bad signature, stale nonce, malformed key) is rejected with
+  // `UNAUTHENTICATED` rather than silently downgraded, so an
+  // impersonation attempt never lands as "anonymous but connected".
+
+  // 32-byte ed25519 public key. This *is* the identity — everything
+  // else (display string, attributes) derives from or attaches to it.
+  bytes identity_pubkey = 4;
+  // The nonce obtained from `IdentityChallenge`, echoed verbatim.
+  bytes challenge_nonce = 5;
+  // 64-byte ed25519 signature over `"toki-register-v1" || nonce`
+  // (domain-separated so a register signature can't be replayed in
+  // any other future signing context).
+  bytes identity_signature = 6;
+  // Salted hash of the machine identifier, as lowercase hex:
+  // BLAKE3("toki-machine-fp-v1" || machine_id) where machine_id is the
+  // OS machine id (falling back to a primary MAC). Never the raw
+  // value. Travels alongside the key — NOT inside its derivation — so
+  // the identity survives moving the key file to a new machine, while
+  // a config wipe yields a fresh identity but the *same* machine hash
+  // (ban-evasion correlation). Claimed, not provable.
+  string machine_hash = 7;
+  // The first session client_id this identity was ever assigned by any
+  // server, recorded at identity generation. Informational/claimed —
+  // a provenance breadcrumb, not an authenticated fact.
+  string origin_client_id = 8;
 }
 
 message RegisterResponse {

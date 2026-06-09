@@ -86,6 +86,27 @@ message Member {
   string display_name = 2;
   uint64 connected_secs = 3;        // since Register
   bool priority = 4;                // priority speaker on this room's frequency
+
+  // ── Client identity (optional) ──────────────────────────────────
+  // Present only when the member registered with a verified keypair
+  // identity; all four fields are empty/zero for identity-less
+  // sessions (pre-identity clients, or identity disabled client-side).
+
+  // Human-readable identity string, e.g. "7Q4XF9KB" (8-char base32
+  // fingerprint of the public key). Stable across sessions and
+  // display-name changes — the durable "who".
+  string identity = 5;
+  // Full 32-byte ed25519 public key as lowercase hex — the canonical
+  // identity key, shown in the panel's hover detail and used to
+  // correlate with the identities table / audit log.
+  string identity_pubkey = 6;
+  // Salted machine-fingerprint hash (lowercase hex) the client
+  // presented at register. Lets an operator spot "fresh identity,
+  // previously-seen machine" after a config wipe. Claimed, not provable.
+  string identity_machine_hash = 7;
+  // Unix time this identity was first seen by THIS server (from the
+  // identities table). 0 when absent.
+  uint64 identity_first_seen_unix = 8;
 }
 
 // ── Server metadata + config ──────────────────────────────────────

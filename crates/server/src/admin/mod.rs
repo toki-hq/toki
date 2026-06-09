@@ -162,6 +162,8 @@ pub async fn run(
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
+    identities: crate::state::SharedIdentities,
+    mut identity_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::state::IdentityRecord)>,
     byte_counters: SharedByteCounters,
     audit: AuditSink,
     audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
@@ -212,6 +214,18 @@ pub async fn run(
         *channel_names.write().await = loaded;
     }
 
+    // Hydrate the shared identity map. Same dance again: signaling
+    // merges every identity-ful register against this map (first_seen
+    // and a recorded origin survive restarts), so it must hold the
+    // persisted records before the first register lands.
+    {
+        let loaded = db
+            .load_identities()
+            .await
+            .context("load identities from admin db")?;
+        *identities.write().await = loaded;
+    }
+
     // Seed `admin` user if the store is empty. We log the generated
     // password once at WARN level — this is the operator's only
     // chance to capture it.
@@ -250,6 +264,22 @@ pub async fn run(
     // Audit writer: drains the audit channel into sqlite for the life of
     // the process (the only task that writes the audit_log table).
     tokio::spawn(crate::audit::run_writer(audit_rx, db.clone()));
+
+    // Identity writer: drains the identity channel into the identities
+    // table — same split as audit (signaling produces, the db owner
+    // persists). A failed upsert logs and moves on: the in-memory map
+    // still has the record, so only durability across a restart is at
+    // stake, never the live session.
+    {
+        let db = db.clone();
+        tokio::spawn(async move {
+            while let Some((pubkey, record)) = identity_rx.recv().await {
+                if let Err(e) = db.upsert_identity(&pubkey, &record).await {
+                    tracing::warn!(error = %e, identity = %record.display_id, "could not persist identity");
+                }
+            }
+        });
+    }
 
     // Metrics sampler: refreshes host health + persists the 1-minute
     // bandwidth/users time-series, pruning past the retention window.

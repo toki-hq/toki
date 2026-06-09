@@ -15,6 +15,7 @@ mod app;
 mod audio;
 mod config;
 mod hotkey;
+mod identity;
 mod runtime;
 mod state;
 mod theme;

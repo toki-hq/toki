@@ -24,8 +24,8 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::v1::{
-    event::Event as Ev, signaling_client::SignalingClient, ChangeFrequencyRequest, JoinRequest,
-    LeaveRequest, PttEvent, RegisterRequest,
+    event::Event as Ev, signaling_client::SignalingClient, ChangeFrequencyRequest,
+    IdentityChallengeRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
 };
 use toki_proto::wire::{
     build_nonce, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD,
@@ -516,6 +516,35 @@ impl Session {
         };
         let mut signaling = SignalingClient::new(channel);
 
+        // ── Optional identity handshake ───────────────────────────────
+        // Load (or mint, on very first connect) the persistent keypair
+        // identity, then ask the server for a challenge nonce to sign.
+        // UNIMPLEMENTED means the server predates identity support —
+        // register identity-less, exactly like a pre-identity client.
+        // Any other challenge failure also degrades to identity-less
+        // (with a warning): in this release identity is informational,
+        // so a transient hiccup shouldn't cost the user the connection.
+        let mut identity = crate::identity::Identity::load_or_generate();
+        let (identity_pubkey, challenge_nonce, identity_signature) = match signaling
+            .identity_challenge(IdentityChallengeRequest {})
+            .await
+        {
+            Ok(resp) => {
+                let nonce = resp.into_inner().nonce;
+                let signature = identity.sign_challenge(&nonce);
+                (identity.pubkey_bytes().to_vec(), nonce, signature)
+            }
+            Err(s) if s.code() == tonic::Code::Unimplemented => {
+                info!("server has no identity support; registering identity-less");
+                (Vec::new(), Vec::new(), Vec::new())
+            }
+            Err(s) => {
+                warn!(error = %s, "identity challenge failed; registering identity-less");
+                (Vec::new(), Vec::new(), Vec::new())
+            }
+        };
+        let presenting_identity = !identity_pubkey.is_empty();
+
         let reg = signaling
             .register(RegisterRequest {
                 display_name: display_name.into(),
@@ -524,9 +553,30 @@ impl Session {
                 // (see toki_proto::version) so an out-of-date client gets
                 // a clear "please update" instead of silently broken audio.
                 client_version: env!("CARGO_PKG_VERSION").into(),
+                // The identity attributes travel only alongside an actual
+                // identity — sending them bare would be unverifiable noise.
+                machine_hash: if presenting_identity {
+                    crate::identity::machine_hash().unwrap_or_default()
+                } else {
+                    String::new()
+                },
+                origin_client_id: if presenting_identity {
+                    identity.origin_client_id.clone()
+                } else {
+                    String::new()
+                },
+                identity_pubkey,
+                challenge_nonce,
+                identity_signature,
             })
             .await?
             .into_inner();
+
+        // First time this identity is accepted anywhere: remember the
+        // session id it was issued as its provenance breadcrumb.
+        if presenting_identity {
+            identity.record_origin(&reg.client_id);
+        }
 
         let client_id = reg.client_id;
         let audio_token = reg.audio_token;

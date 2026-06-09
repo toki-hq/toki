@@ -22,7 +22,19 @@ use tonic::Status;
 use toki_proto::admin::v1 as pb;
 
 use crate::metrics::{SharedByteCounters, SharedLiveRate};
-use crate::state::{SharedChannelNames, SharedRegistry};
+use crate::state::{Client, SharedChannelNames, SharedRegistry};
+
+/// Copy a session's verified identity (if any) onto the wire member.
+/// Identity-less sessions keep the proto defaults (empty/0) — the UI
+/// reads that as "no identity".
+fn fill_member_identity(m: &mut pb::Member, c: &Client) {
+    if let Some(identity) = &c.identity {
+        m.identity = identity.display_id.clone();
+        m.identity_pubkey = identity.pubkey_hex.clone();
+        m.identity_machine_hash = identity.machine_hash.clone();
+        m.identity_first_seen_unix = identity.first_seen.max(0) as u64;
+    }
+}
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
 /// result out to `Watch` subscribers. 1 Hz is plenty for an admin
@@ -111,13 +123,18 @@ pub async fn snapshot_now(
                 .members
                 .iter()
                 .filter_map(|id| r.clients.get(id))
-                .map(|c| pb::Member {
-                    id: c.id.clone(),
-                    display_name: c.display_name.clone(),
-                    connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
-                    // Priority is per-channel: priority only if the elected
-                    // frequency is the room we're listing them under.
-                    priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                .map(|c| {
+                    let mut m = pb::Member {
+                        id: c.id.clone(),
+                        display_name: c.display_name.clone(),
+                        connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                        // Priority is per-channel: priority only if the elected
+                        // frequency is the room we're listing them under.
+                        priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                        ..Default::default()
+                    };
+                    fill_member_identity(&mut m, c);
+                    m
                 })
                 .collect();
             pb::Room {
@@ -134,11 +151,16 @@ pub async fn snapshot_now(
         .clients
         .values()
         .filter(|c| c.current_frequency.is_none())
-        .map(|c| pb::Member {
-            id: c.id.clone(),
-            display_name: c.display_name.clone(),
-            connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
-            priority: false,
+        .map(|c| {
+            let mut m = pb::Member {
+                id: c.id.clone(),
+                display_name: c.display_name.clone(),
+                connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                priority: false,
+                ..Default::default()
+            };
+            fill_member_identity(&mut m, c);
+            m
         })
         .collect();
 
@@ -180,6 +202,7 @@ mod tests {
     fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         Client {
             id: id.to_string(),
+            identity: None,
             display_name: name.to_string(),
             audio_token_hash: [0u8; crate::state::TOKEN_HASH_LEN],
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],

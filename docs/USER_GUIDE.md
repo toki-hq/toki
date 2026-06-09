@@ -289,6 +289,30 @@ Schema:
 |---|---|---|
 | `RUST_LOG` | `info` | tracing filter. Note: on Windows release builds the process has no console attached, so logs are silently dropped. |
 
+### Client identity
+
+On first connect the client mints a persistent, keypair-backed **identity**
+and stores it next to the config as `identity.toml` (chmod `0600` — the key
+is exactly as sensitive as the stored server password):
+
+- The identity **is** an ed25519 public key. It's displayed everywhere as
+  the key's 8-character fingerprint (e.g. `7Q4XF9KB`) — purely derived from
+  the key, so renaming yourself never changes your identity string.
+- At register, the client signs a server-issued challenge with the private
+  key, so an identity string seen in the admin panel or audit log can't be
+  claimed by someone who merely saw it.
+- A **machine fingerprint** travels alongside: a salted BLAKE3 hash of the
+  OS machine id (Linux `/etc/machine-id`, macOS `IOPlatformUUID`, Windows
+  `MachineGuid`). The raw identifier never leaves your machine — servers see
+  only the hash. Deleting `identity.toml` mints a fresh identity, but the
+  machine hash stays the same, so operators can spot config-wipe ban evasion.
+- Connecting to an older server (or one without identity support) silently
+  falls back to an identity-less session — exactly the pre-0.5 behavior.
+
+To **reset** your identity, delete `identity.toml` and reconnect. To **move**
+it to another machine, copy the file (the identity follows the key; the
+machine hash updates to the new hardware).
+
 ## Usage
 
 ### Starting the server
@@ -424,11 +448,19 @@ Per-client actions in the roster: **kick**, **move** (to another frequency),
 **rename** (broadcasts `DisplayNameChanged`), and **priority** (elect/clear a
 priority speaker on a channel).
 
+Members that registered with a verified **client identity** show a
+fingerprint badge with their durable identity string (e.g. `7Q4XF9KB`)
+next to the display name; hover it for the full public key, the machine-hash
+prefix, and when this identity was first seen by the server. The connect line
+in the audit log carries the same identity, so a renamed or reconnected
+client stays attributable.
+
 ### API surface (server)
 
 | Endpoint / RPC | Surface | Notes |
 |---|---|---|
-| `Signaling.Register` | gRPC | Sends `client_version`; returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR. Rate-limited per IP. |
+| `Signaling.Register` | gRPC | Sends `client_version` + optional signed identity (pubkey, challenge nonce, signature, machine hash); returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR and a present-but-invalid identity. Rate-limited per IP. |
+| `Signaling.IdentityChallenge` | gRPC | Issues a short-lived (~60 s), stateless nonce the client signs in the subsequent `Register` to prove possession of its identity key. |
 | `Signaling.Join` | gRPC server-stream | Pushes `Event`s (members joined/left, PTT, frequency change, rename, channel-name change). |
 | `Signaling.Leave` | gRPC | Explicit disconnect. |
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |

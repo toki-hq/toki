@@ -524,6 +524,15 @@ impl Session {
                 // (see toki_proto::version) so an out-of-date client gets
                 // a clear "please update" instead of silently broken audio.
                 client_version: env!("CARGO_PKG_VERSION").into(),
+                // Identity fields stay empty until the client identity
+                // module ships (keygen + IdentityChallenge + signing);
+                // an empty pubkey means "register identity-less".
+                identity_pubkey: Vec::new(),
+                challenge_nonce: Vec::new(),
+                identity_signature: Vec::new(),
+                machine_hash: String::new(),
+                origin_client_id: String::new(),
+                first_callsign: String::new(),
             })
             .await?
             .into_inner();

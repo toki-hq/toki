@@ -10,8 +10,8 @@ use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
     ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelNameChanged, Event, FrequencyChanged,
-    JoinRequest, LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PttAck, PttEvent,
-    RegisterRequest, RegisterResponse,
+    IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse,
+    MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest, RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
@@ -351,6 +351,21 @@ impl Signaling for SignalingSvc {
             opus_enabled,
             opus_bitrate,
         }))
+    }
+
+    /// Client-identity challenge — **not implemented yet**. The proto
+    /// contract landed ahead of the server-side identity work; until
+    /// the stateless HMAC nonce issuance ships, probing clients get a
+    /// clean UNIMPLEMENTED (which they treat as "this server has no
+    /// identity support" and register identity-less) rather than a
+    /// junk nonce that would fail verification later.
+    async fn identity_challenge(
+        &self,
+        _request: Request<IdentityChallengeRequest>,
+    ) -> Result<Response<IdentityChallengeResponse>, Status> {
+        Err(Status::unimplemented(
+            "client identity is not yet supported on this server",
+        ))
     }
 
     async fn join(

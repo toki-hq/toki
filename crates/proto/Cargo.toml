@@ -6,6 +6,10 @@ edition.workspace = true
 [dependencies]
 tonic = { workspace = true }
 prost = { workspace = true }
+# Identity display-string derivation (`identity` module) — the
+# fingerprint must hash identically on client and server, so the
+# helper lives here in the shared contract crate.
+blake3 = "1"
 
 [build-dependencies]
 tonic-build = { workspace = true }

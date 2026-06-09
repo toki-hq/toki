@@ -4987,6 +4987,7 @@ dependencies = [
 name = "toki-proto"
 version = "0.4.2"
 dependencies = [
+ "blake3",
  "prost",
  "tonic",
  "tonic-build",

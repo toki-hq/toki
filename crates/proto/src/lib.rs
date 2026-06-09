@@ -159,6 +159,187 @@ pub mod version {
     }
 }
 
+/// Client-identity contract shared by the client (generates + signs) and
+/// the server (verifies + displays).
+///
+/// An identity is a client-generated **ed25519 keypair**; the public key
+/// *is* the identity. At register the client proves possession of the
+/// private key by signing a server-issued challenge nonce (see
+/// `Signaling.IdentityChallenge` + the `RegisterRequest` identity
+/// fields), so an identity string seen in the admin panel or audit log
+/// cannot be replayed by an observer.
+///
+/// The derivations below are a **cross-version contract**: the display
+/// string and machine hash must compute identically on every client and
+/// server build, forever — changing them silently renames every user.
+/// Hence the pinned golden vectors in the tests.
+pub mod identity {
+    /// ed25519 public-key length, bytes.
+    pub const PUBKEY_LEN: usize = 32;
+    /// ed25519 signature length, bytes.
+    pub const SIGNATURE_LEN: usize = 64;
+    /// Longest callsign embedded in a display id — matches the client's
+    /// display-name length limit.
+    pub const MAX_CALLSIGN_LEN: usize = 10;
+
+    /// Domain-separation prefix for register-challenge signatures. The
+    /// client signs `SIGN_DOMAIN || nonce`, never the bare nonce, so a
+    /// register signature can't double as authorization in any other
+    /// (future) signing context.
+    pub const SIGN_DOMAIN: &[u8] = b"toki-register-v1";
+
+    /// Domain prefix mixed into the machine-fingerprint hash so it can't
+    /// collide with any other BLAKE3 use of the same machine id.
+    pub const MACHINE_FP_DOMAIN: &[u8] = b"toki-machine-fp-v1";
+
+    /// The exact byte string an identity signs to answer a register
+    /// challenge: `SIGN_DOMAIN || nonce`. Built here (and only here) so
+    /// the client's signer and the server's verifier can never drift.
+    pub fn signing_payload(nonce: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(SIGN_DOMAIN.len() + nonce.len());
+        out.extend_from_slice(SIGN_DOMAIN);
+        out.extend_from_slice(nonce);
+        out
+    }
+
+    /// Normalize a raw display name into the callsign embedded in a
+    /// display id: ASCII-alphanumeric only, uppercased, truncated to
+    /// [`MAX_CALLSIGN_LEN`]. An input that normalizes to nothing (e.g.
+    /// all emoji) falls back to `"TOKI"` so the display id always has a
+    /// readable prefix.
+    pub fn normalize_callsign(raw: &str) -> String {
+        let cleaned: String = raw
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .map(|c| c.to_ascii_uppercase())
+            .take(MAX_CALLSIGN_LEN)
+            .collect();
+        if cleaned.is_empty() {
+            "TOKI".into()
+        } else {
+            cleaned
+        }
+    }
+
+    /// 8-character base32 fingerprint of a public key: the first 5 bytes
+    /// (40 bits) of `BLAKE3(pubkey)`, RFC 4648 alphabet, no padding.
+    /// Collision-safe for *display* (the canonical key server-side is
+    /// always the full pubkey), wide enough that two members matching by
+    /// accident is a non-event.
+    pub fn fingerprint(pubkey: &[u8]) -> String {
+        let hash = blake3::hash(pubkey);
+        base32_40bits(&hash.as_bytes()[..5])
+    }
+
+    /// Human-readable identity string: `<CALLSIGN>-<FINGERPRINT>`, e.g.
+    /// `COTON-7Q4XF9KB`. The callsign is fixed at identity generation
+    /// (it does not track later display-name changes); the fingerprint
+    /// derives from the public key alone, so the id survives moving the
+    /// key file to a new machine.
+    pub fn display_id(first_callsign: &str, pubkey: &[u8]) -> String {
+        format!(
+            "{}-{}",
+            normalize_callsign(first_callsign),
+            fingerprint(pubkey)
+        )
+    }
+
+    /// Salted machine-fingerprint hash, lowercase hex:
+    /// `BLAKE3(MACHINE_FP_DOMAIN || machine_id)` where `machine_id` is
+    /// the OS machine identifier (falling back to a primary MAC). The
+    /// raw id is trimmed + ASCII-lowercased first so platform formatting
+    /// quirks (trailing newline in `/etc/machine-id`, uppercase Windows
+    /// GUIDs) don't fork the hash. Sent alongside the identity — never
+    /// inside its derivation — purely as a wipe-resistant correlation
+    /// attribute; the raw machine id never leaves the machine.
+    pub fn machine_hash(machine_id: &str) -> String {
+        let canonical = machine_id.trim().to_ascii_lowercase();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MACHINE_FP_DOMAIN);
+        hasher.update(canonical.as_bytes());
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// RFC 4648 base32 (uppercase, unpadded) of exactly 5 bytes → 8
+    /// chars. Hand-rolled because this is the only base32 in the tree —
+    /// a dependency for 8 characters isn't worth it.
+    fn base32_40bits(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        debug_assert_eq!(bytes.len(), 5);
+        let v = bytes.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+        (0..8)
+            .rev()
+            .map(|i| ALPHABET[((v >> (i * 5)) & 0x1f) as usize] as char)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::identity::*;
+
+    #[test]
+    fn signing_payload_is_domain_separated() {
+        let payload = signing_payload(b"nonce-bytes");
+        assert!(payload.starts_with(SIGN_DOMAIN));
+        assert!(payload.ends_with(b"nonce-bytes"));
+        assert_eq!(payload.len(), SIGN_DOMAIN.len() + 11);
+    }
+
+    #[test]
+    fn normalize_callsign_cleans_and_truncates() {
+        assert_eq!(normalize_callsign("coton"), "COTON");
+        assert_eq!(normalize_callsign("Coton 42!"), "COTON42");
+        assert_eq!(normalize_callsign("ABCDEFGHIJKLMNOP"), "ABCDEFGHIJ"); // ≤10
+        assert_eq!(normalize_callsign("🦀🦀🦀"), "TOKI"); // nothing left → fallback
+        assert_eq!(normalize_callsign(""), "TOKI");
+    }
+
+    #[test]
+    fn fingerprint_is_8_base32_chars_and_key_specific() {
+        let fp_a = fingerprint(&[0xAA; 32]);
+        let fp_b = fingerprint(&[0xBB; 32]);
+        assert_eq!(fp_a.len(), 8);
+        assert!(fp_a
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
+        assert_ne!(fp_a, fp_b);
+        assert_eq!(fp_a, fingerprint(&[0xAA; 32]), "deterministic");
+    }
+
+    #[test]
+    fn display_id_formats_callsign_dash_fingerprint() {
+        let id = display_id("coton", &[0xAA; 32]);
+        let (callsign, fp) = id.split_once('-').expect("dash separator");
+        assert_eq!(callsign, "COTON");
+        assert_eq!(fp, fingerprint(&[0xAA; 32]));
+    }
+
+    #[test]
+    fn machine_hash_is_canonicalized_hex() {
+        let h = machine_hash("ABC-123");
+        assert_eq!(h.len(), 64, "full blake3 hex");
+        assert_eq!(h, machine_hash("  abc-123\n"), "trim + case insensitive");
+        assert_ne!(h, machine_hash("abc-124"));
+        // Domain separation: the hash is NOT a bare blake3 of the id.
+        assert_ne!(h, blake3::hash(b"abc-123").to_hex().to_string());
+    }
+
+    /// Golden vectors — these derivations are a cross-version contract
+    /// (every client + server must agree forever, or users get silently
+    /// renamed). If this test fails you have CHANGED THE CONTRACT, not
+    /// found a bug: do not update the expected values without a
+    /// deliberate, versioned migration plan.
+    #[test]
+    fn derivations_match_pinned_golden_vectors() {
+        assert_eq!(fingerprint(&[0u8; 32]), GOLDEN_FP_ZERO_KEY);
+        assert_eq!(machine_hash("machine-id"), GOLDEN_MH_MACHINE_ID);
+    }
+    const GOLDEN_FP_ZERO_KEY: &str = "FLNIHQMB";
+    const GOLDEN_MH_MACHINE_ID: &str =
+        "2e58173453ce7646e8fa5691e192c918b94cc12f3377a21aa0cb420be896bcf3";
+}
+
 #[cfg(test)]
 mod version_tests {
     use super::version::{compatible, major_minor};

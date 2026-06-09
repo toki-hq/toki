@@ -10,7 +10,42 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIlEKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkSFgoOY2xpZW50X3ZlcnNpb24YAyABKAkilQEKEFJlZ2lzdGVyUmVzcG9uc2USEQoJY2xpZW50X2lkGAEgASgJEhMKC2F1ZGlvX3Rva2VuGAIgASgMEhYKDmF1ZGlvX2VuZHBvaW50GAMgASgJEhUKDWF1ZGlvX21hY19rZXkYBCABKAwSFAoMb3B1c19lbmFibGVkGAUgASgIEhQKDG9wdXNfYml0cmF0ZRgGIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2UisgIKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIlIKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIIggKBlB0dEFjazK+AgoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soAWIGcHJvdG8z");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIucBCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJEhYKDmZpcnN0X2NhbGxzaWduGAkgASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlIrICCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAQgcKBWV2ZW50IjcKDE1lbWJlckpvaW5lZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIh8KCk1lbWJlckxlZnQSEQoJY2xpZW50X2lkGAEgASgJIiUKEEZyZXF1ZW5jeUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJIj0KEkRpc3BsYXlOYW1lQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjUKEkNoYW5uZWxOYW1lQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSJSCghQdHRFdmVudBIRCgljbGllbnRfaWQYASABKAkSDwoHcHJlc3NlZBgCIAEoCBIQCghzZXF1ZW5jZRgDIAEoBBIQCghwcmlvcml0eRgEIAEoCCIICgZQdHRBY2symgMKCVNpZ25hbGluZxI/CghSZWdpc3RlchIYLnRva2kudjEuUmVnaXN0ZXJSZXF1ZXN0GhkudG9raS52MS5SZWdpc3RlclJlc3BvbnNlEi4KBEpvaW4SFC50b2tpLnYxLkpvaW5SZXF1ZXN0Gg4udG9raS52MS5FdmVudDABEjYKBUxlYXZlEhUudG9raS52MS5MZWF2ZVJlcXVlc3QaFi50b2tpLnYxLkxlYXZlUmVzcG9uc2USVAoPQ2hhbmdlRnJlcXVlbmN5Eh8udG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0GiAudG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXNwb25zZRIyCgpQdXNoVG9UYWxrEhEudG9raS52MS5QdHRFdmVudBoPLnRva2kudjEuUHR0QWNrKAESWgoRSWRlbnRpdHlDaGFsbGVuZ2USIS50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdBoiLnRva2kudjEuSWRlbnRpdHlDaGFsbGVuZ2VSZXNwb25zZWIGcHJvdG8z");
+
+/**
+ * @generated from message toki.v1.IdentityChallengeRequest
+ */
+export type IdentityChallengeRequest = Message<"toki.v1.IdentityChallengeRequest"> & {
+};
+
+/**
+ * Describes the message toki.v1.IdentityChallengeRequest.
+ * Use `create(IdentityChallengeRequestSchema)` to create a new message.
+ */
+export const IdentityChallengeRequestSchema: GenMessage<IdentityChallengeRequest> = /*@__PURE__*/
+  messageDesc(file_toki, 0);
+
+/**
+ * @generated from message toki.v1.IdentityChallengeResponse
+ */
+export type IdentityChallengeResponse = Message<"toki.v1.IdentityChallengeResponse"> & {
+  /**
+   * Opaque challenge blob. Stateless on the server side (it embeds a
+   * timestamp + HMAC, so no per-nonce table is kept); the client signs
+   * the domain-separated payload `"toki-register-v1" || nonce` and
+   * sends both the nonce and the signature in `Register`.
+   *
+   * @generated from field: bytes nonce = 1;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message toki.v1.IdentityChallengeResponse.
+ * Use `create(IdentityChallengeResponseSchema)` to create a new message.
+ */
+export const IdentityChallengeResponseSchema: GenMessage<IdentityChallengeResponse> = /*@__PURE__*/
+  messageDesc(file_toki, 1);
 
 /**
  * @generated from message toki.v1.RegisterRequest
@@ -44,6 +79,63 @@ export type RegisterRequest = Message<"toki.v1.RegisterRequest"> & {
    * @generated from field: string client_version = 3;
    */
   clientVersion: string;
+
+  /**
+   * 32-byte ed25519 public key. This *is* the identity — everything
+   * else (display string, attributes) derives from or attaches to it.
+   *
+   * @generated from field: bytes identity_pubkey = 4;
+   */
+  identityPubkey: Uint8Array;
+
+  /**
+   * The nonce obtained from `IdentityChallenge`, echoed verbatim.
+   *
+   * @generated from field: bytes challenge_nonce = 5;
+   */
+  challengeNonce: Uint8Array;
+
+  /**
+   * 64-byte ed25519 signature over `"toki-register-v1" || nonce`
+   * (domain-separated so a register signature can't be replayed in
+   * any other future signing context).
+   *
+   * @generated from field: bytes identity_signature = 6;
+   */
+  identitySignature: Uint8Array;
+
+  /**
+   * Salted hash of the machine identifier, as lowercase hex:
+   * BLAKE3("toki-machine-fp-v1" || machine_id) where machine_id is the
+   * OS machine id (falling back to a primary MAC). Never the raw
+   * value. Travels alongside the key — NOT inside its derivation — so
+   * the identity survives moving the key file to a new machine, while
+   * a config wipe yields a fresh identity but the *same* machine hash
+   * (ban-evasion correlation). Claimed, not provable.
+   *
+   * @generated from field: string machine_hash = 7;
+   */
+  machineHash: string;
+
+  /**
+   * The first session client_id this identity was ever assigned by any
+   * server, recorded at identity generation. Informational/claimed —
+   * a provenance breadcrumb, not an authenticated fact.
+   *
+   * @generated from field: string origin_client_id = 8;
+   */
+  originClientId: string;
+
+  /**
+   * Display name in use when the identity was generated, normalized
+   * (uppercase A-Z0-9, ≤10 chars). Embedded as the human-readable
+   * prefix of the identity display string, e.g. "COTON-7Q4XF9KB".
+   * Fixed at generation time — changing your display name later does
+   * not change your identity string.
+   *
+   * @generated from field: string first_callsign = 9;
+   */
+  firstCallsign: string;
 };
 
 /**
@@ -51,7 +143,7 @@ export type RegisterRequest = Message<"toki.v1.RegisterRequest"> & {
  * Use `create(RegisterRequestSchema)` to create a new message.
  */
 export const RegisterRequestSchema: GenMessage<RegisterRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 0);
+  messageDesc(file_toki, 2);
 
 /**
  * @generated from message toki.v1.RegisterResponse
@@ -113,7 +205,7 @@ export type RegisterResponse = Message<"toki.v1.RegisterResponse"> & {
  * Use `create(RegisterResponseSchema)` to create a new message.
  */
 export const RegisterResponseSchema: GenMessage<RegisterResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 1);
+  messageDesc(file_toki, 3);
 
 /**
  * @generated from message toki.v1.JoinRequest
@@ -137,7 +229,7 @@ export type JoinRequest = Message<"toki.v1.JoinRequest"> & {
  * Use `create(JoinRequestSchema)` to create a new message.
  */
 export const JoinRequestSchema: GenMessage<JoinRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 2);
+  messageDesc(file_toki, 4);
 
 /**
  * @generated from message toki.v1.LeaveRequest
@@ -154,7 +246,7 @@ export type LeaveRequest = Message<"toki.v1.LeaveRequest"> & {
  * Use `create(LeaveRequestSchema)` to create a new message.
  */
 export const LeaveRequestSchema: GenMessage<LeaveRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 3);
+  messageDesc(file_toki, 5);
 
 /**
  * @generated from message toki.v1.LeaveResponse
@@ -167,7 +259,7 @@ export type LeaveResponse = Message<"toki.v1.LeaveResponse"> & {
  * Use `create(LeaveResponseSchema)` to create a new message.
  */
 export const LeaveResponseSchema: GenMessage<LeaveResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 4);
+  messageDesc(file_toki, 6);
 
 /**
  * Move the client from their current frequency room to a new one. The
@@ -194,7 +286,7 @@ export type ChangeFrequencyRequest = Message<"toki.v1.ChangeFrequencyRequest"> &
  * Use `create(ChangeFrequencyRequestSchema)` to create a new message.
  */
 export const ChangeFrequencyRequestSchema: GenMessage<ChangeFrequencyRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 5);
+  messageDesc(file_toki, 7);
 
 /**
  * @generated from message toki.v1.ChangeFrequencyResponse
@@ -207,7 +299,7 @@ export type ChangeFrequencyResponse = Message<"toki.v1.ChangeFrequencyResponse">
  * Use `create(ChangeFrequencyResponseSchema)` to create a new message.
  */
 export const ChangeFrequencyResponseSchema: GenMessage<ChangeFrequencyResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 6);
+  messageDesc(file_toki, 8);
 
 /**
  * @generated from message toki.v1.Event
@@ -278,7 +370,7 @@ export type Event = Message<"toki.v1.Event"> & {
  * Use `create(EventSchema)` to create a new message.
  */
 export const EventSchema: GenMessage<Event> = /*@__PURE__*/
-  messageDesc(file_toki, 7);
+  messageDesc(file_toki, 9);
 
 /**
  * @generated from message toki.v1.MemberJoined
@@ -300,7 +392,7 @@ export type MemberJoined = Message<"toki.v1.MemberJoined"> & {
  * Use `create(MemberJoinedSchema)` to create a new message.
  */
 export const MemberJoinedSchema: GenMessage<MemberJoined> = /*@__PURE__*/
-  messageDesc(file_toki, 8);
+  messageDesc(file_toki, 10);
 
 /**
  * @generated from message toki.v1.MemberLeft
@@ -317,7 +409,7 @@ export type MemberLeft = Message<"toki.v1.MemberLeft"> & {
  * Use `create(MemberLeftSchema)` to create a new message.
  */
 export const MemberLeftSchema: GenMessage<MemberLeft> = /*@__PURE__*/
-  messageDesc(file_toki, 9);
+  messageDesc(file_toki, 11);
 
 /**
  * @generated from message toki.v1.FrequencyChanged
@@ -334,7 +426,7 @@ export type FrequencyChanged = Message<"toki.v1.FrequencyChanged"> & {
  * Use `create(FrequencyChangedSchema)` to create a new message.
  */
 export const FrequencyChangedSchema: GenMessage<FrequencyChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 10);
+  messageDesc(file_toki, 12);
 
 /**
  * @generated from message toki.v1.DisplayNameChanged
@@ -356,7 +448,7 @@ export type DisplayNameChanged = Message<"toki.v1.DisplayNameChanged"> & {
  * Use `create(DisplayNameChangedSchema)` to create a new message.
  */
 export const DisplayNameChangedSchema: GenMessage<DisplayNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 11);
+  messageDesc(file_toki, 13);
 
 /**
  * The admin-assigned name of a frequency channel (≤16 chars). An empty
@@ -383,7 +475,7 @@ export type ChannelNameChanged = Message<"toki.v1.ChannelNameChanged"> & {
  * Use `create(ChannelNameChangedSchema)` to create a new message.
  */
 export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 12);
+  messageDesc(file_toki, 14);
 
 /**
  * @generated from message toki.v1.PttEvent
@@ -424,7 +516,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 13);
+  messageDesc(file_toki, 15);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -437,7 +529,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 14);
+  messageDesc(file_toki, 16);
 
 /**
  * Signaling service for the Toki walkie-talkie network.
@@ -495,6 +587,24 @@ export const Signaling: GenService<{
     methodKind: "client_streaming";
     input: typeof PttEventSchema;
     output: typeof PttAckSchema;
+  },
+  /**
+   * Fetch a short-lived challenge nonce to sign in the subsequent
+   * `Register` call. Part of the optional client-identity handshake:
+   * the client proves possession of its ed25519 private key by signing
+   * the nonce (see `RegisterRequest.identity_signature`), which stops
+   * anyone who merely *sees* an identity string (admin panel, audit
+   * log) from impersonating it. The nonce is opaque to the client —
+   * echo it back verbatim. It expires after ~60 s; on a stale-nonce
+   * rejection from Register, fetch a fresh one and retry.
+   * Identity-less clients never call this.
+   *
+   * @generated from rpc toki.v1.Signaling.IdentityChallenge
+   */
+  identityChallenge: {
+    methodKind: "unary";
+    input: typeof IdentityChallengeRequestSchema;
+    output: typeof IdentityChallengeResponseSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_toki, 0);

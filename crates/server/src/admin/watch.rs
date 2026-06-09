@@ -118,6 +118,12 @@ pub async fn snapshot_now(
                     // Priority is per-channel: priority only if the elected
                     // frequency is the room we're listing them under.
                     priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                    // Identity fields stay empty until the registry carries
+                    // verified identities (server-side identity work).
+                    identity: String::new(),
+                    identity_pubkey: String::new(),
+                    identity_machine_hash: String::new(),
+                    identity_first_seen_unix: 0,
                 })
                 .collect();
             pb::Room {
@@ -139,6 +145,12 @@ pub async fn snapshot_now(
             display_name: c.display_name.clone(),
             connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
             priority: false,
+            // Identity fields stay empty until the registry carries
+            // verified identities (server-side identity work).
+            identity: String::new(),
+            identity_pubkey: String::new(),
+            identity_machine_hash: String::new(),
+            identity_first_seen_unix: 0,
         })
         .collect();
 

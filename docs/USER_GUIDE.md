@@ -466,10 +466,25 @@ server refuses their PTT presses (`SetMute`), so they stay connected and keep
 hearing the channel — the gentle lever between doing nothing and a kick/ban.
 Muting whoever currently holds the floor drops it on the spot so the channel
 isn't stuck on a now-silent talker; the muted client gets a "muted by an
-operator" cue and stops uploading. Mute is **session-scoped** (it clears if
-they reconnect) and audited; the roster shows a **MUTED** badge. Enforcement
-runs through a single relay-side speak-gate that the planned No-Talk channels
-will reuse (default-deny + grant).
+operator" cue and its PTT button goes red ("UNABLE TO TALK"). Mute is
+**session-scoped** (it clears if they reconnect) and audited; the roster shows
+a **MUTED** badge.
+
+**Channel mute / No-Talk channels** mute a *whole frequency* (`SetChannelMute`):
+while a channel is muted, nobody tuned there may take the floor — **except a
+priority speaker**, who keeps their voice. That's the "stage" / "town-hall"
+model: a default-muted channel where you grant voice by promoting a member to
+**priority speaker** on it. Moving to another (unmuted) channel restores
+transmit instantly, since the gate is keyed on the member's current frequency.
+An individual **member mute** still outranks a priority grant — a personally
+muted speaker stays silent even on a channel where they'd otherwise be the
+granted voice. Channel mutes are persisted (across restarts and occupancy, so
+you can pre-mute an empty channel) and audited; the panel shows a **MUTED**
+badge and a per-channel toggle.
+
+Both mutes run through a single relay-side **speak-gate**
+(`member_muted || (channel_muted && !priority)`), so the No-Talk behaviour is
+just "default-deny + priority grant" on the same check the per-member mute uses.
 
 **Ban** kicks the session and blocks its *identity* from registering again,
 with an optional reason echoed to the banned client and an optional **machine

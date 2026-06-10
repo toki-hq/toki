@@ -39,6 +39,14 @@ pub struct ClientState {
     /// change so a stale mute never sticks to the wrong channel. Folds
     /// into the local "can I talk" check alongside our own member-mute.
     pub channel_muted: bool,
+    /// `true` when *we* are a priority speaker on the current channel
+    /// (admin-granted, per-channel). Delivered by `PriorityChanged` on
+    /// grant/revoke and on change-frequency; cleared on every frequency
+    /// change (the server re-asserts it for the new channel). A priority
+    /// speaker is the No-Talk exception — they keep a live PTT button
+    /// even on a muted channel — so this *overrides* `channel_muted` in
+    /// `locally_silenced` (but never an individual member-mute).
+    pub channel_priority: bool,
     pub log: VecDeque<String>,
 }
 
@@ -77,16 +85,19 @@ impl ClientState {
         self.muted.contains(client_id)
     }
 
-    /// Are *we* currently barred from transmitting? True when an
-    /// operator has muted us personally (member-mute) or muted the
-    /// channel we're tuned to (channel-mute). The server enforces both
-    /// regardless; this drives the PTT button's "unable to talk" cue.
+    /// Are *we* currently barred from transmitting? Mirrors the server's
+    /// speak-gate so the PTT "unable to talk" cue matches what the server
+    /// will actually do:
+    ///   * member-mute (we're individually silenced) always bars us —
+    ///     an individual sanction outranks any channel grant;
+    ///   * otherwise channel-mute bars us, *unless* we're a priority
+    ///     speaker on this channel (the No-Talk granted-voice exception).
     pub fn locally_silenced(&self) -> bool {
-        self.channel_muted
-            || self
-                .self_id
-                .as_deref()
-                .is_some_and(|id| self.muted.contains(id))
+        let member_muted = self
+            .self_id
+            .as_deref()
+            .is_some_and(|id| self.muted.contains(id));
+        member_muted || (self.channel_muted && !self.channel_priority)
     }
 }
 
@@ -137,5 +148,27 @@ mod tests {
         // Another member's mute never silences *us*.
         s.set_muted("someone-else", true);
         assert!(!s.locally_silenced());
+    }
+
+    #[test]
+    fn priority_speaker_overrides_channel_mute_but_not_member_mute() {
+        let mut s = ClientState {
+            self_id: Some("me".into()),
+            ..Default::default()
+        };
+        // No-Talk channel: muted, but we're a priority speaker → we can
+        // still talk (the granted-voice exception).
+        s.channel_muted = true;
+        s.channel_priority = true;
+        assert!(!s.locally_silenced());
+        // A personal member-mute outranks the priority grant — still silenced.
+        s.set_muted("me", true);
+        assert!(s.locally_silenced());
+        // Lift the member-mute: priority exception applies again.
+        s.set_muted("me", false);
+        assert!(!s.locally_silenced());
+        // Lose priority on a still-muted channel → silenced once more.
+        s.channel_priority = false;
+        assert!(s.locally_silenced());
     }
 }

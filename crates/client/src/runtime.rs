@@ -821,6 +821,11 @@ impl Session {
                             // channel and you can talk again" feel instant.
                             st.channel_name = None;
                             st.channel_muted = false;
+                            // Priority is per-channel; the server re-asserts
+                            // it for the new freq via PriorityChanged right
+                            // after this. Clear so a grant bound to the old
+                            // channel doesn't leak its No-Talk exemption here.
+                            st.channel_priority = false;
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
                         Some(Ev::DisplayNameChanged(dnc)) => {
@@ -898,18 +903,52 @@ impl Session {
                             if st.frequency.as_deref() == Some(cmc.frequency.as_str()) {
                                 let was = st.channel_muted;
                                 st.channel_muted = cmc.muted;
-                                // Our overall "can I talk" state is mute OR
-                                // channel-mute; mirror it into the session
-                                // gate so the mic loop sees it immediately.
+                                // Our overall "can I talk" state folds
+                                // member-mute, channel-mute, and the
+                                // priority exception; mirror it into the
+                                // session gate so the mic loop sees it
+                                // immediately.
+                                let silenced = st.locally_silenced();
+                                self_muted_for_events.store(silenced, Ordering::Relaxed);
+                                // Only drop a held press if the mute actually
+                                // silences *us* — a priority speaker on this
+                                // channel keeps the floor.
+                                if silenced {
+                                    ptt_for_events.store(false, Ordering::Relaxed);
+                                }
+                                if cmc.muted && !was {
+                                    if silenced {
+                                        st.log("🔇 This channel was muted by an operator");
+                                    } else {
+                                        st.log("🔇 Channel muted — you may still talk (priority)");
+                                    }
+                                } else if !cmc.muted && was {
+                                    st.log("🔊 This channel was unmuted");
+                                }
+                            }
+                        }
+                        Some(Ev::PriorityChanged(pc)) => {
+                            // Our priority standing on a channel changed
+                            // (or was delivered on change-frequency).
+                            // Apply only when it's addressed to us and for
+                            // the frequency we're tuned to. Priority is the
+                            // No-Talk exception: a priority speaker keeps a
+                            // live PTT button on a muted channel, so this
+                            // can *re-open* the gate that channel-mute shut.
+                            let mut st = state_for_events.lock().unwrap();
+                            let for_us = pc.client_id == self_id_for_events;
+                            let for_here = st.frequency.as_deref() == Some(pc.frequency.as_str());
+                            if for_us && for_here {
+                                let was = st.channel_priority;
+                                st.channel_priority = pc.granted;
+                                // Re-mirror the combined gate so the mic
+                                // loop reflects the new standing at once.
                                 self_muted_for_events
                                     .store(st.locally_silenced(), Ordering::Relaxed);
-                                if cmc.muted {
-                                    ptt_for_events.store(false, Ordering::Relaxed);
-                                    if !was {
-                                        st.log("🔇 This channel was muted by an operator");
-                                    }
-                                } else if was {
-                                    st.log("🔊 This channel was unmuted");
+                                if pc.granted && !was {
+                                    st.log("⚡ You are a priority speaker here");
+                                } else if !pc.granted && was {
+                                    st.log("⚡ Priority speaker status removed");
                                 }
                             }
                         }

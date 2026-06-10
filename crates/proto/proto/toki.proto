@@ -179,6 +179,15 @@ message Event {
     // current tuning: while its channel is muted it can't transmit and
     // the PTT button shows the disabled "unable to talk" cue.
     ChannelMuteChanged channel_mute_changed = 8;
+    // Sent to a member when an admin grants or revokes their *priority
+    // speaker* standing (see Admin.SetPriority), and on Join /
+    // ChangeFrequency to deliver current standing. Addressed only to the
+    // subject (priority is a per-session, per-channel grant). The client
+    // tracks it so a priority speaker on a muted (No-Talk) channel keeps
+    // a live PTT button instead of the "unable to talk" cue — they are
+    // the granted-voice exception. `frequency` is the channel the grant
+    // is bound to; `granted = false` clears it.
+    PriorityChanged priority_changed = 9;
   }
 }
 
@@ -220,6 +229,16 @@ message MuteChanged {
 message ChannelMuteChanged {
   string frequency = 1;
   bool muted = 2;
+}
+
+// A member's priority-speaker standing changed (see Admin.SetPriority),
+// or current standing delivered on Join / ChangeFrequency. Addressed to
+// the subject only. `frequency` is the channel the grant is bound to
+// (empty when revoked).
+message PriorityChanged {
+  string client_id = 1;
+  string frequency = 2;
+  bool granted = 3;
 }
 
 message PttEvent {

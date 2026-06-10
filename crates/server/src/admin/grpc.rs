@@ -27,7 +27,7 @@ use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
     event, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
-    MemberJoined, MemberLeft, MuteChanged, PttEvent,
+    MemberJoined, MemberLeft, MuteChanged, PriorityChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -855,11 +855,18 @@ impl Admin for AdminApi {
         let admin = self.authenticated(&req).await?;
         let pb::SetPriorityRequest { id, grant } = req.into_inner();
 
-        let bound_freq = {
+        // `bound_freq` is the channel priority is now bound to (Some on
+        // grant, None on revoke). `notify_freq` is the channel to stamp
+        // into the PriorityChanged we send the subject — the new freq on
+        // grant, or the one we just cleared on revoke (so the client
+        // knows which channel's PTT cue to refresh). `subject_tx` is the
+        // subject's own event stream, if connected.
+        let (bound_freq, notify_freq, subject_tx) = {
             let mut registry = self.state.registry.lock().await;
             let Some(client) = registry.clients.get_mut(&id) else {
                 return Err(Status::not_found("client not found"));
             };
+            let tx = client.events_tx.clone();
             if grant {
                 let Some(freq) = client.current_frequency.clone() else {
                     return Err(Status::failed_precondition(
@@ -867,10 +874,12 @@ impl Admin for AdminApi {
                     ));
                 };
                 client.priority_freq = Some(freq.clone());
-                Some(freq)
+                (Some(freq.clone()), freq, tx)
             } else {
-                client.priority_freq = None;
-                None
+                // Remember the channel the grant was bound to so the
+                // revoke notification carries it.
+                let prev = client.priority_freq.take().unwrap_or_default();
+                (None, prev, tx)
             }
         };
 
@@ -894,6 +903,21 @@ impl Admin for AdminApi {
                 "revoked priority"
             },
         );
+
+        // Tell the subject so its PTT button reflects the new standing —
+        // a priority speaker on a muted (No-Talk) channel keeps a live
+        // button instead of the "unable to talk" cue.
+        if let Some(tx) = subject_tx {
+            let ev = Event {
+                event: Some(event::Event::PriorityChanged(PriorityChanged {
+                    client_id: id.clone(),
+                    frequency: notify_freq,
+                    granted: bound_freq.is_some(),
+                })),
+            };
+            let _ = tx.send(ev).await;
+        }
+
         self.push_snapshot().await;
         Ok(Response::new(pb::SetPriorityResponse {}))
     }

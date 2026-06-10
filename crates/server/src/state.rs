@@ -85,6 +85,26 @@ pub struct Client {
     /// onto the session so snapshots + audit lines never have to
     /// touch the shared identity map.
     pub identity: Option<ClientIdentity>,
+    /// Server-side mute: while `true`, the relay's speak-gate refuses
+    /// this session's PTT presses (see [`Client::can_speak`]). The
+    /// member stays connected and keeps receiving the channel; they
+    /// just can't transmit. Set by the admin `SetMute` RPC, cleared on
+    /// disconnect — session-scoped, like `priority_freq`. The durable,
+    /// identity-keyed tier is a deliberate later slice.
+    pub muted: bool,
+}
+
+impl Client {
+    /// The relay-side **speak gate**: may this session take/hold the
+    /// PTT floor right now? Today the only veto is an admin mute, but
+    /// this is intentionally the single chokepoint every "can this
+    /// member transmit" decision flows through — both the signaling
+    /// PTT-arbitration path and the UDP relay backstop call it, and
+    /// No-Talk channels (default-deny + per-member grant) will extend
+    /// the same check rather than bolting on a parallel one.
+    pub fn can_speak(&self) -> bool {
+        !self.muted
+    }
 }
 
 /// The session-facing slice of a verified identity — exactly what
@@ -168,6 +188,22 @@ pub type SharedChannelNames = Arc<RwLock<HashMap<String, String>>>;
 /// Build a shared channel-name map from an initial snapshot (typically
 /// `AdminDb::load_channel_names` at boot, or empty for headless runs).
 pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNames {
+    Arc::new(RwLock::new(initial))
+}
+
+/// Channel-wide mutes — the set of canonical frequencies on which no one
+/// may transmit (see the admin `SetChannelMute` RPC). Written by the
+/// admin handlers, read by the signaling PTT path and the UDP relay's
+/// speak-gate (keyed by the sender's current frequency). Same
+/// writer/reader split and off-`Registry` rationale as
+/// [`SharedChannelNames`]: a mute persists independently of room
+/// occupancy (you can mute an empty channel), and reads dominate.
+/// Hydrated from the `channel_mutes` table at boot.
+pub type SharedChannelMutes = Arc<RwLock<std::collections::HashSet<String>>>;
+
+/// Build a shared channel-mute set from an initial snapshot (typically
+/// `AdminDb::load_channel_mutes` at boot, or empty for tests).
+pub fn shared_channel_mutes(initial: std::collections::HashSet<String>) -> SharedChannelMutes {
     Arc::new(RwLock::new(initial))
 }
 

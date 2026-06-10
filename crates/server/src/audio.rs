@@ -268,6 +268,23 @@ pub async fn run(
             // (addr, key, seq) triples while still under the lock,
             // bumping each peer's outbound seq as we go so two
             // back-to-back senders can't share a nonce.
+            // Speak-gate backstop. The signaling PTT path already
+            // refuses a muted member's press (and the SetMute handler
+            // drops the floor the instant a mute lands), so a muted
+            // sender normally fails `should_relay` below anyway. This
+            // direct check closes the narrow race where the member's
+            // final in-flight UDP frames arrive within the release-grace
+            // window after the floor was dropped out from under them —
+            // we don't want a just-muted talker's tail leaking out.
+            let sender_speaks = registry
+                .clients
+                .get(&sender_id)
+                .map(|c| c.can_speak())
+                .unwrap_or(false);
+            if !sender_speaks {
+                continue;
+            }
+
             let frequency = registry
                 .clients
                 .get(&sender_id)

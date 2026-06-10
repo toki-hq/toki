@@ -26,8 +26,8 @@ use tonic::{Request, Response, Status};
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged, MemberJoined,
-    MemberLeft, PttEvent,
+    event, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
+    MemberJoined, MemberLeft, MuteChanged, PriorityChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -107,6 +107,7 @@ impl AdminApi {
         let snap = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -234,6 +235,7 @@ impl Admin for AdminApi {
         let first = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -853,11 +855,18 @@ impl Admin for AdminApi {
         let admin = self.authenticated(&req).await?;
         let pb::SetPriorityRequest { id, grant } = req.into_inner();
 
-        let bound_freq = {
+        // `bound_freq` is the channel priority is now bound to (Some on
+        // grant, None on revoke). `notify_freq` is the channel to stamp
+        // into the PriorityChanged we send the subject — the new freq on
+        // grant, or the one we just cleared on revoke (so the client
+        // knows which channel's PTT cue to refresh). `subject_tx` is the
+        // subject's own event stream, if connected.
+        let (bound_freq, notify_freq, subject_tx) = {
             let mut registry = self.state.registry.lock().await;
             let Some(client) = registry.clients.get_mut(&id) else {
                 return Err(Status::not_found("client not found"));
             };
+            let tx = client.events_tx.clone();
             if grant {
                 let Some(freq) = client.current_frequency.clone() else {
                     return Err(Status::failed_precondition(
@@ -865,10 +874,12 @@ impl Admin for AdminApi {
                     ));
                 };
                 client.priority_freq = Some(freq.clone());
-                Some(freq)
+                (Some(freq.clone()), freq, tx)
             } else {
-                client.priority_freq = None;
-                None
+                // Remember the channel the grant was bound to so the
+                // revoke notification carries it.
+                let prev = client.priority_freq.take().unwrap_or_default();
+                (None, prev, tx)
             }
         };
 
@@ -892,8 +903,226 @@ impl Admin for AdminApi {
                 "revoked priority"
             },
         );
+
+        // Tell the subject so its PTT button reflects the new standing —
+        // a priority speaker on a muted (No-Talk) channel keeps a live
+        // button instead of the "unable to talk" cue.
+        if let Some(tx) = subject_tx {
+            let ev = Event {
+                event: Some(event::Event::PriorityChanged(PriorityChanged {
+                    client_id: id.clone(),
+                    frequency: notify_freq,
+                    granted: bound_freq.is_some(),
+                })),
+            };
+            let _ = tx.send(ev).await;
+        }
+
         self.push_snapshot().await;
         Ok(Response::new(pb::SetPriorityResponse {}))
+    }
+
+    async fn set_mute(
+        &self,
+        req: Request<pb::SetMuteRequest>,
+    ) -> Result<Response<pb::SetMuteResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetMuteRequest { id, muted } = req.into_inner();
+
+        // Apply the flag and, if we're muting the current floor-holder,
+        // drop the floor right here so the channel isn't left stuck on a
+        // now-silenced talker. Collect the room recipients under the lock
+        // for the post-release broadcast. `display_name` + `frequency`
+        // feed the audit line; `was_holder` decides the PttUp broadcast.
+        let (display_name, frequency, recipients, was_holder, changed) = {
+            let mut registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.get_mut(&id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            let changed = client.muted != muted;
+            client.muted = muted;
+            let display_name = client.display_name.clone();
+            let frequency = client.current_frequency.clone();
+
+            let mut was_holder = false;
+            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
+            if let Some(freq) = &frequency {
+                if muted {
+                    if let Some(room) = registry.rooms.get_mut(freq) {
+                        if room.holder.as_deref() == Some(id.as_str()) {
+                            // Floor held by the now-muted member: release
+                            // it and stamp the grace window so their final
+                            // in-flight UDP frames still flush cleanly
+                            // (mirrors a normal PttUp).
+                            room.holder = None;
+                            room.last_released = Some((id.clone(), std::time::Instant::now()));
+                            was_holder = true;
+                        }
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    for mid in &room.members {
+                        if let Some(c) = registry.clients.get(mid) {
+                            if let Some(tx) = &c.events_tx {
+                                recipients.push(tx.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            (display_name, frequency, recipients, was_holder, changed)
+        };
+
+        // No-op when the state already matched (idempotent: a
+        // double-click never double-logs or re-broadcasts).
+        if !changed {
+            return Ok(Response::new(pb::SetMuteResponse {}));
+        }
+
+        let mute_evt = Event {
+            event: Some(event::Event::MuteChanged(MuteChanged {
+                client_id: id.clone(),
+                muted,
+            })),
+        };
+        // If muting dropped the floor, tell the room the holder released
+        // so rosters clear the talking indicator immediately.
+        let release = was_holder.then(|| Event {
+            event: Some(event::Event::Ptt(PttEvent {
+                client_id: id.clone(),
+                pressed: false,
+                sequence: 0,
+                priority: false,
+            })),
+        });
+        for tx in recipients {
+            let _ = tx.send(mute_evt.clone()).await;
+            if let Some(ev) = &release {
+                let _ = tx.send(ev.clone()).await;
+            }
+        }
+
+        tracing::info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            target_name = %display_name,
+            muted,
+            "admin set mute",
+        );
+        audit::record(
+            &self.state.audit,
+            "mute",
+            &admin.0,
+            frequency.as_deref().unwrap_or(""),
+            &format!("{} {display_name}", if muted { "muted" } else { "unmuted" }),
+        );
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetMuteResponse {}))
+    }
+
+    async fn set_channel_mute(
+        &self,
+        req: Request<pb::SetChannelMuteRequest>,
+    ) -> Result<Response<pb::SetChannelMuteResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetChannelMuteRequest { frequency, muted } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+
+        // Persist + update the shared set in lockstep, idempotently.
+        // `changed` gates the audit line + broadcast so a re-mute is a
+        // quiet no-op.
+        let changed = if muted {
+            self.state
+                .db
+                .set_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state
+                .channel_mutes
+                .write()
+                .await
+                .insert(frequency.clone())
+        } else {
+            self.state
+                .db
+                .clear_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.channel_mutes.write().await.remove(&frequency)
+        };
+
+        // When muting, drop the floor if someone holds it on this channel
+        // so the room doesn't stay stuck on a now-silenced talker (with
+        // release-grace so their in-flight tail still flushes). Collect
+        // the room recipients under the lock for the broadcast below.
+        let (recipients, dropped_holder) = {
+            let mut registry = self.state.registry.lock().await;
+            let mut dropped_holder: Option<String> = None;
+            if muted {
+                if let Some(room) = registry.rooms.get_mut(&frequency) {
+                    if let Some(prev) = room.holder.take() {
+                        room.last_released = Some((prev.clone(), std::time::Instant::now()));
+                        dropped_holder = Some(prev);
+                    }
+                }
+            }
+            let recipients: Vec<mpsc::Sender<Event>> = registry
+                .rooms
+                .get(&frequency)
+                .map(|r| r.members.clone())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| registry.clients.get(id))
+                .filter_map(|c| c.events_tx.clone())
+                .collect();
+            (recipients, dropped_holder)
+        };
+
+        if changed {
+            tracing::info!(
+                admin_user = %admin.0,
+                frequency = %frequency,
+                muted,
+                "admin set channel mute",
+            );
+            audit::record(
+                &self.state.audit,
+                "channel-mute",
+                &admin.0,
+                &frequency,
+                if muted {
+                    "muted the channel"
+                } else {
+                    "unmuted the channel"
+                },
+            );
+
+            let evt = Event {
+                event: Some(event::Event::ChannelMuteChanged(ChannelMuteChanged {
+                    frequency: frequency.clone(),
+                    muted,
+                })),
+            };
+            // If muting dropped the floor, also tell the room the holder
+            // released so talking indicators clear immediately.
+            let release = dropped_holder.as_ref().map(|holder_id| Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: holder_id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                })),
+            });
+            for tx in recipients {
+                let _ = tx.send(evt.clone()).await;
+                if let Some(ev) = &release {
+                    let _ = tx.send(ev.clone()).await;
+                }
+            }
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelMuteResponse {}))
     }
 
     async fn set_channel_name(
@@ -1230,6 +1459,7 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            channel_mutes: crate::state::shared_channel_mutes(Default::default()),
             bans: crate::state::shared_bans(Default::default()),
             health: crate::metrics::shared_health(),
             live_rate: crate::metrics::shared_live_rate(),
@@ -1273,6 +1503,7 @@ mod tests {
             connected_at: Instant::now(),
             priority_freq: None,
             expected_ip: None,
+            muted: false,
         }
     }
 
@@ -1593,6 +1824,157 @@ mod tests {
         assert!(api.state.registry.lock().await.clients["cara"]
             .priority_freq
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn mute_unknown_is_not_found() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .set_mute(authed(
+                pb::SetMuteRequest {
+                    id: "ghost".into(),
+                    muted: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn mute_sets_and_clears_flag() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "dora", Some("447.00")).await;
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "dora".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.registry.lock().await.clients["dora"].muted);
+        assert!(!api.state.registry.lock().await.clients["dora"].can_speak());
+
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "dora".into(),
+                muted: false,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.registry.lock().await.clients["dora"].muted);
+        assert!(api.state.registry.lock().await.clients["dora"].can_speak());
+    }
+
+    #[tokio::test]
+    async fn muting_holder_drops_the_floor() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "evan", Some("447.00")).await;
+        // Evan holds the floor.
+        api.state
+            .registry
+            .lock()
+            .await
+            .rooms
+            .get_mut("447.00")
+            .unwrap()
+            .holder = Some("evan".into());
+
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "evan".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        let reg = api.state.registry.lock().await;
+        let room = &reg.rooms["447.00"];
+        // Floor freed, and the release-grace recorded so Evan's
+        // in-flight tail can still flush.
+        assert!(room.holder.is_none());
+        assert!(matches!(&room.last_released, Some((id, _)) if id == "evan"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_sets_and_clears_in_shared_set() {
+        let (api, token) = test_api(false).await;
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.channel_mutes.read().await.contains("446.05"));
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: false,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.channel_mutes.read().await.contains("446.05"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_rejects_bad_frequency() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .set_channel_mute(authed(
+                pb::SetChannelMuteRequest {
+                    frequency: "999.99".into(),
+                    muted: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn muting_channel_drops_its_holder() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "fred", Some("447.00")).await;
+        api.state
+            .registry
+            .lock()
+            .await
+            .rooms
+            .get_mut("447.00")
+            .unwrap()
+            .holder = Some("fred".into());
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "447.00".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        let reg = api.state.registry.lock().await;
+        let room = &reg.rooms["447.00"];
+        assert!(
+            room.holder.is_none(),
+            "muting the channel must free the floor"
+        );
+        assert!(matches!(&room.last_released, Some((id, _)) if id == "fred"));
     }
 
     #[tokio::test]

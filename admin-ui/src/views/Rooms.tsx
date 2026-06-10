@@ -11,6 +11,8 @@ import {
   Check,
   Fingerprint,
   Ban,
+  MicOff,
+  Mic,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -51,6 +53,12 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   // named frequencies, occupied or not). Names persist even while the
   // feature is off, so the toggle is fetched separately to gate editing.
   const names = snapshot?.channelNames ?? {};
+  // Channel-wide mutes (all muted frequencies, occupied or not). Used to
+  // flag synthetic empty rooms as muted too — you can mute an empty channel.
+  const mutedChannels = useMemo(
+    () => new Set(snapshot?.mutedChannels ?? []),
+    [snapshot],
+  );
   const [namedEnabled, setNamedEnabled] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
@@ -86,9 +94,14 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
     return ALL_FREQUENCIES.map(
       (f) =>
         byFreq.get(f) ??
-        ({ $typeName: "toki.admin.v1.Room", frequency: f, members: [] } as Room),
+        ({
+          $typeName: "toki.admin.v1.Room",
+          frequency: f,
+          members: [],
+          muted: mutedChannels.has(f),
+        } as Room),
     );
-  }, [rooms, activeOnly]);
+  }, [rooms, activeOnly, mutedChannels]);
 
   const visible = allRooms.filter((r) => {
     if (activeOnly && r.members.length === 0) return false;
@@ -235,8 +248,16 @@ function ChannelDetail({
         </span>
         <span className="text-xs text-muted-foreground">MHz · CH {channelNumber(room.frequency)}</span>
         {name && <span className="font-mono text-sm text-primary/90">“{name}”</span>}
-        <span className="ml-auto font-mono text-sm text-muted-foreground tabular">
-          {room.members.length} members
+        {room.muted && (
+          <Badge variant="destructive">
+            <MicOff className="size-2.5" /> MUTED
+          </Badge>
+        )}
+        <span className="ml-auto flex items-center gap-3">
+          <ChannelMuteToggle frequency={room.frequency} muted={room.muted} />
+          <span className="font-mono text-sm text-muted-foreground tabular">
+            {room.members.length} members
+          </span>
         </span>
       </div>
       <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
@@ -269,6 +290,11 @@ function ChannelDetail({
                     <Zap className="size-2.5" /> PRIO
                   </Badge>
                 )}
+                {m.muted && (
+                  <Badge variant="destructive">
+                    <MicOff className="size-2.5" /> MUTED
+                  </Badge>
+                )}
                 <IdentityBadge member={m} />
               </span>
               <span
@@ -291,6 +317,32 @@ function ChannelDetail({
         })}
       </div>
     </>
+  );
+}
+
+function ChannelMuteToggle({ frequency, muted }: { frequency: string; muted: boolean }) {
+  const [busy, setBusy] = useState(false);
+  async function toggle() {
+    setBusy(true);
+    try {
+      await admin.setChannelMute({ frequency, muted: !muted });
+      toast.success(muted ? `Unmuted ${frequency}` : `Muted ${frequency}`);
+    } catch (e) {
+      toast.error(`Channel mute failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Button
+      variant={muted ? "default" : "ghost"}
+      size="sm"
+      disabled={busy}
+      onClick={() => void toggle()}
+      title={muted ? "Allow transmission on this channel" : "Silence all transmission on this channel"}
+    >
+      {muted ? <Mic /> : <MicOff />} {muted ? "Unmute channel" : "Mute channel"}
+    </Button>
   );
 }
 
@@ -454,6 +506,16 @@ function MemberMenu({
       toast.error(`Priority change failed: ${err(e)}`);
     }
   }
+  async function toggleMute() {
+    try {
+      await admin.setMute({ id: member.id, muted: !member.muted });
+      toast.success(
+        member.muted ? `${member.displayName} unmuted` : `${member.displayName} muted`,
+      );
+    } catch (e) {
+      toast.error(`Mute change failed: ${err(e)}`);
+    }
+  }
   async function kick() {
     if (!confirm(`Kick ${member.displayName}? They'll be disconnected immediately.`)) return;
     try {
@@ -491,6 +553,9 @@ function MemberMenu({
         </DropdownMenuSub>
         <DropdownMenuItem onSelect={() => void togglePriority()}>
           <Zap /> {member.priority ? "Revoke priority" : "Promote to priority"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void toggleMute()}>
+          {member.muted ? <Mic /> : <MicOff />} {member.muted ? "Unmute" : "Mute (silence)"}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void kick()} className="text-warning">

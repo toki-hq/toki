@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlIrICCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAQgcKBWV2ZW50IjcKDE1lbWJlckpvaW5lZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIh8KCk1lbWJlckxlZnQSEQoJY2xpZW50X2lkGAEgASgJIiUKEEZyZXF1ZW5jeUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJIj0KEkRpc3BsYXlOYW1lQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjUKEkNoYW5uZWxOYW1lQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSJSCghQdHRFdmVudBIRCgljbGllbnRfaWQYASABKAkSDwoHcHJlc3NlZBgCIAEoCBIQCghzZXF1ZW5jZRgDIAEoBBIQCghwcmlvcml0eRgEIAEoCCIICgZQdHRBY2symgMKCVNpZ25hbGluZxI/CghSZWdpc3RlchIYLnRva2kudjEuUmVnaXN0ZXJSZXF1ZXN0GhkudG9raS52MS5SZWdpc3RlclJlc3BvbnNlEi4KBEpvaW4SFC50b2tpLnYxLkpvaW5SZXF1ZXN0Gg4udG9raS52MS5FdmVudDABEjYKBUxlYXZlEhUudG9raS52MS5MZWF2ZVJlcXVlc3QaFi50b2tpLnYxLkxlYXZlUmVzcG9uc2USVAoPQ2hhbmdlRnJlcXVlbmN5Eh8udG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0GiAudG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXNwb25zZRIyCgpQdXNoVG9UYWxrEhEudG9raS52MS5QdHRFdmVudBoPLnRva2kudjEuUHR0QWNrKAESWgoRSWRlbnRpdHlDaGFsbGVuZ2USIS50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdBoiLnRva2kudjEuSWRlbnRpdHlDaGFsbGVuZ2VSZXNwb25zZWIGcHJvdG8z");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlItMDCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAEiwKDG11dGVfY2hhbmdlZBgHIAEoCzIULnRva2kudjEuTXV0ZUNoYW5nZWRIABI7ChRjaGFubmVsX211dGVfY2hhbmdlZBgIIAEoCzIbLnRva2kudjEuQ2hhbm5lbE11dGVDaGFuZ2VkSAASNAoQcHJpb3JpdHlfY2hhbmdlZBgJIAEoCzIYLnRva2kudjEuUHJpb3JpdHlDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIi8KC011dGVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRINCgVtdXRlZBgCIAEoCCI2ChJDaGFubmVsTXV0ZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEg0KBW11dGVkGAIgASgIIkgKD1ByaW9yaXR5Q2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJEg8KB2dyYW50ZWQYAyABKAgiUgoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiCAoGUHR0QWNrMpoDCglTaWduYWxpbmcSPwoIUmVnaXN0ZXISGC50b2tpLnYxLlJlZ2lzdGVyUmVxdWVzdBoZLnRva2kudjEuUmVnaXN0ZXJSZXNwb25zZRIuCgRKb2luEhQudG9raS52MS5Kb2luUmVxdWVzdBoOLnRva2kudjEuRXZlbnQwARI2CgVMZWF2ZRIVLnRva2kudjEuTGVhdmVSZXF1ZXN0GhYudG9raS52MS5MZWF2ZVJlc3BvbnNlElQKD0NoYW5nZUZyZXF1ZW5jeRIfLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBogLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2USMgoKUHVzaFRvVGFsaxIRLnRva2kudjEuUHR0RXZlbnQaDy50b2tpLnYxLlB0dEFjaygBEloKEUlkZW50aXR5Q2hhbGxlbmdlEiEudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlcXVlc3QaIi50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message toki.v1.IdentityChallengeRequest
@@ -351,6 +351,48 @@ export type Event = Message<"toki.v1.Event"> & {
      */
     value: ChannelNameChanged;
     case: "channelNameChanged";
+  } | {
+    /**
+     * Sent when an admin mutes or unmutes a member (see Admin.SetMute).
+     * Broadcast to every member of the subject's current room *and* to
+     * the subject's own stream. The subject compares `client_id` against
+     * its own id: when it's the subject and `muted` is true, the client
+     * suppresses its own PTT/mic locally (so it doesn't keep firing
+     * futile presses the server will drop) and shows a "muted by
+     * operator" cue; other members light a muted badge on that member.
+     *
+     * @generated from field: toki.v1.MuteChanged mute_changed = 7;
+     */
+    value: MuteChanged;
+    case: "muteChanged";
+  } | {
+    /**
+     * Sent when an admin mutes/unmutes a whole channel (see
+     * Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+     * the current channel's mute state. Broadcast to every member of the
+     * affected frequency. The client compares `frequency` against its
+     * current tuning: while its channel is muted it can't transmit and
+     * the PTT button shows the disabled "unable to talk" cue.
+     *
+     * @generated from field: toki.v1.ChannelMuteChanged channel_mute_changed = 8;
+     */
+    value: ChannelMuteChanged;
+    case: "channelMuteChanged";
+  } | {
+    /**
+     * Sent to a member when an admin grants or revokes their *priority
+     * speaker* standing (see Admin.SetPriority), and on Join /
+     * ChangeFrequency to deliver current standing. Addressed only to the
+     * subject (priority is a per-session, per-channel grant). The client
+     * tracks it so a priority speaker on a muted (No-Talk) channel keeps
+     * a live PTT button instead of the "unable to talk" cue — they are
+     * the granted-voice exception. `frequency` is the channel the grant
+     * is bound to; `granted = false` clears it.
+     *
+     * @generated from field: toki.v1.PriorityChanged priority_changed = 9;
+     */
+    value: PriorityChanged;
+    case: "priorityChanged";
   } | { case: undefined; value?: undefined };
 };
 
@@ -467,6 +509,87 @@ export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PUR
   messageDesc(file_toki, 14);
 
 /**
+ * A member's server-side mute state changed (see Admin.SetMute).
+ *
+ * @generated from message toki.v1.MuteChanged
+ */
+export type MuteChanged = Message<"toki.v1.MuteChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.MuteChanged.
+ * Use `create(MuteChangedSchema)` to create a new message.
+ */
+export const MuteChangedSchema: GenMessage<MuteChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 15);
+
+/**
+ * A channel's mute state changed (see Admin.SetChannelMute), or the
+ * current state delivered on Join / ChangeFrequency.
+ *
+ * @generated from message toki.v1.ChannelMuteChanged
+ */
+export type ChannelMuteChanged = Message<"toki.v1.ChannelMuteChanged"> & {
+  /**
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.ChannelMuteChanged.
+ * Use `create(ChannelMuteChangedSchema)` to create a new message.
+ */
+export const ChannelMuteChangedSchema: GenMessage<ChannelMuteChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 16);
+
+/**
+ * A member's priority-speaker standing changed (see Admin.SetPriority),
+ * or current standing delivered on Join / ChangeFrequency. Addressed to
+ * the subject only. `frequency` is the channel the grant is bound to
+ * (empty when revoked).
+ *
+ * @generated from message toki.v1.PriorityChanged
+ */
+export type PriorityChanged = Message<"toki.v1.PriorityChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: string frequency = 2;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: bool granted = 3;
+   */
+  granted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.PriorityChanged.
+ * Use `create(PriorityChangedSchema)` to create a new message.
+ */
+export const PriorityChangedSchema: GenMessage<PriorityChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 17);
+
+/**
  * @generated from message toki.v1.PttEvent
  */
 export type PttEvent = Message<"toki.v1.PttEvent"> & {
@@ -505,7 +628,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 15);
+  messageDesc(file_toki, 18);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -518,7 +641,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 16);
+  messageDesc(file_toki, 19);
 
 /**
  * Signaling service for the Toki walkie-talkie network.

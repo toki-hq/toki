@@ -161,7 +161,12 @@ async fn run(
                 let Some(mut frame) = frame else { break; };
                 if let Some(s) = &session {
                     dsp.process(&mut frame);
-                    let talking = s.ptt.load(Ordering::Relaxed);
+                    // Server-side mute is a hard local gate: even if a PTT
+                    // grant is somehow still set, a muted session uploads
+                    // nothing (the relay would drop it anyway). The
+                    // `was_talking` edge below then fires the encoder flush.
+                    let talking = s.ptt.load(Ordering::Relaxed)
+                        && !s.self_muted.load(Ordering::Relaxed);
                     if talking {
                         s.send_audio(&frame).await;
                     } else if was_talking {
@@ -469,6 +474,12 @@ struct Session {
     /// it to reap a dead session so a reconnect isn't blocked by the
     /// already-connected guard. See `Session::open`.
     alive: Arc<AtomicBool>,
+    /// `true` while an admin has us server-side muted (see the
+    /// `MuteChanged` event handler). The server refuses our presses
+    /// regardless, but the mic loop also checks this so we don't keep
+    /// uploading frames the relay will drop. The events task is the
+    /// sole writer; the runtime mic loop reads it.
+    self_muted: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -652,6 +663,10 @@ impl Session {
         let self_id_for_events = client_id.clone();
         let ptt_atomic = Arc::new(AtomicBool::new(false));
         let ptt_for_events = ptt_atomic.clone();
+        // Server-side mute flag. The events task sets it from a
+        // `MuteChanged` addressed to us; the mic loop reads it.
+        let self_muted = Arc::new(AtomicBool::new(false));
+        let self_muted_for_events = self_muted.clone();
         let playback_for_events = playback.clone();
         let beeps_for_events = beeps.clone();
         let events_task = tokio::spawn(async move {
@@ -798,10 +813,19 @@ impl Session {
                             }
                             st.holder = None;
                             st.frequency = Some(fc.frequency.clone());
-                            // Drop any name from the old channel; the new
-                            // room's ChannelNameChanged (if named + feature
-                            // on) lands right after this event.
+                            // Drop any name + mute carried from the old
+                            // channel; the new room's ChannelNameChanged
+                            // (if named + feature on) and ChannelMuteChanged
+                            // land right after this event. Clearing the mute
+                            // here is what makes "move away from a muted
+                            // channel and you can talk again" feel instant.
                             st.channel_name = None;
+                            st.channel_muted = false;
+                            // Priority is per-channel; the server re-asserts
+                            // it for the new freq via PriorityChanged right
+                            // after this. Clear so a grant bound to the old
+                            // channel doesn't leak its No-Talk exemption here.
+                            st.channel_priority = false;
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
                         Some(Ev::DisplayNameChanged(dnc)) => {
@@ -849,6 +873,83 @@ impl Session {
                                     None => st.log("🏷 channel name cleared"),
                                 }
                                 st.channel_name = name;
+                            }
+                        }
+                        Some(Ev::MuteChanged(mc)) => {
+                            // Track every member's mute state for the
+                            // roster badge; when it's *us*, also slam our
+                            // local PTT gate shut (so we stop uploading
+                            // frames the server will drop anyway) and log
+                            // a clear operator cue.
+                            let mut st = state_for_events.lock().unwrap();
+                            st.set_muted(&mc.client_id, mc.muted);
+                            if mc.client_id == self_id_for_events {
+                                self_muted_for_events.store(mc.muted, Ordering::Relaxed);
+                                if mc.muted {
+                                    ptt_for_events.store(false, Ordering::Relaxed);
+                                    st.log("🔇 You were muted by an operator");
+                                } else {
+                                    st.log("🔊 An operator unmuted you");
+                                }
+                            }
+                        }
+                        Some(Ev::ChannelMuteChanged(cmc)) => {
+                            // The whole channel was muted/unmuted (or the
+                            // current state delivered on join). Apply only
+                            // when it's for the frequency we're tuned to,
+                            // then drive the same local consequences as a
+                            // personal mute: stop our mic and show the cue.
+                            let mut st = state_for_events.lock().unwrap();
+                            if st.frequency.as_deref() == Some(cmc.frequency.as_str()) {
+                                let was = st.channel_muted;
+                                st.channel_muted = cmc.muted;
+                                // Our overall "can I talk" state folds
+                                // member-mute, channel-mute, and the
+                                // priority exception; mirror it into the
+                                // session gate so the mic loop sees it
+                                // immediately.
+                                let silenced = st.locally_silenced();
+                                self_muted_for_events.store(silenced, Ordering::Relaxed);
+                                // Only drop a held press if the mute actually
+                                // silences *us* — a priority speaker on this
+                                // channel keeps the floor.
+                                if silenced {
+                                    ptt_for_events.store(false, Ordering::Relaxed);
+                                }
+                                if cmc.muted && !was {
+                                    if silenced {
+                                        st.log("🔇 This channel was muted by an operator");
+                                    } else {
+                                        st.log("🔇 Channel muted — you may still talk (priority)");
+                                    }
+                                } else if !cmc.muted && was {
+                                    st.log("🔊 This channel was unmuted");
+                                }
+                            }
+                        }
+                        Some(Ev::PriorityChanged(pc)) => {
+                            // Our priority standing on a channel changed
+                            // (or was delivered on change-frequency).
+                            // Apply only when it's addressed to us and for
+                            // the frequency we're tuned to. Priority is the
+                            // No-Talk exception: a priority speaker keeps a
+                            // live PTT button on a muted channel, so this
+                            // can *re-open* the gate that channel-mute shut.
+                            let mut st = state_for_events.lock().unwrap();
+                            let for_us = pc.client_id == self_id_for_events;
+                            let for_here = st.frequency.as_deref() == Some(pc.frequency.as_str());
+                            if for_us && for_here {
+                                let was = st.channel_priority;
+                                st.channel_priority = pc.granted;
+                                // Re-mirror the combined gate so the mic
+                                // loop reflects the new standing at once.
+                                self_muted_for_events
+                                    .store(st.locally_silenced(), Ordering::Relaxed);
+                                if pc.granted && !was {
+                                    st.log("⚡ You are a priority speaker here");
+                                } else if !pc.granted && was {
+                                    st.log("⚡ Priority speaker status removed");
+                                }
                             }
                         }
                         None => {}
@@ -1012,6 +1113,7 @@ impl Session {
             signaling,
             encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
             alive,
+            self_muted,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
     }

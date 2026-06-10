@@ -9,9 +9,10 @@ use uuid::Uuid;
 use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
-    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelNameChanged, Event, FrequencyChanged,
-    IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse,
-    MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest, RegisterResponse,
+    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelMuteChanged, ChannelNameChanged, Event,
+    FrequencyChanged, IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest,
+    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent,
+    RegisterRequest, RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
@@ -49,6 +50,13 @@ pub struct SignalingSvc {
     /// `ChangeFrequency` to deliver the current name to the client —
     /// but only while `server_config.named_channels_enabled` is on.
     channel_names: SharedChannelNames,
+    /// Channel-wide mutes (frequency set), shared with the admin panel
+    /// which writes them. Consulted by the PTT speak-gate: a press on a
+    /// muted channel is refused, so no one transmits there until it's
+    /// unmuted or they tune away. Also delivered to clients on `Join` /
+    /// `ChangeFrequency` via `channel_mute_event` so the PTT button can
+    /// show the disabled cue.
+    channel_mutes: crate::state::SharedChannelMutes,
     /// Audit-log sink. Records peer connects (on `Register`), explicit
     /// disconnects (on `Leave`), and failed password attempts.
     audit: AuditSink,
@@ -82,6 +90,7 @@ impl SignalingSvc {
         toml_password: Option<String>,
         server_config: SharedServerConfig,
         channel_names: SharedChannelNames,
+        channel_mutes: crate::state::SharedChannelMutes,
         identities: crate::state::SharedIdentities,
         identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
         bans: crate::state::SharedBans,
@@ -94,6 +103,7 @@ impl SignalingSvc {
             throttle: IpThrottle::new(),
             server_config,
             channel_names,
+            channel_mutes,
             audit,
             identities,
             identity_tx,
@@ -172,6 +182,48 @@ impl SignalingSvc {
                 name,
             })),
         })
+    }
+
+    /// Build a `ChannelMuteChanged` carrying `frequency`'s current mute
+    /// state, for delivery on `Join` / `ChangeFrequency` so a client
+    /// learns immediately whether it can transmit here. Always returns
+    /// an event (unlike `channel_name_event`, channel mute has no
+    /// feature gate) — an unmuted channel sends `muted = false`, which
+    /// also clears any stale mute the client carried from a prior
+    /// channel.
+    async fn channel_mute_event(&self, frequency: &str) -> Event {
+        let muted = self.channel_mutes.read().await.contains(frequency);
+        Event {
+            event: Some(event::Event::ChannelMuteChanged(ChannelMuteChanged {
+                frequency: frequency.to_string(),
+                muted,
+            })),
+        }
+    }
+
+    /// Build a `PriorityChanged` telling `client_id` whether it is a
+    /// priority speaker *on `frequency`*. Sent on `ChangeFrequency` so a
+    /// priority grant that's bound to one channel correctly goes dormant
+    /// when the holder tunes away and re-activates on return — which
+    /// matters for the client's PTT cue on muted (No-Talk) channels,
+    /// where only a priority speaker keeps a live button. `granted` is
+    /// true iff the session's `priority_freq` matches `frequency`.
+    async fn priority_event(&self, client_id: &str, frequency: &str) -> Event {
+        let granted = self
+            .registry
+            .lock()
+            .await
+            .clients
+            .get(client_id)
+            .map(|c| c.priority_freq.as_deref() == Some(frequency))
+            .unwrap_or(false);
+        Event {
+            event: Some(event::Event::PriorityChanged(PriorityChanged {
+                client_id: client_id.to_string(),
+                frequency: frequency.to_string(),
+                granted,
+            })),
+        }
     }
 }
 
@@ -456,6 +508,9 @@ impl Signaling for SignalingSvc {
             // we accept any UDP source for those.
             expected_ip: peer_ip,
             identity: identity.clone(),
+            // Fresh sessions start un-muted; an admin mute is
+            // session-scoped and re-applied per reconnect.
+            muted: false,
         };
 
         let mut registry = self.registry.lock().await;
@@ -610,6 +665,9 @@ impl Signaling for SignalingSvc {
         if let Some(name_evt) = self.channel_name_event(&frequency).await {
             let _ = tx.send(name_evt).await;
         }
+        // Deliver the channel's mute state so the joiner's PTT button
+        // reflects it right away (always sent — no feature gate).
+        let _ = tx.send(self.channel_mute_event(&frequency).await).await;
 
         // Announce the new joiner to existing members of this freq.
         for id in other_ids {
@@ -810,6 +868,18 @@ impl Signaling for SignalingSvc {
             if let Some(name_evt) = self.channel_name_event(&new_freq).await {
                 let _ = tx.send(name_evt).await;
             }
+            // And the new channel's mute state, so the PTT button updates
+            // the instant the move confirms (clears a stale mute carried
+            // from the previous channel when the new one is unmuted).
+            let _ = tx.send(self.channel_mute_event(&new_freq).await).await;
+            // And our priority standing *on the new channel* — a grant is
+            // bound to one frequency, so it goes dormant when we tune away
+            // and re-activates on return. The client needs this to keep a
+            // live PTT button when it's a priority speaker on a muted
+            // (No-Talk) channel.
+            let _ = tx
+                .send(self.priority_event(&req.client_id, &new_freq).await)
+                .await;
             // Snapshot the new roster's members + names without holding
             // the lock across awaits.
             let new_members: Vec<(String, String)> = {
@@ -896,19 +966,54 @@ impl Signaling for SignalingSvc {
                     None => continue, // sender isn't in any room
                 };
 
-                // Compute priority standing *before* the mutable room
-                // borrow so the borrow checker stays happy: a member is
-                // priority on this channel iff their `priority_freq`
-                // matches the room they're transmitting on.
-                let current_holder = registry
-                    .rooms
-                    .get(&frequency)
-                    .and_then(|r| r.holder.clone());
+                // Whether this sender is a priority speaker on *this*
+                // channel — computed up front because it both feeds the
+                // speak gate below (a priority speaker is the No-Talk
+                // exception) and the floor arbitration further down. A
+                // member is priority on a channel iff their
+                // `priority_freq` matches the room they're transmitting
+                // on.
                 let sender_is_priority = registry
                     .clients
                     .get(&evt.client_id)
                     .map(|c| c.priority_freq.as_deref() == Some(frequency.as_str()))
                     .unwrap_or(false);
+
+                // Speak gate: a press that can't legitimately take the
+                // floor never reaches arbitration, so the sender can't
+                // take or preempt it. Two vetoes flow through here:
+                //   * member mute — this session is individually muted.
+                //     An individual sanction, so it holds even for a
+                //     priority speaker.
+                //   * channel mute — the whole frequency is a No-Talk
+                //     channel. Nobody tuned here may transmit *except a
+                //     priority speaker*, who is exactly the granted-voice
+                //     exception (the "stage"/"town-hall" model). Moving
+                //     to an unmuted channel restores transmit for free,
+                //     since this check is keyed on `frequency`.
+                // We drop the event rather than echo a denied PttDown —
+                // the client self-suppresses on the Muted / ChannelMute
+                // events and the relay backstops in-flight frames. A
+                // press that arrives *while* the sender holds the floor
+                // (mute landed mid-transmission) is gated too; the
+                // SetMute / SetChannelMute handlers proactively drop the
+                // floor so the channel never sticks on a silenced holder.
+                let member_muted = registry
+                    .clients
+                    .get(&evt.client_id)
+                    .map(|c| !c.can_speak())
+                    .unwrap_or(false);
+                let channel_muted = self.channel_mutes.read().await.contains(&frequency);
+                if !speak_allowed(member_muted, channel_muted, sender_is_priority) {
+                    continue;
+                }
+
+                // Compute the rest of the priority standing *before* the
+                // mutable room borrow so the borrow checker stays happy.
+                let current_holder = registry
+                    .rooms
+                    .get(&frequency)
+                    .and_then(|r| r.holder.clone());
                 let holder_is_priority = current_holder
                     .as_ref()
                     .and_then(|h| registry.clients.get(h))
@@ -1004,6 +1109,29 @@ pub(crate) struct PttDecision {
 /// state machine is unit-testable in isolation.
 ///
 /// Inputs are the *current* room holder, whether that holder is a
+/// The relay speak-gate, as a pure predicate: may a sender's PTT press
+/// reach floor arbitration at all? Consulted in `push_to_talk` before
+/// any floor logic runs.
+///
+///   * `member_muted` — the sender is individually muted (admin
+///     `SetMute`). An individual sanction; it bars them unconditionally,
+///     even with a priority grant.
+///   * `channel_muted` — the whole channel is a No-Talk channel. It bars
+///     everyone tuned here *except* a priority speaker, who is the
+///     granted-voice exception.
+///   * `sender_is_priority` — the sender holds a priority grant bound to
+///     this channel.
+///
+/// This is the single chokepoint No-Talk channels reuse — the same
+/// "default-deny + priority grant" the backlog describes.
+pub(crate) fn speak_allowed(
+    member_muted: bool,
+    channel_muted: bool,
+    sender_is_priority: bool,
+) -> bool {
+    !member_muted && (!channel_muted || sender_is_priority)
+}
+
 /// priority speaker on this channel, and the incoming press from
 /// `sender` (with `sender_is_priority` likewise scoped to this
 /// channel). Returns `None` when the press changes nothing and should
@@ -1146,7 +1274,7 @@ pub(crate) fn remove_from_room(
 
 #[cfg(test)]
 mod tests {
-    use super::{ptt_decision, PttDecision};
+    use super::{ptt_decision, speak_allowed, PttDecision};
 
     fn grant(holder: &str, priority: bool) -> Option<PttDecision> {
         Some(PttDecision {
@@ -1223,5 +1351,31 @@ mod tests {
     fn priority_holder_re_press_is_noop() {
         // Alice (priority) already holds and presses again → no change.
         assert_eq!(ptt_decision(Some("alice"), true, "alice", true, true), None);
+    }
+
+    // ── Speak-gate (No-Talk) predicate ──────────────────────────────
+
+    #[test]
+    fn speak_gate_open_channel_allows_everyone() {
+        // No mutes anywhere → press passes, priority or not.
+        assert!(speak_allowed(false, false, false));
+        assert!(speak_allowed(false, false, true));
+    }
+
+    #[test]
+    fn speak_gate_member_mute_bars_even_priority() {
+        // An individual mute is the strongest sanction: it bars the
+        // sender regardless of channel state or priority grant.
+        assert!(!speak_allowed(true, false, false));
+        assert!(!speak_allowed(true, false, true));
+        assert!(!speak_allowed(true, true, true));
+    }
+
+    #[test]
+    fn speak_gate_channel_mute_bars_non_priority() {
+        // No-Talk channel: ordinary members can't talk…
+        assert!(!speak_allowed(false, true, false));
+        // …but a priority speaker is the granted-voice exception.
+        assert!(speak_allowed(false, true, true));
     }
 }

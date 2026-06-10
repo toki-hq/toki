@@ -164,6 +164,30 @@ message Event {
     // client compares `frequency` against its current tuning before
     // applying. See `ChannelNameChanged`.
     ChannelNameChanged channel_name_changed = 6;
+    // Sent when an admin mutes or unmutes a member (see Admin.SetMute).
+    // Broadcast to every member of the subject's current room *and* to
+    // the subject's own stream. The subject compares `client_id` against
+    // its own id: when it's the subject and `muted` is true, the client
+    // suppresses its own PTT/mic locally (so it doesn't keep firing
+    // futile presses the server will drop) and shows a "muted by
+    // operator" cue; other members light a muted badge on that member.
+    MuteChanged mute_changed = 7;
+    // Sent when an admin mutes/unmutes a whole channel (see
+    // Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+    // the current channel's mute state. Broadcast to every member of the
+    // affected frequency. The client compares `frequency` against its
+    // current tuning: while its channel is muted it can't transmit and
+    // the PTT button shows the disabled "unable to talk" cue.
+    ChannelMuteChanged channel_mute_changed = 8;
+    // Sent to a member when an admin grants or revokes their *priority
+    // speaker* standing (see Admin.SetPriority), and on Join /
+    // ChangeFrequency to deliver current standing. Addressed only to the
+    // subject (priority is a per-session, per-channel grant). The client
+    // tracks it so a priority speaker on a muted (No-Talk) channel keeps
+    // a live PTT button instead of the "unable to talk" cue — they are
+    // the granted-voice exception. `frequency` is the channel the grant
+    // is bound to; `granted = false` clears it.
+    PriorityChanged priority_changed = 9;
   }
 }
 
@@ -192,6 +216,29 @@ message DisplayNameChanged {
 message ChannelNameChanged {
   string frequency = 1;
   string name = 2;
+}
+
+// A member's server-side mute state changed (see Admin.SetMute).
+message MuteChanged {
+  string client_id = 1;
+  bool muted = 2;
+}
+
+// A channel's mute state changed (see Admin.SetChannelMute), or the
+// current state delivered on Join / ChangeFrequency.
+message ChannelMuteChanged {
+  string frequency = 1;
+  bool muted = 2;
+}
+
+// A member's priority-speaker standing changed (see Admin.SetPriority),
+// or current standing delivered on Join / ChangeFrequency. Addressed to
+// the subject only. `frequency` is the channel the grant is bound to
+// (empty when revoked).
+message PriorityChanged {
+  string client_id = 1;
+  string frequency = 2;
+  bool granted = 3;
 }
 
 message PttEvent {

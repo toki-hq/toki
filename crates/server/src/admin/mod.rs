@@ -123,6 +123,12 @@ pub struct AppState {
     /// broadcaster folds it into each `Snapshot` so the panel can label
     /// every frequency — occupied or not.
     pub channel_names: SharedChannelNames,
+    /// Channel-wide mutes (frequency set), shared with the signaling
+    /// speak-gate. The `SetChannelMute` RPC writes the db and this set
+    /// in lockstep so a channel mute takes effect on the next PTT press;
+    /// the broadcaster folds it into each `Snapshot` so the panel can
+    /// flag muted channels (occupied or not).
+    pub channel_mutes: crate::state::SharedChannelMutes,
     /// Active identity bans (banned pubkey → record), shared with the
     /// signaling register gate. The ban / lift RPCs write the db and
     /// this map in lockstep so a ban takes effect on the very next
@@ -167,6 +173,7 @@ pub async fn run(
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
+    channel_mutes: crate::state::SharedChannelMutes,
     identities: crate::state::SharedIdentities,
     mut identity_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::state::IdentityRecord)>,
     bans: crate::state::SharedBans,
@@ -220,6 +227,17 @@ pub async fn run(
         *channel_names.write().await = loaded;
     }
 
+    // Same for channel mutes — the signaling speak-gate reads this set
+    // on every PTT press, so it must hold the persisted muted channels
+    // before the first press lands.
+    {
+        let loaded = db
+            .load_channel_mutes()
+            .await
+            .context("load channel_mutes from admin db")?;
+        *channel_mutes.write().await = loaded;
+    }
+
     // Hydrate the shared identity map. Same dance again: signaling
     // merges every identity-ful register against this map (first_seen
     // and a recorded origin survive restarts), so it must hold the
@@ -268,6 +286,7 @@ pub async fn run(
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
         channel_names: channel_names.clone(),
+        channel_mutes: channel_mutes.clone(),
         bans,
         health: health.clone(),
         live_rate: live_rate.clone(),
@@ -311,6 +330,7 @@ pub async fn run(
     tokio::spawn(watch::run_broadcaster(
         registry,
         channel_names,
+        channel_mutes,
         byte_counters,
         live_rate,
         tx,

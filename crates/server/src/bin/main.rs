@@ -96,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
     // off by default, the signaling path never consults it anyway.
     let channel_names = state::shared_channel_names(std::collections::HashMap::new());
 
+    // Channel-wide mutes. Same bootstrap dance as channel_names: starts
+    // empty, hydrated from the `channel_mutes` table by the admin task,
+    // read by the signaling speak-gate on every PTT press.
+    let channel_mutes = state::shared_channel_mutes(std::collections::HashSet::new());
+
     // Client identities seen by this server. Same bootstrap dance:
     // starts empty, hydrated from the `identities` table by the admin
     // task. Signaling's Register merges into the map and pushes each
@@ -177,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         tls_material.clone(),
         server_config.clone(),
         channel_names.clone(),
+        channel_mutes.clone(),
         identities.clone(),
         identity_rx,
         bans.clone(),
@@ -209,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
                 password,
                 server_config.clone(),
                 channel_names,
+                channel_mutes,
                 identities,
                 identity_tx,
                 bans,

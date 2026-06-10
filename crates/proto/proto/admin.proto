@@ -34,6 +34,14 @@ service Admin {
   rpc MoveClient(MoveClientRequest) returns (MoveClientResponse);
   rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
   rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
+  // Server-side mute: revoke (or restore) a member's ability to take
+  // the PTT floor, without disconnecting them. A muted member's press
+  // is refused server-side — they stay connected and keep hearing the
+  // channel; they just can't transmit. The gentle lever between
+  // "nothing" and kick/ban. Session-scoped (clears on disconnect);
+  // NOT_FOUND for an unknown client id. If the member currently holds
+  // the floor, muting drops it immediately so the channel frees up.
+  rpc SetMute(SetMuteRequest) returns (SetMuteResponse);
 
   // ── Identity bans ───────────────────────────────────────────────
   // Ban a connected member's *identity* (and optionally its machine
@@ -122,6 +130,11 @@ message Member {
   // Unix time this identity was first seen by THIS server (from the
   // identities table). 0 when absent.
   uint64 identity_first_seen_unix = 8;
+
+  // Server-side mute (see Admin.SetMute). When true, the server
+  // refuses this session's PTT presses — it stays connected and
+  // hears the channel but cannot transmit. Session-scoped.
+  bool muted = 9;
 }
 
 // ── Server metadata + config ──────────────────────────────────────
@@ -200,6 +213,12 @@ message SetPriorityRequest {
   bool grant = 2;
 }
 message SetPriorityResponse {}
+
+message SetMuteRequest {
+  string id = 1;
+  bool muted = 2;                   // true = mute (silence), false = unmute
+}
+message SetMuteResponse {}
 
 message BanClientRequest {
   string id = 1;                    // live session client_id to ban + kick

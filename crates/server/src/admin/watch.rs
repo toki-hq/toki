@@ -24,9 +24,10 @@ use toki_proto::admin::v1 as pb;
 use crate::metrics::{SharedByteCounters, SharedLiveRate};
 use crate::state::{Client, SharedChannelNames, SharedRegistry};
 
-/// Copy a session's verified identity (if any) onto the wire member.
-/// Identity-less sessions keep the proto defaults (empty/0) — the UI
-/// reads that as "no identity".
+/// Copy a session's non-trivial state (verified identity, if any, and
+/// the server-side mute flag) onto the wire member. Identity-less
+/// sessions keep the proto identity defaults (empty/0) — the UI reads
+/// that as "no identity".
 fn fill_member_identity(m: &mut pb::Member, c: &Client) {
     if let Some(identity) = &c.identity {
         m.identity = identity.display_id.clone();
@@ -34,6 +35,7 @@ fn fill_member_identity(m: &mut pb::Member, c: &Client) {
         m.identity_machine_hash = identity.machine_hash.clone();
         m.identity_first_seen_unix = identity.first_seen.max(0) as u64;
     }
+    m.muted = c.muted;
 }
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
@@ -215,6 +217,7 @@ mod tests {
             connected_at: Instant::now(),
             priority_freq: None,
             expected_ip: None,
+            muted: false,
         }
     }
 
@@ -246,6 +249,33 @@ mod tests {
         assert_eq!(snap.rooms[0].members.len(), 2);
         assert_eq!(snap.lobby.len(), 1);
         assert_eq!(snap.lobby[0].id, "c");
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_muted_flag() {
+        let mut reg = crate::state::Registry::default();
+        let mut alice = mk_client("a", "Alice", Some("446.05"));
+        alice.muted = true;
+        reg.clients.insert("a".into(), alice);
+        reg.clients
+            .insert("b".into(), mk_client("b", "Bob", Some("446.05")));
+        reg.rooms.insert(
+            "446.05".into(),
+            Room {
+                members: vec!["a".into(), "b".into()],
+                ..Default::default()
+            },
+        );
+        let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+        let names = crate::state::shared_channel_names(Default::default());
+        let lr = crate::metrics::shared_live_rate();
+
+        let snap = snapshot_now(&registry, &names, &lr, 1, Instant::now()).await;
+        let members = &snap.rooms[0].members;
+        let alice = members.iter().find(|m| m.id == "a").unwrap();
+        let bob = members.iter().find(|m| m.id == "b").unwrap();
+        assert!(alice.muted, "muted session must surface muted=true");
+        assert!(!bob.muted, "un-muted session must surface muted=false");
     }
 
     #[tokio::test]

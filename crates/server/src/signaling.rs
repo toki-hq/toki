@@ -456,6 +456,9 @@ impl Signaling for SignalingSvc {
             // we accept any UDP source for those.
             expected_ip: peer_ip,
             identity: identity.clone(),
+            // Fresh sessions start un-muted; an admin mute is
+            // session-scoped and re-applied per reconnect.
+            muted: false,
         };
 
         let mut registry = self.registry.lock().await;
@@ -895,6 +898,25 @@ impl Signaling for SignalingSvc {
                     Some(f) => f,
                     None => continue, // sender isn't in any room
                 };
+
+                // Speak gate: a muted member's press never reaches
+                // floor arbitration, so they can't take or preempt the
+                // floor. We drop the event entirely rather than echo a
+                // denied PttDown — the client already self-suppresses
+                // its mic on a Muted event, and the UDP relay backstops
+                // any frames already in flight. A press that arrives
+                // *while* they hold the floor (e.g. mute landed
+                // mid-transmission) is also gated here; the SetMute
+                // handler proactively drops the floor so the channel
+                // doesn't stay stuck on a now-silent holder.
+                let muted = registry
+                    .clients
+                    .get(&evt.client_id)
+                    .map(|c| !c.can_speak())
+                    .unwrap_or(false);
+                if muted {
+                    continue;
+                }
 
                 // Compute priority standing *before* the mutable room
                 // borrow so the borrow checker stays happy: a member is

@@ -161,7 +161,12 @@ async fn run(
                 let Some(mut frame) = frame else { break; };
                 if let Some(s) = &session {
                     dsp.process(&mut frame);
-                    let talking = s.ptt.load(Ordering::Relaxed);
+                    // Server-side mute is a hard local gate: even if a PTT
+                    // grant is somehow still set, a muted session uploads
+                    // nothing (the relay would drop it anyway). The
+                    // `was_talking` edge below then fires the encoder flush.
+                    let talking = s.ptt.load(Ordering::Relaxed)
+                        && !s.self_muted.load(Ordering::Relaxed);
                     if talking {
                         s.send_audio(&frame).await;
                     } else if was_talking {
@@ -469,6 +474,12 @@ struct Session {
     /// it to reap a dead session so a reconnect isn't blocked by the
     /// already-connected guard. See `Session::open`.
     alive: Arc<AtomicBool>,
+    /// `true` while an admin has us server-side muted (see the
+    /// `MuteChanged` event handler). The server refuses our presses
+    /// regardless, but the mic loop also checks this so we don't keep
+    /// uploading frames the relay will drop. The events task is the
+    /// sole writer; the runtime mic loop reads it.
+    self_muted: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -652,6 +663,10 @@ impl Session {
         let self_id_for_events = client_id.clone();
         let ptt_atomic = Arc::new(AtomicBool::new(false));
         let ptt_for_events = ptt_atomic.clone();
+        // Server-side mute flag. The events task sets it from a
+        // `MuteChanged` addressed to us; the mic loop reads it.
+        let self_muted = Arc::new(AtomicBool::new(false));
+        let self_muted_for_events = self_muted.clone();
         let playback_for_events = playback.clone();
         let beeps_for_events = beeps.clone();
         let events_task = tokio::spawn(async move {
@@ -851,6 +866,24 @@ impl Session {
                                 st.channel_name = name;
                             }
                         }
+                        Some(Ev::MuteChanged(mc)) => {
+                            // Track every member's mute state for the
+                            // roster badge; when it's *us*, also slam our
+                            // local PTT gate shut (so we stop uploading
+                            // frames the server will drop anyway) and log
+                            // a clear operator cue.
+                            let mut st = state_for_events.lock().unwrap();
+                            st.set_muted(&mc.client_id, mc.muted);
+                            if mc.client_id == self_id_for_events {
+                                self_muted_for_events.store(mc.muted, Ordering::Relaxed);
+                                if mc.muted {
+                                    ptt_for_events.store(false, Ordering::Relaxed);
+                                    st.log("🔇 You were muted by an operator");
+                                } else {
+                                    st.log("🔊 An operator unmuted you");
+                                }
+                            }
+                        }
                         None => {}
                     },
                     Err(e) => {
@@ -1012,6 +1045,7 @@ impl Session {
             signaling,
             encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
             alive,
+            self_muted,
             tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
         })
     }

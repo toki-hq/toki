@@ -85,6 +85,26 @@ pub struct Client {
     /// onto the session so snapshots + audit lines never have to
     /// touch the shared identity map.
     pub identity: Option<ClientIdentity>,
+    /// Server-side mute: while `true`, the relay's speak-gate refuses
+    /// this session's PTT presses (see [`Client::can_speak`]). The
+    /// member stays connected and keeps receiving the channel; they
+    /// just can't transmit. Set by the admin `SetMute` RPC, cleared on
+    /// disconnect — session-scoped, like `priority_freq`. The durable,
+    /// identity-keyed tier is a deliberate later slice.
+    pub muted: bool,
+}
+
+impl Client {
+    /// The relay-side **speak gate**: may this session take/hold the
+    /// PTT floor right now? Today the only veto is an admin mute, but
+    /// this is intentionally the single chokepoint every "can this
+    /// member transmit" decision flows through — both the signaling
+    /// PTT-arbitration path and the UDP relay backstop call it, and
+    /// No-Talk channels (default-deny + per-member grant) will extend
+    /// the same check rather than bolting on a parallel one.
+    pub fn can_speak(&self) -> bool {
+        !self.muted
+    }
 }
 
 /// The session-facing slice of a verified identity — exactly what

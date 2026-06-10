@@ -164,6 +164,14 @@ message Event {
     // client compares `frequency` against its current tuning before
     // applying. See `ChannelNameChanged`.
     ChannelNameChanged channel_name_changed = 6;
+    // Sent when an admin mutes or unmutes a member (see Admin.SetMute).
+    // Broadcast to every member of the subject's current room *and* to
+    // the subject's own stream. The subject compares `client_id` against
+    // its own id: when it's the subject and `muted` is true, the client
+    // suppresses its own PTT/mic locally (so it doesn't keep firing
+    // futile presses the server will drop) and shows a "muted by
+    // operator" cue; other members light a muted badge on that member.
+    MuteChanged mute_changed = 7;
   }
 }
 
@@ -192,6 +200,12 @@ message DisplayNameChanged {
 message ChannelNameChanged {
   string frequency = 1;
   string name = 2;
+}
+
+// A member's server-side mute state changed (see Admin.SetMute).
+message MuteChanged {
+  string client_id = 1;
+  bool muted = 2;
 }
 
 message PttEvent {

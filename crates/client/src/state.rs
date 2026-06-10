@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 /// State shared between the GUI thread and the tokio runtime thread.
@@ -28,6 +28,11 @@ pub struct ClientState {
     /// or `None` if the floor is free. Updated only from authoritative
     /// server broadcasts — the local press never sets this.
     pub holder: Option<String>,
+    /// client_ids an operator has server-side muted, for the roster
+    /// badge. Populated from `MuteChanged` events; pruned when a member
+    /// leaves. Our own id appears here when *we're* muted (the runtime
+    /// also mirrors that into the session's `self_muted` gate).
+    pub muted: HashSet<String>,
     pub log: VecDeque<String>,
 }
 
@@ -47,10 +52,46 @@ impl ClientState {
         }
         self.log.push_back(line.into());
     }
+
+    /// Record a member's server-side mute state for the roster badge.
+    pub fn set_muted(&mut self, client_id: &str, muted: bool) {
+        if muted {
+            self.muted.insert(client_id.to_string());
+        } else {
+            self.muted.remove(client_id);
+        }
+    }
+
+    /// Is this member currently server-side muted?
+    pub fn is_muted(&self, client_id: &str) -> bool {
+        self.muted.contains(client_id)
+    }
 }
 
 pub type SharedState = Arc<Mutex<ClientState>>;
 
 pub fn shared() -> SharedState {
     Arc::new(Mutex::new(ClientState::default()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mute_set_tracks_membership() {
+        let mut s = ClientState::default();
+        assert!(!s.is_muted("alice"));
+        s.set_muted("alice", true);
+        assert!(s.is_muted("alice"));
+        // Idempotent set; unrelated member unaffected.
+        s.set_muted("alice", true);
+        assert!(s.is_muted("alice"));
+        assert!(!s.is_muted("bob"));
+        s.set_muted("alice", false);
+        assert!(!s.is_muted("alice"));
+        // Clearing an absent member is a harmless no-op.
+        s.set_muted("ghost", false);
+        assert!(!s.is_muted("ghost"));
+    }
 }

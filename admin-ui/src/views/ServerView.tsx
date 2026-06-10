@@ -94,6 +94,7 @@ function RuntimeConfig() {
   const [maxPeers, setMaxPeers] = useState("");
   const [idleKick, setIdleKick] = useState("");
   const [namedChannels, setNamedChannels] = useState(false);
+  const [requireIdentity, setRequireIdentity] = useState(false);
   const [audioQuality, setAudioQuality] = useState(2);
   const [busy, setBusy] = useState(false);
 
@@ -106,6 +107,7 @@ function RuntimeConfig() {
         setMaxPeers(String(c.maxPeers));
         setIdleKick(String(c.idleKickSecs));
         setNamedChannels(c.namedChannelsEnabled);
+        setRequireIdentity(c.requireIdentity);
         setAudioQuality(c.audioQuality);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
@@ -117,6 +119,7 @@ function RuntimeConfig() {
       maxPeers !== String(cfg.maxPeers) ||
       idleKick !== String(cfg.idleKickSecs) ||
       namedChannels !== cfg.namedChannelsEnabled ||
+      requireIdentity !== cfg.requireIdentity ||
       audioQuality !== cfg.audioQuality);
 
   async function save() {
@@ -127,6 +130,7 @@ function RuntimeConfig() {
         maxPeers: Number(maxPeers),
         idleKickSecs: Number(idleKick),
         namedChannelsEnabled: namedChannels,
+        requireIdentity,
         audioQuality,
       });
       setCfg(updated);
@@ -179,6 +183,19 @@ function RuntimeConfig() {
             checked={namedChannels}
             onCheckedChange={setNamedChannels}
             aria-label="Toggle named channels"
+          />
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Require identity</span>
+            <span className="text-xs text-muted-foreground">
+              Reject clients without a verified keypair identity. Makes bans airtight.
+            </span>
+          </div>
+          <Switch
+            checked={requireIdentity}
+            onCheckedChange={setRequireIdentity}
+            aria-label="Toggle require identity"
           />
         </div>
         <div className="flex flex-col gap-1.5 border-t border-border pt-3">

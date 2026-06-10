@@ -123,6 +123,11 @@ pub struct AppState {
     /// broadcaster folds it into each `Snapshot` so the panel can label
     /// every frequency — occupied or not.
     pub channel_names: SharedChannelNames,
+    /// Active identity bans (banned pubkey → record), shared with the
+    /// signaling register gate. The ban / lift RPCs write the db and
+    /// this map in lockstep so a ban takes effect on the very next
+    /// register attempt.
+    pub bans: crate::state::SharedBans,
     /// Latest host-health snapshot (CPU / memory / disk), refreshed by
     /// the metrics sampler. `GetServerHealth` clones it out.
     pub health: SharedHealth,
@@ -164,6 +169,7 @@ pub async fn run(
     channel_names: SharedChannelNames,
     identities: crate::state::SharedIdentities,
     mut identity_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::state::IdentityRecord)>,
+    bans: crate::state::SharedBans,
     byte_counters: SharedByteCounters,
     audit: AuditSink,
     audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
@@ -226,6 +232,13 @@ pub async fn run(
         *identities.write().await = loaded;
     }
 
+    // Hydrate the shared ban map — the register gate consults it, so
+    // persisted bans must be enforceable from the first register.
+    {
+        let loaded = db.load_bans().await.context("load bans from admin db")?;
+        *bans.write().await = loaded;
+    }
+
     // Seed `admin` user if the store is empty. We log the generated
     // password once at WARN level — this is the operator's only
     // chance to capture it.
@@ -255,6 +268,7 @@ pub async fn run(
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
         channel_names: channel_names.clone(),
+        bans,
         health: health.clone(),
         live_rate: live_rate.clone(),
         audit,

@@ -210,6 +210,40 @@ pub fn shared_identities(initial: HashMap<String, IdentityRecord>) -> SharedIden
     Arc::new(RwLock::new(initial))
 }
 
+/// One active identity ban, keyed by the banned pubkey hex in
+/// [`SharedBans`] and mirrored to the `bans` table.
+#[derive(Clone, Debug)]
+pub struct BanRecord {
+    /// 8-char fingerprint of the banned key, for display.
+    pub display_id: String,
+    /// Display name the session used when it was banned. Display aid
+    /// only — names are freely chosen and may be reused by others.
+    pub last_callsign: String,
+    /// When non-empty, the machine tier is banned too: ANY identity
+    /// presenting this machine hash at register is rejected, so a
+    /// config wipe (fresh key, same machine) stays banned.
+    pub machine_hash: String,
+    /// Operator-supplied reason, echoed to the banned client in the
+    /// register rejection.
+    pub reason: String,
+    /// Admin username that issued the ban.
+    pub banned_by: String,
+    /// Unix seconds the ban was issued.
+    pub banned_at: i64,
+}
+
+/// Active bans (banned pubkey hex → record). Written by the admin
+/// gRPC handlers (ban / lift — they own the db), read by the signaling
+/// `Register` gate. Same writer/reader split as [`SharedChannelNames`];
+/// hydrated from the `bans` table at boot.
+pub type SharedBans = Arc<RwLock<HashMap<String, BanRecord>>>;
+
+/// Build a shared ban map from an initial snapshot (typically
+/// `AdminDb::load_bans` at boot, or empty for tests).
+pub fn shared_bans(initial: HashMap<String, BanRecord>) -> SharedBans {
+    Arc::new(RwLock::new(initial))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,7 +39,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{MySqlPool, PgPool, Row, SqlitePool};
 
 use crate::server_config::ServerConfig;
-use crate::state::IdentityRecord;
+use crate::state::{BanRecord, IdentityRecord};
 
 /// Which SQL dialect the open connection speaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -206,6 +206,12 @@ impl AdminDb {
                 "BIGINT NOT NULL DEFAULT 2",
                 "BIGINT NOT NULL DEFAULT 2",
             ),
+            (
+                "require_identity",
+                "INTEGER NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+            ),
         ];
         // Columns that existed in pre-release dev builds and were later
         // removed from the schema. A `NOT NULL` stray blocks inserts
@@ -277,7 +283,7 @@ impl AdminDb {
     /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                   named_channels_enabled, audio_quality \
+                   named_channels_enabled, audio_quality, require_identity \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -289,6 +295,7 @@ impl AdminDb {
                     grpc_password: r.try_get::<String, _>(3)?,
                     named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
                     audio_quality: r.try_get::<i64, _>(5)? as u32,
+                    require_identity: r.try_get::<i64, _>(6)? != 0,
                 },
                 None => ServerConfig::default(),
             })
@@ -300,7 +307,8 @@ impl AdminDb {
         let now = now_unix();
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
-                 named_channels_enabled = ?, audio_quality = ?, updated_at = ? \
+                 named_channels_enabled = ?, audio_quality = ?, require_identity = ?, \
+                 updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
             sqlx::query(&sql)
@@ -310,6 +318,7 @@ impl AdminDb {
                 .bind(cfg.grpc_password.as_str())
                 .bind(cfg.named_channels_enabled as i64)
                 .bind(cfg.audio_quality as i64)
+                .bind(cfg.require_identity as i64)
                 .bind(now)
                 .execute(p)
                 .await?;
@@ -414,6 +423,62 @@ impl AdminDb {
                 .bind(rec.last_ip.as_str())
                 .execute(p)
                 .await?;
+            Ok(())
+        })
+    }
+
+    // ── Identity bans ─────────────────────────────────────────────────
+
+    /// Load every active ban into a `banned-pubkey-hex → record` map —
+    /// the boot-time hydration of `SharedBans`.
+    pub async fn load_bans(&self) -> Result<HashMap<String, BanRecord>> {
+        let sql = "SELECT pubkey, display_id, last_callsign, machine_hash, reason, \
+                   banned_by, banned_at FROM bans";
+        on_pool!(self, p, {
+            let rows = sqlx::query(sql).fetch_all(p).await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(
+                    r.try_get::<String, _>(0)?,
+                    BanRecord {
+                        display_id: r.try_get::<String, _>(1)?,
+                        last_callsign: r.try_get::<String, _>(2)?,
+                        machine_hash: r.try_get::<String, _>(3)?,
+                        reason: r.try_get::<String, _>(4)?,
+                        banned_by: r.try_get::<String, _>(5)?,
+                        banned_at: r.try_get::<i64, _>(6)?,
+                    },
+                );
+            }
+            Ok(map)
+        })
+    }
+
+    /// Insert (or refresh) a ban. Upsert on the pubkey PK so re-banning
+    /// an already-banned identity just updates the reason/machine tier
+    /// instead of erroring.
+    pub async fn insert_ban(&self, pubkey: &str, rec: &BanRecord) -> Result<()> {
+        let sql = self.ban_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(pubkey)
+                .bind(rec.display_id.as_str())
+                .bind(rec.last_callsign.as_str())
+                .bind(rec.machine_hash.as_str())
+                .bind(rec.reason.as_str())
+                .bind(rec.banned_by.as_str())
+                .bind(rec.banned_at)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Lift a ban (idempotent — deleting an unknown pubkey is a no-op).
+    pub async fn delete_ban(&self, pubkey: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM bans WHERE pubkey = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(pubkey).execute(p).await?;
             Ok(())
         })
     }
@@ -754,6 +819,50 @@ impl AdminDb {
                    THEN excluded.origin_client_id ELSE identities.origin_client_id END, \
                  last_seen = excluded.last_seen, \
                  last_ip = excluded.last_ip"
+            }
+        }
+    }
+
+    /// Ban upsert — re-banning refreshes every field (a deliberate ban
+    /// action always reflects the operator's latest intent, unlike the
+    /// identity upsert's history-pinning).
+    fn ban_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 display_id = excluded.display_id, \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 reason = excluded.reason, \
+                 banned_by = excluded.banned_by, \
+                 banned_at = excluded.banned_at"
+            }
+            Backend::MySql => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE \
+                 display_id = VALUES(display_id), \
+                 last_callsign = VALUES(last_callsign), \
+                 machine_hash = VALUES(machine_hash), \
+                 reason = VALUES(reason), \
+                 banned_by = VALUES(banned_by), \
+                 banned_at = VALUES(banned_at)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 display_id = excluded.display_id, \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 reason = excluded.reason, \
+                 banned_by = excluded.banned_by, \
+                 banned_at = excluded.banned_at"
             }
         }
     }
@@ -1103,6 +1212,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled INTEGER NOT NULL DEFAULT 0,
     audio_quality   INTEGER NOT NULL DEFAULT 2,
+    require_identity INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO server_config (id) VALUES (1);
@@ -1120,6 +1230,15 @@ CREATE TABLE IF NOT EXISTS identities (
     first_seen       INTEGER NOT NULL,
     last_seen        INTEGER NOT NULL,
     last_ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        TEXT PRIMARY KEY NOT NULL,
+    display_id    TEXT NOT NULL,
+    last_callsign TEXT NOT NULL DEFAULT '',
+    machine_hash  TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    banned_by     TEXT NOT NULL DEFAULT '',
+    banned_at     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           INTEGER PRIMARY KEY NOT NULL,
@@ -1160,6 +1279,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 INSERT IGNORE INTO server_config (id) VALUES (1);
@@ -1177,6 +1297,15 @@ CREATE TABLE IF NOT EXISTS identities (
     first_seen       BIGINT NOT NULL,
     last_seen        BIGINT NOT NULL,
     last_ip          VARCHAR(64) NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        VARCHAR(64) PRIMARY KEY NOT NULL,
+    display_id    VARCHAR(32) NOT NULL,
+    last_callsign VARCHAR(16) NOT NULL DEFAULT '',
+    machine_hash  VARCHAR(64) NOT NULL DEFAULT '',
+    reason        VARCHAR(512) NOT NULL DEFAULT '',
+    banned_by     VARCHAR(255) NOT NULL DEFAULT '',
+    banned_at     BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
@@ -1215,6 +1344,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
 INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
@@ -1232,6 +1362,15 @@ CREATE TABLE IF NOT EXISTS identities (
     first_seen       BIGINT NOT NULL,
     last_seen        BIGINT NOT NULL,
     last_ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        TEXT PRIMARY KEY NOT NULL,
+    display_id    TEXT NOT NULL,
+    last_callsign TEXT NOT NULL DEFAULT '',
+    machine_hash  TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    banned_by     TEXT NOT NULL DEFAULT '',
+    banned_at     BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
@@ -1391,6 +1530,7 @@ mod tests {
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
+            require_identity: true,
             audio_quality: 1,
         };
         db.save_server_config(&new).await.unwrap();
@@ -1429,6 +1569,7 @@ mod tests {
             grpc_password: "secret".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            require_identity: true,
         })
         .await
         .unwrap();
@@ -1562,6 +1703,43 @@ mod tests {
         db.upsert_identity("aa11", &third).await.unwrap();
         let rec = &db.load_identities().await.unwrap()["aa11"];
         assert_eq!(rec.origin_client_id, "origin-1", "first non-empty wins");
+    }
+
+    fn ban_record(reason: &str) -> BanRecord {
+        BanRecord {
+            display_id: "FLNIHQMB".into(),
+            last_callsign: "coton".into(),
+            machine_hash: String::new(),
+            reason: reason.into(),
+            banned_by: "admin".into(),
+            banned_at: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn bans_insert_load_delete_round_trip() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_bans().await.unwrap().is_empty());
+
+        db.insert_ban("aa11", &ban_record("spam")).await.unwrap();
+        let bans = db.load_bans().await.unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans["aa11"].reason, "spam");
+        assert_eq!(bans["aa11"].banned_by, "admin");
+
+        // Re-banning refreshes the record (latest intent wins).
+        let mut again = ban_record("spam and abuse");
+        again.machine_hash = "cd".repeat(32);
+        db.insert_ban("aa11", &again).await.unwrap();
+        let bans = db.load_bans().await.unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans["aa11"].reason, "spam and abuse");
+        assert_eq!(bans["aa11"].machine_hash, "cd".repeat(32));
+
+        db.delete_ban("aa11").await.unwrap();
+        db.delete_ban("aa11").await.unwrap(); // idempotent
+        assert!(db.load_bans().await.unwrap().is_empty());
     }
 
     #[tokio::test]

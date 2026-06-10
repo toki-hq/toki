@@ -34,6 +34,7 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
         state::shared_channel_names(Default::default()),
         state::shared_identities(Default::default()),
         tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
 
@@ -331,6 +332,7 @@ async fn boot_with_config(
         state::shared_channel_names(Default::default()),
         state::shared_identities(Default::default()),
         tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -373,6 +375,7 @@ async fn boot_with_passwords(
         grpc_password: db_password.to_string(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -383,6 +386,7 @@ async fn boot_with_passwords(
         state::shared_channel_names(Default::default()),
         state::shared_identities(Default::default()),
         tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -497,6 +501,7 @@ async fn register_rejected_when_at_max_peers() {
         grpc_password: String::new(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
     })
     .await;
     for i in 0..2 {
@@ -638,4 +643,216 @@ async fn identity_register_twice_with_same_key_succeeds() {
             .await
             .expect("register should succeed");
     }
+}
+
+// ── Identity-ban enforcement at register ────────────────────────────
+
+/// `boot` with an injectable ban map, so tests can pre-seed bans the
+/// way the admin ban RPC would.
+async fn boot_with_bans(bans: toki_server::state::SharedBans) -> SignalingClient<Channel> {
+    let registry = state::shared();
+    let svc = SignalingSvc::new(
+        registry,
+        "127.0.0.1:50052".to_string(),
+        None,
+        server_config::shared_default(),
+        state::shared_channel_names(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
+        bans,
+        toki_server::audit::channel().0,
+    );
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let _ = Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::iter(vec![Ok::<_, std::io::Error>(
+                server_side,
+            )]))
+            .await;
+    });
+    let mut client_socket = Some(client_side);
+    let channel = Endpoint::try_from("http://[::1]:50051")
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .connect_with_connector(tower::service_fn(move |_: Uri| {
+            let sock = client_socket.take().expect("connector called twice");
+            async move { Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(sock)) }
+        }))
+        .await
+        .expect("in-process tonic connect");
+    SignalingClient::new(channel)
+}
+
+fn ban_entry(machine_hash: &str, reason: &str) -> toki_server::state::BanRecord {
+    toki_server::state::BanRecord {
+        display_id: "FLNIHQMB".into(),
+        last_callsign: "banned".into(),
+        machine_hash: machine_hash.into(),
+        reason: reason.into(),
+        banned_by: "admin".into(),
+        banned_at: 1,
+    }
+}
+
+/// Lowercase-hex pubkey of an ed25519 signing key, exactly as the
+/// server stores ban keys.
+fn pubkey_hex(signing: &ed25519_dalek::SigningKey) -> String {
+    signing
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn banned_identity_is_rejected_with_reason() {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[50u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&signing), ban_entry("", "spamming the net"));
+    let mut client = boot_with_bans(bans).await;
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let err = client
+        .register(identity_register(&signing, nonce))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert!(
+        err.message().contains("spamming the net"),
+        "rejection carries the operator's reason: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn machine_ban_catches_fresh_identity_on_same_machine() {
+    // The banned identity presented machine hash M with a machine-tier
+    // ban. A brand-new keypair claiming the same machine hash must be
+    // rejected too (config-wipe evasion).
+    let machine = "ab".repeat(32);
+    let banned_key = ed25519_dalek::SigningKey::from_bytes(&[51u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&banned_key), ban_entry(&machine, "evader"));
+    let mut client = boot_with_bans(bans).await;
+
+    let fresh_key = ed25519_dalek::SigningKey::from_bytes(&[52u8; 32]);
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let mut req = identity_register(&fresh_key, nonce);
+    req.machine_hash = machine;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn lifted_ban_allows_register_again() {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[53u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&signing), ban_entry("", ""));
+    let mut client = boot_with_bans(bans.clone()).await;
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let err = client
+        .register(identity_register(&signing, nonce))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+
+    // Lift (as the admin RPC would: remove from the shared map).
+    bans.write().await.clear();
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("register should succeed once the ban is lifted");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identityless_register_unaffected_by_bans() {
+    // Bans key on identities; an identity-less register sails through
+    // (closing that hole is the future "require identity" toggle).
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert("aa".repeat(32), ban_entry("", "someone"));
+    let mut client = boot_with_bans(bans).await;
+    register_or_fail(&mut client, "anon").await;
+}
+
+// ── Require-identity toggle ─────────────────────────────────────────
+
+fn require_identity_config() -> toki_server::server_config::ServerConfig {
+    toki_server::server_config::ServerConfig {
+        require_identity: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_rejects_identityless_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let err = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a client identity"),
+        "actionable message: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_accepts_identityful_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[60u8; 32]);
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("identity-ful register passes the gate");
 }

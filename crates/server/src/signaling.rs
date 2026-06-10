@@ -62,6 +62,12 @@ pub struct SignalingSvc {
     /// admin task into the `identities` table, mirroring the audit
     /// channel split (signaling produces, the db owner writes).
     identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
+    /// Active identity bans, written by the admin panel (ban / lift)
+    /// and consulted on every identity-ful `Register`. A banned pubkey
+    /// — or, for machine-tier bans, a banned machine hash under any
+    /// key — is rejected with PERMISSION_DENIED + the operator's
+    /// reason.
+    bans: crate::state::SharedBans,
     /// Per-boot key for the stateless register-challenge nonces.
     /// Restarting the server invalidates outstanding challenges —
     /// harmless, the client just registers with a fresh one.
@@ -78,6 +84,7 @@ impl SignalingSvc {
         channel_names: SharedChannelNames,
         identities: crate::state::SharedIdentities,
         identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
+        bans: crate::state::SharedBans,
         audit: AuditSink,
     ) -> SignalingServer<Self> {
         SignalingServer::new(Self {
@@ -90,6 +97,7 @@ impl SignalingSvc {
             audit,
             identities,
             identity_tx,
+            bans,
             challenge_key: crate::identity::ChallengeKey::generate(),
         })
     }
@@ -316,6 +324,68 @@ impl Signaling for SignalingSvc {
         // and merge into the identity store. After the password gate so
         // unauthenticated callers can't probe identity verification.
         let identity = self.process_identity(&req, &display_name, peer_ip).await?;
+
+        // Require-identity gate (off by default): with the toggle on,
+        // an identity-less register is refused — the lever that makes
+        // identity bans airtight, since an evader can no longer just
+        // connect anonymously. Read fresh so flipping the toggle in
+        // the admin panel applies to the next register, no restart.
+        if identity.is_none() && self.server_config.read().await.require_identity {
+            tracing::warn!(
+                ?peer_ip,
+                name = %display_name,
+                "register rejected: server requires a client identity"
+            );
+            return Err(Status::failed_precondition(
+                "this server requires a client identity; \
+                 update your client or repair its identity file and reconnect",
+            ));
+        }
+
+        // Ban gate: a verified identity whose pubkey is banned — or, for
+        // machine-tier bans, whose machine hash matches ANY ban row — is
+        // refused with the operator's reason. Checked after identity
+        // verification (an unproven pubkey can't be used to probe the
+        // ban list) and after recording the attempt in the identity
+        // store, so the operator sees the banned identity's last_seen /
+        // last_ip update on each retry.
+        if let Some(ident) = &identity {
+            let bans = self.bans.read().await;
+            let hit = bans.get(&ident.pubkey_hex).or_else(|| {
+                if ident.machine_hash.is_empty() {
+                    None
+                } else {
+                    bans.values().find(|b| {
+                        !b.machine_hash.is_empty() && b.machine_hash == ident.machine_hash
+                    })
+                }
+            });
+            if let Some(ban) = hit {
+                let reason = if ban.reason.is_empty() {
+                    "you are banned from this server".to_string()
+                } else {
+                    format!("you are banned from this server: {}", ban.reason)
+                };
+                tracing::warn!(
+                    ?peer_ip,
+                    identity = %ident.display_id,
+                    name = %display_name,
+                    "register rejected: banned identity"
+                );
+                audit::record(
+                    &self.audit,
+                    "ban-reject",
+                    &display_name,
+                    "",
+                    &format!(
+                        "banned identity {} tried to register from {}",
+                        ident.display_id,
+                        peer_ip.map(|i| i.to_string()).unwrap_or_else(|| "?".into())
+                    ),
+                );
+                return Err(Status::permission_denied(reason));
+            }
+        }
 
         // Capacity gate: refuse new registrations once the registry
         // has reached the operator-configured ceiling. Checked after

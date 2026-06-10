@@ -308,6 +308,8 @@ is exactly as sensitive as the stored server password):
   machine hash stays the same, so operators can spot config-wipe ban evasion.
 - Connecting to an older server (or one without identity support) silently
   falls back to an identity-less session — exactly the pre-0.5 behavior.
+  Servers can flip **require identity** in their settings, in which case an
+  identity-less register is refused with a clear message.
 
 To **reset** your identity, delete `identity.toml` and reconnect. To **move**
 it to another machine, copy the file (the identity follows the key; the
@@ -440,13 +442,21 @@ Sections:
 - **Channels** — assign human-readable names to frequencies (gated by the
   named-channels toggle).
 - **Server config** — edit `serverName`, `maxPeers`, `idleKickSecs`,
-  `voiceQuality`, the named-channels toggle, and `grpcPassword` at runtime.
+  `voiceQuality`, the named-channels toggle, the **require-identity** toggle
+  (reject clients without a verified identity — makes bans airtight), and
+  `grpcPassword` at runtime.
+- **Bans** — review and lift identity bans (who, why, by whom, when; a
+  "machine" badge marks bans that also cover the machine hash).
 - **Account** — rotate the current admin user's password (revokes other
   sessions).
 
 Per-client actions in the roster: **kick**, **move** (to another frequency),
-**rename** (broadcasts `DisplayNameChanged`), and **priority** (elect/clear a
-priority speaker on a channel).
+**rename** (broadcasts `DisplayNameChanged`), **priority** (elect/clear a
+priority speaker on a channel), and **ban** — kicks the session and blocks
+its *identity* from registering again, with an optional reason echoed to the
+banned client and an optional **machine ban** (a wiped config mints a fresh
+identity but keeps the machine hash, so it stays banned). Members without a
+verified identity can only be kicked — there's nothing durable to ban.
 
 Members that registered with a verified **client identity** show a
 fingerprint badge with their durable identity string (e.g. `7Q4XF9KB`)
@@ -459,14 +469,14 @@ client stays attributable.
 
 | Endpoint / RPC | Surface | Notes |
 |---|---|---|
-| `Signaling.Register` | gRPC | Sends `client_version` + optional signed identity (pubkey, challenge nonce, signature, machine hash); returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR and a present-but-invalid identity. Rate-limited per IP. |
+| `Signaling.Register` | gRPC | Sends `client_version` + optional signed identity (pubkey, challenge nonce, signature, machine hash); returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR, a present-but-invalid identity, and a **banned** identity / machine hash (`PERMISSION_DENIED` + the ban reason). Rate-limited per IP. |
 | `Signaling.IdentityChallenge` | gRPC | Issues a short-lived (~60 s), stateless nonce the client signs in the subsequent `Register` to prove possession of its identity key. |
 | `Signaling.Join` | gRPC server-stream | Pushes `Event`s (members joined/left, PTT, frequency change, rename, channel-name change). |
 | `Signaling.Leave` | gRPC | Explicit disconnect. |
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
 | `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
 | UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive; `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame. Server→peer packets prepend the codec version. |
-| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions, runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
+| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |
 

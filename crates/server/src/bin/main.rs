@@ -105,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
     let (identity_tx, identity_rx) =
         tokio::sync::mpsc::unbounded_channel::<(String, state::IdentityRecord)>();
 
+    // Active identity bans. Hydrated from the `bans` table by the admin
+    // task; written by the admin ban/lift RPCs, read by the signaling
+    // register gate.
+    let bans = state::shared_bans(std::collections::HashMap::new());
+
     // Runtime-mutable server settings. Starts at hardcoded defaults
     // (same values the code shipped before this lived in the db);
     // the admin task, if enabled, will overwrite from sqlite right
@@ -174,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
         channel_names.clone(),
         identities.clone(),
         identity_rx,
+        bans.clone(),
         byte_counters.clone(),
         audit_tx,
         audit_rx,
@@ -205,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
                 channel_names,
                 identities,
                 identity_tx,
+                bans,
                 audit_tx_sig,
             )
             .max_decoding_message_size(8 * 1024),

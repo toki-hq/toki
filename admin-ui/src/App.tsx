@@ -6,6 +6,7 @@ import {
   RadioTower,
   Server as ServerIcon,
   ScrollText,
+  Ban,
   LogOut,
   Loader2,
 } from "lucide-react";
@@ -20,13 +21,15 @@ import { Overview } from "@/views/Overview";
 import { Rooms } from "@/views/Rooms";
 import { ServerView } from "@/views/ServerView";
 import { Audit } from "@/views/Audit";
+import { Bans } from "@/views/Bans";
 
-type Section = "overview" | "rooms" | "server" | "audit";
+type Section = "overview" | "rooms" | "server" | "bans" | "audit";
 
 const NAV: { id: Section; label: string; icon: typeof Radio }[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "rooms", label: "Channels", icon: RadioTower },
   { id: "server", label: "Server", icon: ServerIcon },
+  { id: "bans", label: "Bans", icon: Ban },
   { id: "audit", label: "Audit", icon: ScrollText },
 ];
 
@@ -145,6 +148,7 @@ function Shell({ info, onLoggedOut }: { info: ServerInfo | null; onLoggedOut: ()
           {section === "overview" && <Overview snapshot={snapshot} info={info} />}
           {section === "rooms" && <Rooms snapshot={snapshot} />}
           {section === "server" && <ServerView info={info} />}
+          {section === "bans" && <Bans />}
           {section === "audit" && <Audit />}
         </main>
       </div>

@@ -65,6 +65,11 @@ pub const PTT_TX_TOP: Color32 = Color32::from_rgb(0x6b, 0x49, 0x1c);
 pub const PTT_TX_BOTTOM: Color32 = Color32::from_rgb(0x3f, 0x2a, 0x10);
 pub const PTT_BUSY_TOP: Color32 = Color32::from_rgb(0x6b, 0x1f, 0x1f);
 pub const PTT_BUSY_BOTTOM: Color32 = Color32::from_rgb(0x3e, 0x12, 0x12);
+// Muted: the button is inert (we can't transmit — operator member-mute
+// or channel-mute). Darker and flatter than IDLE with a faint red cast,
+// so it reads as "disabled, and not because you're busy".
+pub const PTT_MUTED_TOP: Color32 = Color32::from_rgb(0x1a, 0x14, 0x15);
+pub const PTT_MUTED_BOTTOM: Color32 = Color32::from_rgb(0x0e, 0x0a, 0x0b);
 
 // ── Spacing scale (px) ──────────────────────────────────────────────────
 pub const PAD_OUTER: f32 = 12.0;

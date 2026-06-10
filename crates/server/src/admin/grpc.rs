@@ -26,8 +26,8 @@ use tonic::{Request, Response, Status};
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged, MemberJoined,
-    MemberLeft, MuteChanged, PttEvent,
+    event, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
+    MemberJoined, MemberLeft, MuteChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -107,6 +107,7 @@ impl AdminApi {
         let snap = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -234,6 +235,7 @@ impl Admin for AdminApi {
         let first = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -994,6 +996,111 @@ impl Admin for AdminApi {
         Ok(Response::new(pb::SetMuteResponse {}))
     }
 
+    async fn set_channel_mute(
+        &self,
+        req: Request<pb::SetChannelMuteRequest>,
+    ) -> Result<Response<pb::SetChannelMuteResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetChannelMuteRequest { frequency, muted } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+
+        // Persist + update the shared set in lockstep, idempotently.
+        // `changed` gates the audit line + broadcast so a re-mute is a
+        // quiet no-op.
+        let changed = if muted {
+            self.state
+                .db
+                .set_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state
+                .channel_mutes
+                .write()
+                .await
+                .insert(frequency.clone())
+        } else {
+            self.state
+                .db
+                .clear_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.channel_mutes.write().await.remove(&frequency)
+        };
+
+        // When muting, drop the floor if someone holds it on this channel
+        // so the room doesn't stay stuck on a now-silenced talker (with
+        // release-grace so their in-flight tail still flushes). Collect
+        // the room recipients under the lock for the broadcast below.
+        let (recipients, dropped_holder) = {
+            let mut registry = self.state.registry.lock().await;
+            let mut dropped_holder: Option<String> = None;
+            if muted {
+                if let Some(room) = registry.rooms.get_mut(&frequency) {
+                    if let Some(prev) = room.holder.take() {
+                        room.last_released = Some((prev.clone(), std::time::Instant::now()));
+                        dropped_holder = Some(prev);
+                    }
+                }
+            }
+            let recipients: Vec<mpsc::Sender<Event>> = registry
+                .rooms
+                .get(&frequency)
+                .map(|r| r.members.clone())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| registry.clients.get(id))
+                .filter_map(|c| c.events_tx.clone())
+                .collect();
+            (recipients, dropped_holder)
+        };
+
+        if changed {
+            tracing::info!(
+                admin_user = %admin.0,
+                frequency = %frequency,
+                muted,
+                "admin set channel mute",
+            );
+            audit::record(
+                &self.state.audit,
+                "channel-mute",
+                &admin.0,
+                &frequency,
+                if muted {
+                    "muted the channel"
+                } else {
+                    "unmuted the channel"
+                },
+            );
+
+            let evt = Event {
+                event: Some(event::Event::ChannelMuteChanged(ChannelMuteChanged {
+                    frequency: frequency.clone(),
+                    muted,
+                })),
+            };
+            // If muting dropped the floor, also tell the room the holder
+            // released so talking indicators clear immediately.
+            let release = dropped_holder.as_ref().map(|holder_id| Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: holder_id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                })),
+            });
+            for tx in recipients {
+                let _ = tx.send(evt.clone()).await;
+                if let Some(ev) = &release {
+                    let _ = tx.send(ev.clone()).await;
+                }
+            }
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelMuteResponse {}))
+    }
+
     async fn set_channel_name(
         &self,
         req: Request<pb::SetChannelNameRequest>,
@@ -1328,6 +1435,7 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            channel_mutes: crate::state::shared_channel_mutes(Default::default()),
             bans: crate::state::shared_bans(Default::default()),
             health: crate::metrics::shared_health(),
             live_rate: crate::metrics::shared_live_rate(),
@@ -1769,6 +1877,80 @@ mod tests {
         // in-flight tail can still flush.
         assert!(room.holder.is_none());
         assert!(matches!(&room.last_released, Some((id, _)) if id == "evan"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_sets_and_clears_in_shared_set() {
+        let (api, token) = test_api(false).await;
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.channel_mutes.read().await.contains("446.05"));
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: false,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.channel_mutes.read().await.contains("446.05"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_rejects_bad_frequency() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .set_channel_mute(authed(
+                pb::SetChannelMuteRequest {
+                    frequency: "999.99".into(),
+                    muted: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn muting_channel_drops_its_holder() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "fred", Some("447.00")).await;
+        api.state
+            .registry
+            .lock()
+            .await
+            .rooms
+            .get_mut("447.00")
+            .unwrap()
+            .holder = Some("fred".into());
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "447.00".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        let reg = api.state.registry.lock().await;
+        let room = &reg.rooms["447.00"];
+        assert!(
+            room.holder.is_none(),
+            "muting the channel must free the floor"
+        );
+        assert!(matches!(&room.last_released, Some((id, _)) if id == "fred"));
     }
 
     #[tokio::test]

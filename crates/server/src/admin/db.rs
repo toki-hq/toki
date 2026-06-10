@@ -374,6 +374,49 @@ impl AdminDb {
         })
     }
 
+    // ── Channel mutes ─────────────────────────────────────────────────
+    // Presence of a row = the channel is muted. Unlike channel names
+    // there's no value column, so mute/unmute is a plain insert/delete.
+
+    /// Load every muted channel frequency — boot-time hydration of
+    /// `SharedChannelMutes`.
+    pub async fn load_channel_mutes(&self) -> Result<std::collections::HashSet<String>> {
+        on_pool!(self, p, {
+            let rows = sqlx::query("SELECT frequency FROM channel_mutes")
+                .fetch_all(p)
+                .await?;
+            let mut set = std::collections::HashSet::with_capacity(rows.len());
+            for r in &rows {
+                set.insert(r.try_get::<String, _>(0)?);
+            }
+            Ok(set)
+        })
+    }
+
+    /// Mute a channel (idempotent — re-muting an already-muted channel
+    /// is a no-op). Caller validated the frequency.
+    pub async fn set_channel_mute(&self, frequency: &str) -> Result<()> {
+        let now = now_unix();
+        let sql = self.channel_mute_insert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(frequency)
+                .bind(now)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Unmute a channel (no-op if it wasn't muted).
+    pub async fn clear_channel_mute(&self, frequency: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM channel_mutes WHERE frequency = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(frequency).execute(p).await?;
+            Ok(())
+        })
+    }
+
     // ── Client identities ─────────────────────────────────────────────
 
     /// Load every known identity into a `pubkey-hex → record` map —
@@ -761,6 +804,24 @@ impl AdminDb {
     }
 
     // ── Per-dialect upsert SQL (the statements that genuinely differ) ──
+
+    /// Mute insert SQL — tolerant of an existing row (idempotent mute).
+    fn channel_mute_insert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES (?, ?) \
+                 ON CONFLICT(frequency) DO NOTHING"
+            }
+            Backend::MySql => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES (?, ?) \
+                 ON DUPLICATE KEY UPDATE muted_at = muted_at"
+            }
+            Backend::Postgres => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES ($1, $2) \
+                 ON CONFLICT(frequency) DO NOTHING"
+            }
+        }
+    }
 
     fn channel_upsert_sql(&self) -> &'static str {
         match self.backend {
@@ -1221,6 +1282,10 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       TEXT NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency TEXT PRIMARY KEY NOT NULL,
+    muted_at  INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           TEXT PRIMARY KEY NOT NULL,
     display_id       TEXT NOT NULL,
@@ -1288,6 +1353,10 @@ CREATE TABLE IF NOT EXISTS channel_names (
     name       VARCHAR(255) NOT NULL,
     updated_at BIGINT NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency VARCHAR(32) PRIMARY KEY NOT NULL,
+    muted_at  BIGINT NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           VARCHAR(64) PRIMARY KEY NOT NULL,
     display_id       VARCHAR(32) NOT NULL,
@@ -1352,6 +1421,10 @@ CREATE TABLE IF NOT EXISTS channel_names (
     frequency  TEXT PRIMARY KEY NOT NULL,
     name       TEXT NOT NULL,
     updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency TEXT PRIMARY KEY NOT NULL,
+    muted_at  BIGINT NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS identities (
     pubkey           TEXT PRIMARY KEY NOT NULL,
@@ -1611,6 +1684,29 @@ mod tests {
 
         db.clear_all_channel_names().await.unwrap();
         assert!(db.load_channel_names().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn channel_mutes_crud_roundtrips() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_channel_mutes().await.unwrap().is_empty());
+
+        db.set_channel_mute("446.05").await.unwrap();
+        db.set_channel_mute("447.00").await.unwrap();
+        db.set_channel_mute("446.05").await.unwrap(); // idempotent re-mute
+        let muted = db.load_channel_mutes().await.unwrap();
+        assert_eq!(muted.len(), 2);
+        assert!(muted.contains("446.05"));
+        assert!(muted.contains("447.00"));
+
+        db.clear_channel_mute("446.05").await.unwrap();
+        let muted = db.load_channel_mutes().await.unwrap();
+        assert_eq!(muted.len(), 1);
+        assert!(!muted.contains("446.05"));
+        // Clearing an unmuted channel is a harmless no-op.
+        db.clear_channel_mute("440.00").await.unwrap();
+        assert_eq!(db.load_channel_mutes().await.unwrap().len(), 1);
     }
 
     fn identity_record(first_seen: i64) -> IdentityRecord {

@@ -191,6 +191,22 @@ pub fn shared_channel_names(initial: HashMap<String, String>) -> SharedChannelNa
     Arc::new(RwLock::new(initial))
 }
 
+/// Channel-wide mutes — the set of canonical frequencies on which no one
+/// may transmit (see the admin `SetChannelMute` RPC). Written by the
+/// admin handlers, read by the signaling PTT path and the UDP relay's
+/// speak-gate (keyed by the sender's current frequency). Same
+/// writer/reader split and off-`Registry` rationale as
+/// [`SharedChannelNames`]: a mute persists independently of room
+/// occupancy (you can mute an empty channel), and reads dominate.
+/// Hydrated from the `channel_mutes` table at boot.
+pub type SharedChannelMutes = Arc<RwLock<std::collections::HashSet<String>>>;
+
+/// Build a shared channel-mute set from an initial snapshot (typically
+/// `AdminDb::load_channel_mutes` at boot, or empty for tests).
+pub fn shared_channel_mutes(initial: std::collections::HashSet<String>) -> SharedChannelMutes {
+    Arc::new(RwLock::new(initial))
+}
+
 /// Everything this server remembers about one client identity,
 /// keyed by the pubkey hex in [`SharedIdentities`] and mirrored to
 /// the `identities` table by the admin task.

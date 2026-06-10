@@ -41,6 +41,7 @@ async fn boot() -> (axum::Router, &'static str) {
         login_throttle: Arc::new(IpThrottle::new()),
         server_config: server_config::shared_default(),
         channel_names: toki_server::state::shared_channel_names(Default::default()),
+        channel_mutes: toki_server::state::shared_channel_mutes(Default::default()),
         bans: toki_server::state::shared_bans(Default::default()),
         health: toki_server::metrics::shared_health(),
         live_rate: toki_server::metrics::shared_live_rate(),

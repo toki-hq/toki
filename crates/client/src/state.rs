@@ -33,6 +33,12 @@ pub struct ClientState {
     /// leaves. Our own id appears here when *we're* muted (the runtime
     /// also mirrors that into the session's `self_muted` gate).
     pub muted: HashSet<String>,
+    /// `true` when the *current* channel is muted by an operator (no one
+    /// may transmit on it). Delivered by `ChannelMuteChanged` on join /
+    /// change-frequency and on live toggle; cleared on every frequency
+    /// change so a stale mute never sticks to the wrong channel. Folds
+    /// into the local "can I talk" check alongside our own member-mute.
+    pub channel_muted: bool,
     pub log: VecDeque<String>,
 }
 
@@ -69,6 +75,18 @@ impl ClientState {
     #[allow(dead_code)]
     pub fn is_muted(&self, client_id: &str) -> bool {
         self.muted.contains(client_id)
+    }
+
+    /// Are *we* currently barred from transmitting? True when an
+    /// operator has muted us personally (member-mute) or muted the
+    /// channel we're tuned to (channel-mute). The server enforces both
+    /// regardless; this drives the PTT button's "unable to talk" cue.
+    pub fn locally_silenced(&self) -> bool {
+        self.channel_muted
+            || self
+                .self_id
+                .as_deref()
+                .is_some_and(|id| self.muted.contains(id))
     }
 }
 

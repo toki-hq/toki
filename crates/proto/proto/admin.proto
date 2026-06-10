@@ -62,6 +62,13 @@ service Admin {
   // frequency (empty `name` clears it). FAILED_PRECONDITION when the
   // feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
   // longer than 16 chars. Names persist independently of room occupancy.
+  // Channel-wide mute: silence transmission on a whole frequency. While
+  // a channel is muted, no member tuned to it may take the PTT floor;
+  // moving to another (unmuted) channel restores the ability to talk.
+  // Enforced by the same relay speak-gate as member mute. Persists
+  // independently of occupancy (like channel names). INVALID_ARGUMENT
+  // for a bad frequency.
+  rpc SetChannelMute(SetChannelMuteRequest) returns (SetChannelMuteResponse);
   rpc SetChannelName(SetChannelNameRequest) returns (SetChannelNameResponse);
   // Clear every channel name in one shot.
   rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
@@ -96,12 +103,21 @@ message Snapshot {
   // (the persisted GetMetrics series is 1-minute granularity).
   uint64 rx_bytes_per_sec = 6;
   uint64 tx_bytes_per_sec = 7;
+  // Canonical frequencies currently muted channel-wide (no one may
+  // transmit). Carries ALL muted channels regardless of occupancy, so
+  // the panel can flag an empty-but-muted frequency. Independent of the
+  // named-channels feature — channel mute is always available.
+  repeated string muted_channels = 8;
 }
 
 message Room {
   string frequency = 1;             // canonical "446.05"
   optional string holder = 2;       // client_id of the current PTT holder
   repeated Member members = 3;
+  // True when this whole channel is muted (see Admin.SetChannelMute) —
+  // no member tuned here can transmit. Convenience mirror of the
+  // Snapshot.muted_channels entry for this frequency.
+  bool muted = 4;
 }
 
 message Member {
@@ -246,6 +262,12 @@ message BanRecord {
 
 message LiftBanRequest { string pubkey = 1; }
 message LiftBanResponse {}
+
+message SetChannelMuteRequest {
+  string frequency = 1;             // canonical "446.05"
+  bool muted = 2;                   // true = mute the channel, false = unmute
+}
+message SetChannelMuteResponse {}
 
 message SetChannelNameRequest {
   string frequency = 1;             // canonical "446.05"

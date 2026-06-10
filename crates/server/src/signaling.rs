@@ -9,9 +9,10 @@ use uuid::Uuid;
 use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
-    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelNameChanged, Event, FrequencyChanged,
-    IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse,
-    MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest, RegisterResponse,
+    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelMuteChanged, ChannelNameChanged, Event,
+    FrequencyChanged, IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest,
+    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PttAck, PttEvent, RegisterRequest,
+    RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
@@ -49,6 +50,13 @@ pub struct SignalingSvc {
     /// `ChangeFrequency` to deliver the current name to the client —
     /// but only while `server_config.named_channels_enabled` is on.
     channel_names: SharedChannelNames,
+    /// Channel-wide mutes (frequency set), shared with the admin panel
+    /// which writes them. Consulted by the PTT speak-gate: a press on a
+    /// muted channel is refused, so no one transmits there until it's
+    /// unmuted or they tune away. Also delivered to clients on `Join` /
+    /// `ChangeFrequency` via `channel_mute_event` so the PTT button can
+    /// show the disabled cue.
+    channel_mutes: crate::state::SharedChannelMutes,
     /// Audit-log sink. Records peer connects (on `Register`), explicit
     /// disconnects (on `Leave`), and failed password attempts.
     audit: AuditSink,
@@ -82,6 +90,7 @@ impl SignalingSvc {
         toml_password: Option<String>,
         server_config: SharedServerConfig,
         channel_names: SharedChannelNames,
+        channel_mutes: crate::state::SharedChannelMutes,
         identities: crate::state::SharedIdentities,
         identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
         bans: crate::state::SharedBans,
@@ -94,6 +103,7 @@ impl SignalingSvc {
             throttle: IpThrottle::new(),
             server_config,
             channel_names,
+            channel_mutes,
             audit,
             identities,
             identity_tx,
@@ -172,6 +182,23 @@ impl SignalingSvc {
                 name,
             })),
         })
+    }
+
+    /// Build a `ChannelMuteChanged` carrying `frequency`'s current mute
+    /// state, for delivery on `Join` / `ChangeFrequency` so a client
+    /// learns immediately whether it can transmit here. Always returns
+    /// an event (unlike `channel_name_event`, channel mute has no
+    /// feature gate) — an unmuted channel sends `muted = false`, which
+    /// also clears any stale mute the client carried from a prior
+    /// channel.
+    async fn channel_mute_event(&self, frequency: &str) -> Event {
+        let muted = self.channel_mutes.read().await.contains(frequency);
+        Event {
+            event: Some(event::Event::ChannelMuteChanged(ChannelMuteChanged {
+                frequency: frequency.to_string(),
+                muted,
+            })),
+        }
     }
 }
 
@@ -613,6 +640,9 @@ impl Signaling for SignalingSvc {
         if let Some(name_evt) = self.channel_name_event(&frequency).await {
             let _ = tx.send(name_evt).await;
         }
+        // Deliver the channel's mute state so the joiner's PTT button
+        // reflects it right away (always sent — no feature gate).
+        let _ = tx.send(self.channel_mute_event(&frequency).await).await;
 
         // Announce the new joiner to existing members of this freq.
         for id in other_ids {
@@ -813,6 +843,10 @@ impl Signaling for SignalingSvc {
             if let Some(name_evt) = self.channel_name_event(&new_freq).await {
                 let _ = tx.send(name_evt).await;
             }
+            // And the new channel's mute state, so the PTT button updates
+            // the instant the move confirms (clears a stale mute carried
+            // from the previous channel when the new one is unmuted).
+            let _ = tx.send(self.channel_mute_event(&new_freq).await).await;
             // Snapshot the new roster's members + names without holding
             // the lock across awaits.
             let new_members: Vec<(String, String)> = {
@@ -899,22 +933,28 @@ impl Signaling for SignalingSvc {
                     None => continue, // sender isn't in any room
                 };
 
-                // Speak gate: a muted member's press never reaches
-                // floor arbitration, so they can't take or preempt the
-                // floor. We drop the event entirely rather than echo a
-                // denied PttDown — the client already self-suppresses
-                // its mic on a Muted event, and the UDP relay backstops
-                // any frames already in flight. A press that arrives
-                // *while* they hold the floor (e.g. mute landed
-                // mid-transmission) is also gated here; the SetMute
-                // handler proactively drops the floor so the channel
-                // doesn't stay stuck on a now-silent holder.
-                let muted = registry
+                // Speak gate: a press that can't legitimately take the
+                // floor never reaches arbitration, so the sender can't
+                // take or preempt it. Two vetoes flow through here:
+                //   * member mute — this session is individually muted;
+                //   * channel mute — the whole frequency is muted, so
+                //     nobody tuned here may transmit (moving to an
+                //     unmuted channel restores it for free, since this
+                //     check is keyed on `frequency`).
+                // We drop the event rather than echo a denied PttDown —
+                // the client self-suppresses on the Muted / ChannelMute
+                // events and the relay backstops in-flight frames. A
+                // press that arrives *while* the sender holds the floor
+                // (mute landed mid-transmission) is gated too; the
+                // SetMute / SetChannelMute handlers proactively drop the
+                // floor so the channel never sticks on a silenced holder.
+                let member_muted = registry
                     .clients
                     .get(&evt.client_id)
                     .map(|c| !c.can_speak())
                     .unwrap_or(false);
-                if muted {
+                let channel_muted = self.channel_mutes.read().await.contains(&frequency);
+                if member_muted || channel_muted {
                     continue;
                 }
 

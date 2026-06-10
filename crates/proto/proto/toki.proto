@@ -172,6 +172,13 @@ message Event {
     // futile presses the server will drop) and shows a "muted by
     // operator" cue; other members light a muted badge on that member.
     MuteChanged mute_changed = 7;
+    // Sent when an admin mutes/unmutes a whole channel (see
+    // Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+    // the current channel's mute state. Broadcast to every member of the
+    // affected frequency. The client compares `frequency` against its
+    // current tuning: while its channel is muted it can't transmit and
+    // the PTT button shows the disabled "unable to talk" cue.
+    ChannelMuteChanged channel_mute_changed = 8;
   }
 }
 
@@ -205,6 +212,13 @@ message ChannelNameChanged {
 // A member's server-side mute state changed (see Admin.SetMute).
 message MuteChanged {
   string client_id = 1;
+  bool muted = 2;
+}
+
+// A channel's mute state changed (see Admin.SetChannelMute), or the
+// current state delivered on Join / ChangeFrequency.
+message ChannelMuteChanged {
+  string frequency = 1;
   bool muted = 2;
 }
 

@@ -416,6 +416,7 @@ impl TokiApp {
             is_transmitting,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
+            muted: s.locally_silenced(),
             log_tail: s.log.iter().next_back().cloned().unwrap_or_default(),
         }
     }
@@ -679,6 +680,11 @@ struct StateSnapshot {
     /// (server→client `FrequencyChanged`) snap the tuner over to
     /// match without round-tripping through user input.
     frequency: Option<String>,
+    /// `true` when an operator has barred us from transmitting on the
+    /// current channel — either a personal member-mute or a mute on the
+    /// channel we're tuned to. Drives the PTT button's disabled "UNABLE
+    /// TO TALK" treatment. Moving to an unmuted channel clears it.
+    muted: bool,
     #[allow(dead_code)]
     log_tail: String,
 }
@@ -3124,8 +3130,15 @@ impl TokiApp {
         rect: Rect,
         st: RadioState,
     ) {
-        let connected = matches!(self.snapshot().connection, ConnState::Connected);
-        let sense = if connected {
+        let snap = self.snapshot();
+        let connected = matches!(snap.connection, ConnState::Connected);
+        // Server-side mute (our own member-mute, or the channel we're on
+        // being muted) makes the button inert: no press is sent and the
+        // visuals go disabled. The server would refuse the press anyway —
+        // this just makes the "you can't talk right now" obvious instead
+        // of a button that looks live but silently does nothing.
+        let muted = connected && snap.muted;
+        let sense = if connected && !muted {
             Sense::click_and_drag()
         } else {
             Sense::hover()
@@ -3147,7 +3160,7 @@ impl TokiApp {
         // hit the runtime's 250 ms cooldown and produced a visible
         // "constantly spammed" pulse pattern. Holding latches `ptt_held`
         // and we only let go when no pointer button is down anywhere.
-        if connected {
+        if connected && !muted {
             let any_down = ui.input(|i| i.pointer.any_down());
             let pressed_on_button = resp.is_pointer_button_down_on();
             if self.ptt_held {
@@ -3159,37 +3172,56 @@ impl TokiApp {
                 self.ptt_held = true;
                 let _ = self.cmd_tx.send(Cmd::PttDown);
             }
+        } else if muted && self.ptt_held {
+            // If a mute lands mid-hold, release locally so we don't sit
+            // latched in `ptt_held` (the runtime already gates the mic).
+            self.ptt_held = false;
+            let _ = self.cmd_tx.send(Cmd::PttUp);
         }
 
-        // Visuals per state.
-        let (top, bottom, label, label_color, dot_color, border, glow_intensity) = match st {
-            RadioState::Tx => (
-                T::PTT_TX_TOP,
-                T::PTT_TX_BOTTOM,
-                "TRANSMITTING",
-                T::TX,
-                T::TX,
-                T::TX,
-                1.4,
-            ),
-            RadioState::Busy => (
-                T::PTT_BUSY_TOP,
-                T::PTT_BUSY_BOTTOM,
-                "CHANNEL BUSY",
-                T::WARN,
+        // Visuals per state. A mute overrides whatever the radio state
+        // would otherwise show: inert dark button, red dot, and an
+        // explicit "UNABLE TO TALK" so the cause is unmistakable.
+        let (top, bottom, label, label_color, dot_color, border, glow_intensity) = if muted {
+            (
+                T::PTT_MUTED_TOP,
+                T::PTT_MUTED_BOTTOM,
+                "UNABLE TO TALK",
+                T::INK_MUTE,
                 T::WARN,
                 T::SHELL_EDGE,
                 0.0,
-            ),
-            _ => (
-                T::PTT_IDLE_TOP,
-                T::PTT_IDLE_BOTTOM,
-                "HOLD TO TALK",
-                T::INK,
-                T::PRIMARY,
-                T::SHELL_EDGE,
-                0.5,
-            ),
+            )
+        } else {
+            match st {
+                RadioState::Tx => (
+                    T::PTT_TX_TOP,
+                    T::PTT_TX_BOTTOM,
+                    "TRANSMITTING",
+                    T::TX,
+                    T::TX,
+                    T::TX,
+                    1.4,
+                ),
+                RadioState::Busy => (
+                    T::PTT_BUSY_TOP,
+                    T::PTT_BUSY_BOTTOM,
+                    "CHANNEL BUSY",
+                    T::WARN,
+                    T::WARN,
+                    T::SHELL_EDGE,
+                    0.0,
+                ),
+                _ => (
+                    T::PTT_IDLE_TOP,
+                    T::PTT_IDLE_BOTTOM,
+                    "HOLD TO TALK",
+                    T::INK,
+                    T::PRIMARY,
+                    T::SHELL_EDGE,
+                    0.5,
+                ),
+            }
         };
 
         // Two-stop vertical gradient via the colorgradient helper —

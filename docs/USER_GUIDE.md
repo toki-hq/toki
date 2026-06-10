@@ -459,11 +459,23 @@ Sections:
 
 Per-client actions in the roster: **kick**, **move** (to another frequency),
 **rename** (broadcasts `DisplayNameChanged`), **priority** (elect/clear a
-priority speaker on a channel), and **ban** — kicks the session and blocks
-its *identity* from registering again, with an optional reason echoed to the
-banned client and an optional **machine ban** (a wiped config mints a fresh
-identity but keeps the machine hash, so it stays banned). Members without a
-verified identity can only be kicked — there's nothing durable to ban.
+priority speaker on a channel), **mute**, and **ban**.
+
+**Mute** silences a member's *transmit* without disconnecting them: the
+server refuses their PTT presses (`SetMute`), so they stay connected and keep
+hearing the channel — the gentle lever between doing nothing and a kick/ban.
+Muting whoever currently holds the floor drops it on the spot so the channel
+isn't stuck on a now-silent talker; the muted client gets a "muted by an
+operator" cue and stops uploading. Mute is **session-scoped** (it clears if
+they reconnect) and audited; the roster shows a **MUTED** badge. Enforcement
+runs through a single relay-side speak-gate that the planned No-Talk channels
+will reuse (default-deny + grant).
+
+**Ban** kicks the session and blocks its *identity* from registering again,
+with an optional reason echoed to the banned client and an optional **machine
+ban** (a wiped config mints a fresh identity but keeps the machine hash, so it
+stays banned). Members without a verified identity can only be kicked — there's
+nothing durable to ban.
 
 Members that registered with a verified **client identity** show a
 fingerprint badge with their durable identity string (e.g. `7Q4XF9KB`)
@@ -483,7 +495,7 @@ client stays attributable.
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
 | `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
 | UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive; `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame. Server→peer packets prepend the codec version. |
-| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
+| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |
 

@@ -11,6 +11,8 @@ import {
   Check,
   Fingerprint,
   Ban,
+  MicOff,
+  Mic,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -269,6 +271,11 @@ function ChannelDetail({
                     <Zap className="size-2.5" /> PRIO
                   </Badge>
                 )}
+                {m.muted && (
+                  <Badge variant="destructive">
+                    <MicOff className="size-2.5" /> MUTED
+                  </Badge>
+                )}
                 <IdentityBadge member={m} />
               </span>
               <span
@@ -454,6 +461,16 @@ function MemberMenu({
       toast.error(`Priority change failed: ${err(e)}`);
     }
   }
+  async function toggleMute() {
+    try {
+      await admin.setMute({ id: member.id, muted: !member.muted });
+      toast.success(
+        member.muted ? `${member.displayName} unmuted` : `${member.displayName} muted`,
+      );
+    } catch (e) {
+      toast.error(`Mute change failed: ${err(e)}`);
+    }
+  }
   async function kick() {
     if (!confirm(`Kick ${member.displayName}? They'll be disconnected immediately.`)) return;
     try {
@@ -491,6 +508,9 @@ function MemberMenu({
         </DropdownMenuSub>
         <DropdownMenuItem onSelect={() => void togglePriority()}>
           <Zap /> {member.priority ? "Revoke priority" : "Promote to priority"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void toggleMute()}>
+          {member.muted ? <Mic /> : <MicOff />} {member.muted ? "Unmute" : "Mute (silence)"}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void kick()} className="text-warning">

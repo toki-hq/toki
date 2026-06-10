@@ -62,7 +62,11 @@ impl ClientState {
         }
     }
 
-    /// Is this member currently server-side muted?
+    /// Is this member currently server-side muted? No UI consumer on
+    /// the minimal radio strip yet — kept as the accessor a future
+    /// per-member roster badge / self-muted strip indicator reads,
+    /// alongside the `muted` set it queries.
+    #[allow(dead_code)]
     pub fn is_muted(&self, client_id: &str) -> bool {
         self.muted.contains(client_id)
     }

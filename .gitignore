@@ -69,3 +69,6 @@ design/
 # Local Claude Code settings (per-operator permissions, not shared).
 # The shareable bits — the skills under .claude/skills/ — are tracked.
 .claude/settings.local.json
+
+# Graphify local knowledge-graph cache (generated; never commit)
+graphify-out/

@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file admin.proto.
  */
 export const file_admin: GenFile = /*@__PURE__*/
-  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSKvAgoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJhCgRSb29tEhEKCWZyZXF1ZW5jeRgBIAEoCRITCgZob2xkZXIYAiABKAlIAIgBARImCgdtZW1iZXJzGAMgAygLMhUudG9raS5hZG1pbi52MS5NZW1iZXJCCQoHX2hvbGRlciLPAQoGTWVtYmVyEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIWCg5jb25uZWN0ZWRfc2VjcxgDIAEoBBIQCghwcmlvcml0eRgEIAEoCBIQCghpZGVudGl0eRgFIAEoCRIXCg9pZGVudGl0eV9wdWJrZXkYBiABKAkSHQoVaWRlbnRpdHlfbWFjaGluZV9oYXNoGAcgASgJEiAKGGlkZW50aXR5X2ZpcnN0X3NlZW5fdW5peBgIIAEoBBINCgVtdXRlZBgJIAEoCCJqCgpTZXJ2ZXJJbmZvEg8KB3ZlcnNpb24YASABKAkSEgoKYWRtaW5fYmluZBgCIAEoCRIXCg9zdGFydGVkX2F0X3VuaXgYAyABKAQSHgoWdG9tbF9wYXNzd29yZF9vdmVycmlkZRgEIAEoCCLRAQoMU2VydmVyQ29uZmlnEhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIVCg1ncnBjX3Bhc3N3b3JkGAQgASgJEhkKEWdycGNfcGFzc3dvcmRfc2V0GAUgASgIEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBiABKAgSFQoNYXVkaW9fcXVhbGl0eRgHIAEoDRIYChByZXF1aXJlX2lkZW50aXR5GAggASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0IqwBChlVcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0EhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAQgASgIEhUKDWF1ZGlvX3F1YWxpdHkYBSABKA0SGAoQcmVxdWlyZV9pZGVudGl0eRgGIAEoCCIsChhTZXRTZXJ2ZXJQYXNzd29yZFJlcXVlc3QSEAoIcGFzc3dvcmQYASABKAkiGwoZU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZSI+ChVDaGFuZ2VQYXNzd29yZFJlcXVlc3QSDwoHY3VycmVudBgBIAEoCRIUCgxuZXdfcGFzc3dvcmQYAiABKAkiGAoWQ2hhbmdlUGFzc3dvcmRSZXNwb25zZSIfChFLaWNrQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCSIUChJLaWNrQ2xpZW50UmVzcG9uc2UiMgoRTW92ZUNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhQKEk1vdmVDbGllbnRSZXNwb25zZSI3ChNSZW5hbWVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIWChRSZW5hbWVDbGllbnRSZXNwb25zZSIvChJTZXRQcmlvcml0eVJlcXVlc3QSCgoCaWQYASABKAkSDQoFZ3JhbnQYAiABKAgiFQoTU2V0UHJpb3JpdHlSZXNwb25zZSIrCg5TZXRNdXRlUmVxdWVzdBIKCgJpZBgBIAEoCRINCgVtdXRlZBgCIAEoCCIRCg9TZXRNdXRlUmVzcG9uc2UiQwoQQmFuQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIOCgZyZWFzb24YAiABKAkSEwoLYmFuX21hY2hpbmUYAyABKAgiEwoRQmFuQ2xpZW50UmVzcG9uc2UiEQoPTGlzdEJhbnNSZXF1ZXN0IjoKEExpc3RCYW5zUmVzcG9uc2USJgoEYmFucxgBIAMoCzIYLnRva2kuYWRtaW4udjEuQmFuUmVjb3JkIpcBCglCYW5SZWNvcmQSDgoGcHVia2V5GAEgASgJEhIKCmRpc3BsYXlfaWQYAiABKAkSFQoNbGFzdF9jYWxsc2lnbhgDIAEoCRIUCgxtYWNoaW5lX2hhc2gYBCABKAkSDgoGcmVhc29uGAUgASgJEhEKCWJhbm5lZF9ieRgGIAEoCRIWCg5iYW5uZWRfYXRfdW5peBgHIAEoBCIgCg5MaWZ0QmFuUmVxdWVzdBIOCgZwdWJrZXkYASABKAkiEQoPTGlmdEJhblJlc3BvbnNlIjgKFVNldENoYW5uZWxOYW1lUmVxdWVzdBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSIYChZTZXRDaGFubmVsTmFtZVJlc3BvbnNlIh0KG0NsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdCIeChxDbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlIngKDE1ldHJpY1NhbXBsZRIPCgd0c191bml4GAEgASgEEhgKEHJ4X2J5dGVzX3Blcl9zZWMYAiABKAQSGAoQdHhfYnl0ZXNfcGVyX3NlYxgDIAEoBBINCgV1c2VycxgEIAEoDRIUCgx0cmFuc21pdHRpbmcYBSABKA0iPgoOTWV0cmljc1JlcXVlc3QSLAoGd2luZG93GAEgASgOMhwudG9raS5hZG1pbi52MS5NZXRyaWNzV2luZG93Ij8KD01ldHJpY3NSZXNwb25zZRIsCgdzYW1wbGVzGAEgAygLMhsudG9raS5hZG1pbi52MS5NZXRyaWNTYW1wbGUiGAoWR2V0U2VydmVySGVhbHRoUmVxdWVzdCKHAQoMU2VydmVySGVhbHRoEhMKC2NwdV9wZXJjZW50GAEgASgBEhYKDm1lbV91c2VkX2J5dGVzGAIgASgEEhcKD21lbV90b3RhbF9ieXRlcxgDIAEoBBIXCg9kaXNrX3VzZWRfYnl0ZXMYBCABKAQSGAoQZGlza190b3RhbF9ieXRlcxgFIAEoBCJpCgpBdWRpdEVudHJ5EgoKAmlkGAEgASgEEg8KB3RzX3VuaXgYAiABKAQSDAoEa2luZBgDIAEoCRINCgVhY3RvchgEIAEoCRIRCglmcmVxdWVuY3kYBSABKAkSDgoGZGV0YWlsGAYgASgJIl8KD0F1ZGl0TG9nUmVxdWVzdBIqCgZmaWx0ZXIYASABKA4yGi50b2tpLmFkbWluLnYxLkF1ZGl0RmlsdGVyEg0KBWxpbWl0GAIgASgNEhEKCWJlZm9yZV9pZBgDIAEoBCJNChBBdWRpdExvZ1Jlc3BvbnNlEioKB2VudHJpZXMYASADKAsyGS50b2tpLmFkbWluLnYxLkF1ZGl0RW50cnkSDQoFdG90YWwYAiABKAQqWQoNTWV0cmljc1dpbmRvdxIXChNNRVRSSUNTX1dJTkRPV19IT1VSEAASFgoSTUVUUklDU19XSU5ET1dfREFZEAESFwoTTUVUUklDU19XSU5ET1dfV0VFSxACKnQKC0F1ZGl0RmlsdGVyEhQKEEFVRElUX0ZJTFRFUl9BTEwQABIWChJBVURJVF9GSUxURVJfQURNSU4QARIcChhBVURJVF9GSUxURVJfQ09OTkVDVElPTlMQAhIZChVBVURJVF9GSUxURVJfU0VDVVJJVFkQAzLeDAoFQWRtaW4SPwoFV2F0Y2gSGy50b2tpLmFkbWluLnYxLldhdGNoUmVxdWVzdBoXLnRva2kuYWRtaW4udjEuU25hcHNob3QwARJPCg1HZXRTZXJ2ZXJJbmZvEiMudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJJbmZvUmVxdWVzdBoZLnRva2kuYWRtaW4udjEuU2VydmVySW5mbxJVCg9HZXRTZXJ2ZXJDb25maWcSJS50b2tpLmFkbWluLnYxLkdldFNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJbChJVcGRhdGVTZXJ2ZXJDb25maWcSKC50b2tpLmFkbWluLnYxLlVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJmChFTZXRTZXJ2ZXJQYXNzd29yZBInLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0GigudG9raS5hZG1pbi52MS5TZXRTZXJ2ZXJQYXNzd29yZFJlc3BvbnNlEl0KDkNoYW5nZVBhc3N3b3JkEiQudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlcXVlc3QaJS50b2tpLmFkbWluLnYxLkNoYW5nZVBhc3N3b3JkUmVzcG9uc2USUQoKS2lja0NsaWVudBIgLnRva2kuYWRtaW4udjEuS2lja0NsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXNwb25zZRJRCgpNb3ZlQ2xpZW50EiAudG9raS5hZG1pbi52MS5Nb3ZlQ2xpZW50UmVxdWVzdBohLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlc3BvbnNlElcKDFJlbmFtZUNsaWVudBIiLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVxdWVzdBojLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVzcG9uc2USVAoLU2V0UHJpb3JpdHkSIS50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVxdWVzdBoiLnRva2kuYWRtaW4udjEuU2V0UHJpb3JpdHlSZXNwb25zZRJICgdTZXRNdXRlEh0udG9raS5hZG1pbi52MS5TZXRNdXRlUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuU2V0TXV0ZVJlc3BvbnNlEk4KCUJhbkNsaWVudBIfLnRva2kuYWRtaW4udjEuQmFuQ2xpZW50UmVxdWVzdBogLnRva2kuYWRtaW4udjEuQmFuQ2xpZW50UmVzcG9uc2USSwoITGlzdEJhbnMSHi50b2tpLmFkbWluLnYxLkxpc3RCYW5zUmVxdWVzdBofLnRva2kuYWRtaW4udjEuTGlzdEJhbnNSZXNwb25zZRJICgdMaWZ0QmFuEh0udG9raS5hZG1pbi52MS5MaWZ0QmFuUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuTGlmdEJhblJlc3BvbnNlEl0KDlNldENoYW5uZWxOYW1lEiQudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlcXVlc3QaJS50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVzcG9uc2USbwoUQ2xlYXJBbGxDaGFubmVsTmFtZXMSKi50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdBorLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZRJLCgpHZXRNZXRyaWNzEh0udG9raS5hZG1pbi52MS5NZXRyaWNzUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuTWV0cmljc1Jlc3BvbnNlElUKD0dldFNlcnZlckhlYWx0aBIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVySGVhbHRoUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVySGVhbHRoEk4KC0dldEF1ZGl0TG9nEh4udG9raS5hZG1pbi52MS5BdWRpdExvZ1JlcXVlc3QaHy50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSLHAgoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQSFgoObXV0ZWRfY2hhbm5lbHMYCCADKAkaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJwCgRSb29tEhEKCWZyZXF1ZW5jeRgBIAEoCRITCgZob2xkZXIYAiABKAlIAIgBARImCgdtZW1iZXJzGAMgAygLMhUudG9raS5hZG1pbi52MS5NZW1iZXISDQoFbXV0ZWQYBCABKAhCCQoHX2hvbGRlciLPAQoGTWVtYmVyEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIWCg5jb25uZWN0ZWRfc2VjcxgDIAEoBBIQCghwcmlvcml0eRgEIAEoCBIQCghpZGVudGl0eRgFIAEoCRIXCg9pZGVudGl0eV9wdWJrZXkYBiABKAkSHQoVaWRlbnRpdHlfbWFjaGluZV9oYXNoGAcgASgJEiAKGGlkZW50aXR5X2ZpcnN0X3NlZW5fdW5peBgIIAEoBBINCgVtdXRlZBgJIAEoCCJqCgpTZXJ2ZXJJbmZvEg8KB3ZlcnNpb24YASABKAkSEgoKYWRtaW5fYmluZBgCIAEoCRIXCg9zdGFydGVkX2F0X3VuaXgYAyABKAQSHgoWdG9tbF9wYXNzd29yZF9vdmVycmlkZRgEIAEoCCLRAQoMU2VydmVyQ29uZmlnEhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIVCg1ncnBjX3Bhc3N3b3JkGAQgASgJEhkKEWdycGNfcGFzc3dvcmRfc2V0GAUgASgIEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBiABKAgSFQoNYXVkaW9fcXVhbGl0eRgHIAEoDRIYChByZXF1aXJlX2lkZW50aXR5GAggASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0IqwBChlVcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0EhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAQgASgIEhUKDWF1ZGlvX3F1YWxpdHkYBSABKA0SGAoQcmVxdWlyZV9pZGVudGl0eRgGIAEoCCIsChhTZXRTZXJ2ZXJQYXNzd29yZFJlcXVlc3QSEAoIcGFzc3dvcmQYASABKAkiGwoZU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZSI+ChVDaGFuZ2VQYXNzd29yZFJlcXVlc3QSDwoHY3VycmVudBgBIAEoCRIUCgxuZXdfcGFzc3dvcmQYAiABKAkiGAoWQ2hhbmdlUGFzc3dvcmRSZXNwb25zZSIfChFLaWNrQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCSIUChJLaWNrQ2xpZW50UmVzcG9uc2UiMgoRTW92ZUNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhQKEk1vdmVDbGllbnRSZXNwb25zZSI3ChNSZW5hbWVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIWChRSZW5hbWVDbGllbnRSZXNwb25zZSIvChJTZXRQcmlvcml0eVJlcXVlc3QSCgoCaWQYASABKAkSDQoFZ3JhbnQYAiABKAgiFQoTU2V0UHJpb3JpdHlSZXNwb25zZSIrCg5TZXRNdXRlUmVxdWVzdBIKCgJpZBgBIAEoCRINCgVtdXRlZBgCIAEoCCIRCg9TZXRNdXRlUmVzcG9uc2UiQwoQQmFuQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIOCgZyZWFzb24YAiABKAkSEwoLYmFuX21hY2hpbmUYAyABKAgiEwoRQmFuQ2xpZW50UmVzcG9uc2UiEQoPTGlzdEJhbnNSZXF1ZXN0IjoKEExpc3RCYW5zUmVzcG9uc2USJgoEYmFucxgBIAMoCzIYLnRva2kuYWRtaW4udjEuQmFuUmVjb3JkIpcBCglCYW5SZWNvcmQSDgoGcHVia2V5GAEgASgJEhIKCmRpc3BsYXlfaWQYAiABKAkSFQoNbGFzdF9jYWxsc2lnbhgDIAEoCRIUCgxtYWNoaW5lX2hhc2gYBCABKAkSDgoGcmVhc29uGAUgASgJEhEKCWJhbm5lZF9ieRgGIAEoCRIWCg5iYW5uZWRfYXRfdW5peBgHIAEoBCIgCg5MaWZ0QmFuUmVxdWVzdBIOCgZwdWJrZXkYASABKAkiEQoPTGlmdEJhblJlc3BvbnNlIjkKFVNldENoYW5uZWxNdXRlUmVxdWVzdBIRCglmcmVxdWVuY3kYASABKAkSDQoFbXV0ZWQYAiABKAgiGAoWU2V0Q2hhbm5lbE11dGVSZXNwb25zZSI4ChVTZXRDaGFubmVsTmFtZVJlcXVlc3QSEQoJZnJlcXVlbmN5GAEgASgJEgwKBG5hbWUYAiABKAkiGAoWU2V0Q2hhbm5lbE5hbWVSZXNwb25zZSIdChtDbGVhckFsbENoYW5uZWxOYW1lc1JlcXVlc3QiHgocQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZSJ4CgxNZXRyaWNTYW1wbGUSDwoHdHNfdW5peBgBIAEoBBIYChByeF9ieXRlc19wZXJfc2VjGAIgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYAyABKAQSDQoFdXNlcnMYBCABKA0SFAoMdHJhbnNtaXR0aW5nGAUgASgNIj4KDk1ldHJpY3NSZXF1ZXN0EiwKBndpbmRvdxgBIAEoDjIcLnRva2kuYWRtaW4udjEuTWV0cmljc1dpbmRvdyI/Cg9NZXRyaWNzUmVzcG9uc2USLAoHc2FtcGxlcxgBIAMoCzIbLnRva2kuYWRtaW4udjEuTWV0cmljU2FtcGxlIhgKFkdldFNlcnZlckhlYWx0aFJlcXVlc3QihwEKDFNlcnZlckhlYWx0aBITCgtjcHVfcGVyY2VudBgBIAEoARIWCg5tZW1fdXNlZF9ieXRlcxgCIAEoBBIXCg9tZW1fdG90YWxfYnl0ZXMYAyABKAQSFwoPZGlza191c2VkX2J5dGVzGAQgASgEEhgKEGRpc2tfdG90YWxfYnl0ZXMYBSABKAQiaQoKQXVkaXRFbnRyeRIKCgJpZBgBIAEoBBIPCgd0c191bml4GAIgASgEEgwKBGtpbmQYAyABKAkSDQoFYWN0b3IYBCABKAkSEQoJZnJlcXVlbmN5GAUgASgJEg4KBmRldGFpbBgGIAEoCSJfCg9BdWRpdExvZ1JlcXVlc3QSKgoGZmlsdGVyGAEgASgOMhoudG9raS5hZG1pbi52MS5BdWRpdEZpbHRlchINCgVsaW1pdBgCIAEoDRIRCgliZWZvcmVfaWQYAyABKAQiTQoQQXVkaXRMb2dSZXNwb25zZRIqCgdlbnRyaWVzGAEgAygLMhkudG9raS5hZG1pbi52MS5BdWRpdEVudHJ5Eg0KBXRvdGFsGAIgASgEKlkKDU1ldHJpY3NXaW5kb3cSFwoTTUVUUklDU19XSU5ET1dfSE9VUhAAEhYKEk1FVFJJQ1NfV0lORE9XX0RBWRABEhcKE01FVFJJQ1NfV0lORE9XX1dFRUsQAip0CgtBdWRpdEZpbHRlchIUChBBVURJVF9GSUxURVJfQUxMEAASFgoSQVVESVRfRklMVEVSX0FETUlOEAESHAoYQVVESVRfRklMVEVSX0NPTk5FQ1RJT05TEAISGQoVQVVESVRfRklMVEVSX1NFQ1VSSVRZEAMyvQ0KBUFkbWluEj8KBVdhdGNoEhsudG9raS5hZG1pbi52MS5XYXRjaFJlcXVlc3QaFy50b2tpLmFkbWluLnYxLlNuYXBzaG90MAESTwoNR2V0U2VydmVySW5mbxIjLnRva2kuYWRtaW4udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaGS50b2tpLmFkbWluLnYxLlNlcnZlckluZm8SVQoPR2V0U2VydmVyQ29uZmlnEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSWwoSVXBkYXRlU2VydmVyQ29uZmlnEigudG9raS5hZG1pbi52MS5VcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSZgoRU2V0U2VydmVyUGFzc3dvcmQSJy50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBooLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZRJdCg5DaGFuZ2VQYXNzd29yZBIkLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlc3BvbnNlElEKCktpY2tDbGllbnQSIC50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVzcG9uc2USUQoKTW92ZUNsaWVudBIgLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXNwb25zZRJXCgxSZW5hbWVDbGllbnQSIi50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlcXVlc3QaIy50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlc3BvbnNlElQKC1NldFByaW9yaXR5EiEudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlcXVlc3QaIi50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVzcG9uc2USSAoHU2V0TXV0ZRIdLnRva2kuYWRtaW4udjEuU2V0TXV0ZVJlcXVlc3QaHi50b2tpLmFkbWluLnYxLlNldE11dGVSZXNwb25zZRJOCglCYW5DbGllbnQSHy50b2tpLmFkbWluLnYxLkJhbkNsaWVudFJlcXVlc3QaIC50b2tpLmFkbWluLnYxLkJhbkNsaWVudFJlc3BvbnNlEksKCExpc3RCYW5zEh4udG9raS5hZG1pbi52MS5MaXN0QmFuc1JlcXVlc3QaHy50b2tpLmFkbWluLnYxLkxpc3RCYW5zUmVzcG9uc2USSAoHTGlmdEJhbhIdLnRva2kuYWRtaW4udjEuTGlmdEJhblJlcXVlc3QaHi50b2tpLmFkbWluLnYxLkxpZnRCYW5SZXNwb25zZRJdCg5TZXRDaGFubmVsTXV0ZRIkLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE11dGVSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTXV0ZVJlc3BvbnNlEl0KDlNldENoYW5uZWxOYW1lEiQudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlcXVlc3QaJS50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVzcG9uc2USbwoUQ2xlYXJBbGxDaGFubmVsTmFtZXMSKi50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdBorLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZRJLCgpHZXRNZXRyaWNzEh0udG9raS5hZG1pbi52MS5NZXRyaWNzUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuTWV0cmljc1Jlc3BvbnNlElUKD0dldFNlcnZlckhlYWx0aBIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVySGVhbHRoUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVySGVhbHRoEk4KC0dldEF1ZGl0TG9nEh4udG9raS5hZG1pbi52MS5BdWRpdExvZ1JlcXVlc3QaHy50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message toki.admin.v1.Snapshot
@@ -65,6 +65,16 @@ export type Snapshot = Message<"toki.admin.v1.Snapshot"> & {
    * @generated from field: uint64 tx_bytes_per_sec = 7;
    */
   txBytesPerSec: bigint;
+
+  /**
+   * Canonical frequencies currently muted channel-wide (no one may
+   * transmit). Carries ALL muted channels regardless of occupancy, so
+   * the panel can flag an empty-but-muted frequency. Independent of the
+   * named-channels feature — channel mute is always available.
+   *
+   * @generated from field: repeated string muted_channels = 8;
+   */
+  mutedChannels: string[];
 };
 
 /**
@@ -96,6 +106,15 @@ export type Room = Message<"toki.admin.v1.Room"> & {
    * @generated from field: repeated toki.admin.v1.Member members = 3;
    */
   members: Member[];
+
+  /**
+   * True when this whole channel is muted (see Admin.SetChannelMute) —
+   * no member tuned here can transmit. Convenience mirror of the
+   * Snapshot.muted_channels entry for this frequency.
+   *
+   * @generated from field: bool muted = 4;
+   */
+  muted: boolean;
 };
 
 /**
@@ -782,6 +801,45 @@ export const LiftBanResponseSchema: GenMessage<LiftBanResponse> = /*@__PURE__*/
   messageDesc(file_admin, 29);
 
 /**
+ * @generated from message toki.admin.v1.SetChannelMuteRequest
+ */
+export type SetChannelMuteRequest = Message<"toki.admin.v1.SetChannelMuteRequest"> & {
+  /**
+   * canonical "446.05"
+   *
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * true = mute the channel, false = unmute
+   *
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelMuteRequest.
+ * Use `create(SetChannelMuteRequestSchema)` to create a new message.
+ */
+export const SetChannelMuteRequestSchema: GenMessage<SetChannelMuteRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 30);
+
+/**
+ * @generated from message toki.admin.v1.SetChannelMuteResponse
+ */
+export type SetChannelMuteResponse = Message<"toki.admin.v1.SetChannelMuteResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelMuteResponse.
+ * Use `create(SetChannelMuteResponseSchema)` to create a new message.
+ */
+export const SetChannelMuteResponseSchema: GenMessage<SetChannelMuteResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 31);
+
+/**
  * @generated from message toki.admin.v1.SetChannelNameRequest
  */
 export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest"> & {
@@ -805,7 +863,7 @@ export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest
  * Use `create(SetChannelNameRequestSchema)` to create a new message.
  */
 export const SetChannelNameRequestSchema: GenMessage<SetChannelNameRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 30);
+  messageDesc(file_admin, 32);
 
 /**
  * @generated from message toki.admin.v1.SetChannelNameResponse
@@ -818,7 +876,7 @@ export type SetChannelNameResponse = Message<"toki.admin.v1.SetChannelNameRespon
  * Use `create(SetChannelNameResponseSchema)` to create a new message.
  */
 export const SetChannelNameResponseSchema: GenMessage<SetChannelNameResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 31);
+  messageDesc(file_admin, 33);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesRequest
@@ -831,7 +889,7 @@ export type ClearAllChannelNamesRequest = Message<"toki.admin.v1.ClearAllChannel
  * Use `create(ClearAllChannelNamesRequestSchema)` to create a new message.
  */
 export const ClearAllChannelNamesRequestSchema: GenMessage<ClearAllChannelNamesRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 32);
+  messageDesc(file_admin, 34);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesResponse
@@ -844,7 +902,7 @@ export type ClearAllChannelNamesResponse = Message<"toki.admin.v1.ClearAllChanne
  * Use `create(ClearAllChannelNamesResponseSchema)` to create a new message.
  */
 export const ClearAllChannelNamesResponseSchema: GenMessage<ClearAllChannelNamesResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 33);
+  messageDesc(file_admin, 35);
 
 /**
  * One sampled data point. `rx/tx_bytes_per_sec` are the average voice-
@@ -896,7 +954,7 @@ export type MetricSample = Message<"toki.admin.v1.MetricSample"> & {
  * Use `create(MetricSampleSchema)` to create a new message.
  */
 export const MetricSampleSchema: GenMessage<MetricSample> = /*@__PURE__*/
-  messageDesc(file_admin, 34);
+  messageDesc(file_admin, 36);
 
 /**
  * @generated from message toki.admin.v1.MetricsRequest
@@ -913,7 +971,7 @@ export type MetricsRequest = Message<"toki.admin.v1.MetricsRequest"> & {
  * Use `create(MetricsRequestSchema)` to create a new message.
  */
 export const MetricsRequestSchema: GenMessage<MetricsRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 35);
+  messageDesc(file_admin, 37);
 
 /**
  * @generated from message toki.admin.v1.MetricsResponse
@@ -932,7 +990,7 @@ export type MetricsResponse = Message<"toki.admin.v1.MetricsResponse"> & {
  * Use `create(MetricsResponseSchema)` to create a new message.
  */
 export const MetricsResponseSchema: GenMessage<MetricsResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 36);
+  messageDesc(file_admin, 38);
 
 /**
  * @generated from message toki.admin.v1.GetServerHealthRequest
@@ -945,7 +1003,7 @@ export type GetServerHealthRequest = Message<"toki.admin.v1.GetServerHealthReque
  * Use `create(GetServerHealthRequestSchema)` to create a new message.
  */
 export const GetServerHealthRequestSchema: GenMessage<GetServerHealthRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 37);
+  messageDesc(file_admin, 39);
 
 /**
  * @generated from message toki.admin.v1.ServerHealth
@@ -986,7 +1044,7 @@ export type ServerHealth = Message<"toki.admin.v1.ServerHealth"> & {
  * Use `create(ServerHealthSchema)` to create a new message.
  */
 export const ServerHealthSchema: GenMessage<ServerHealth> = /*@__PURE__*/
-  messageDesc(file_admin, 38);
+  messageDesc(file_admin, 40);
 
 /**
  * @generated from message toki.admin.v1.AuditEntry
@@ -1038,7 +1096,7 @@ export type AuditEntry = Message<"toki.admin.v1.AuditEntry"> & {
  * Use `create(AuditEntrySchema)` to create a new message.
  */
 export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
-  messageDesc(file_admin, 39);
+  messageDesc(file_admin, 41);
 
 /**
  * @generated from message toki.admin.v1.AuditLogRequest
@@ -1069,7 +1127,7 @@ export type AuditLogRequest = Message<"toki.admin.v1.AuditLogRequest"> & {
  * Use `create(AuditLogRequestSchema)` to create a new message.
  */
 export const AuditLogRequestSchema: GenMessage<AuditLogRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 40);
+  messageDesc(file_admin, 42);
 
 /**
  * @generated from message toki.admin.v1.AuditLogResponse
@@ -1095,7 +1153,7 @@ export type AuditLogResponse = Message<"toki.admin.v1.AuditLogResponse"> & {
  * Use `create(AuditLogResponseSchema)` to create a new message.
  */
 export const AuditLogResponseSchema: GenMessage<AuditLogResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 41);
+  messageDesc(file_admin, 43);
 
 /**
  * @generated from enum toki.admin.v1.MetricsWindow
@@ -1336,7 +1394,21 @@ export const Admin: GenService<{
    * frequency (empty `name` clears it). FAILED_PRECONDITION when the
    * feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
    * longer than 16 chars. Names persist independently of room occupancy.
+   * Channel-wide mute: silence transmission on a whole frequency. While
+   * a channel is muted, no member tuned to it may take the PTT floor;
+   * moving to another (unmuted) channel restores the ability to talk.
+   * Enforced by the same relay speak-gate as member mute. Persists
+   * independently of occupancy (like channel names). INVALID_ARGUMENT
+   * for a bad frequency.
    *
+   * @generated from rpc toki.admin.v1.Admin.SetChannelMute
+   */
+  setChannelMute: {
+    methodKind: "unary";
+    input: typeof SetChannelMuteRequestSchema;
+    output: typeof SetChannelMuteResponseSchema;
+  },
+  /**
    * @generated from rpc toki.admin.v1.Admin.SetChannelName
    */
   setChannelName: {

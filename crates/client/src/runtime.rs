@@ -813,10 +813,14 @@ impl Session {
                             }
                             st.holder = None;
                             st.frequency = Some(fc.frequency.clone());
-                            // Drop any name from the old channel; the new
-                            // room's ChannelNameChanged (if named + feature
-                            // on) lands right after this event.
+                            // Drop any name + mute carried from the old
+                            // channel; the new room's ChannelNameChanged
+                            // (if named + feature on) and ChannelMuteChanged
+                            // land right after this event. Clearing the mute
+                            // here is what makes "move away from a muted
+                            // channel and you can talk again" feel instant.
                             st.channel_name = None;
+                            st.channel_muted = false;
                             st.log(format!("→ frequency {} MHz", fc.frequency));
                         }
                         Some(Ev::DisplayNameChanged(dnc)) => {
@@ -881,6 +885,31 @@ impl Session {
                                     st.log("🔇 You were muted by an operator");
                                 } else {
                                     st.log("🔊 An operator unmuted you");
+                                }
+                            }
+                        }
+                        Some(Ev::ChannelMuteChanged(cmc)) => {
+                            // The whole channel was muted/unmuted (or the
+                            // current state delivered on join). Apply only
+                            // when it's for the frequency we're tuned to,
+                            // then drive the same local consequences as a
+                            // personal mute: stop our mic and show the cue.
+                            let mut st = state_for_events.lock().unwrap();
+                            if st.frequency.as_deref() == Some(cmc.frequency.as_str()) {
+                                let was = st.channel_muted;
+                                st.channel_muted = cmc.muted;
+                                // Our overall "can I talk" state is mute OR
+                                // channel-mute; mirror it into the session
+                                // gate so the mic loop sees it immediately.
+                                self_muted_for_events
+                                    .store(st.locally_silenced(), Ordering::Relaxed);
+                                if cmc.muted {
+                                    ptt_for_events.store(false, Ordering::Relaxed);
+                                    if !was {
+                                        st.log("🔇 This channel was muted by an operator");
+                                    }
+                                } else if was {
+                                    st.log("🔊 This channel was unmuted");
                                 }
                             }
                         }

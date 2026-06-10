@@ -116,4 +116,26 @@ mod tests {
         s.set_muted("ghost", false);
         assert!(!s.is_muted("ghost"));
     }
+
+    #[test]
+    fn locally_silenced_covers_member_and_channel_mute() {
+        let mut s = ClientState {
+            self_id: Some("me".into()),
+            ..Default::default()
+        };
+        assert!(!s.locally_silenced());
+        // Personal member-mute silences us.
+        s.set_muted("me", true);
+        assert!(s.locally_silenced());
+        s.set_muted("me", false);
+        assert!(!s.locally_silenced());
+        // Channel-mute silences us independently of member-mute.
+        s.channel_muted = true;
+        assert!(s.locally_silenced());
+        s.channel_muted = false;
+        assert!(!s.locally_silenced());
+        // Another member's mute never silences *us*.
+        s.set_muted("someone-else", true);
+        assert!(!s.locally_silenced());
+    }
 }

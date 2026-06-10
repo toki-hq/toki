@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlIuACCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAEiwKDG11dGVfY2hhbmdlZBgHIAEoCzIULnRva2kudjEuTXV0ZUNoYW5nZWRIAEIHCgVldmVudCI3CgxNZW1iZXJKb2luZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIfCgpNZW1iZXJMZWZ0EhEKCWNsaWVudF9pZBgBIAEoCSIlChBGcmVxdWVuY3lDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCSI9ChJEaXNwbGF5TmFtZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSI1ChJDaGFubmVsTmFtZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEgwKBG5hbWUYAiABKAkiLwoLTXV0ZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEg0KBW11dGVkGAIgASgIIlIKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIIggKBlB0dEFjazKaAwoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soARJaChFJZGVudGl0eUNoYWxsZW5nZRIhLnRva2kudjEuSWRlbnRpdHlDaGFsbGVuZ2VSZXF1ZXN0GiIudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlYgZwcm90bzM");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlIp0DCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAEiwKDG11dGVfY2hhbmdlZBgHIAEoCzIULnRva2kudjEuTXV0ZUNoYW5nZWRIABI7ChRjaGFubmVsX211dGVfY2hhbmdlZBgIIAEoCzIbLnRva2kudjEuQ2hhbm5lbE11dGVDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIi8KC011dGVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRINCgVtdXRlZBgCIAEoCCI2ChJDaGFubmVsTXV0ZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEg0KBW11dGVkGAIgASgIIlIKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIIggKBlB0dEFjazKaAwoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soARJaChFJZGVudGl0eUNoYWxsZW5nZRIhLnRva2kudjEuSWRlbnRpdHlDaGFsbGVuZ2VSZXF1ZXN0GiIudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlYgZwcm90bzM");
 
 /**
  * @generated from message toki.v1.IdentityChallengeRequest
@@ -365,6 +365,19 @@ export type Event = Message<"toki.v1.Event"> & {
      */
     value: MuteChanged;
     case: "muteChanged";
+  } | {
+    /**
+     * Sent when an admin mutes/unmutes a whole channel (see
+     * Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+     * the current channel's mute state. Broadcast to every member of the
+     * affected frequency. The client compares `frequency` against its
+     * current tuning: while its channel is muted it can't transmit and
+     * the PTT button shows the disabled "unable to talk" cue.
+     *
+     * @generated from field: toki.v1.ChannelMuteChanged channel_mute_changed = 8;
+     */
+    value: ChannelMuteChanged;
+    case: "channelMuteChanged";
   } | { case: undefined; value?: undefined };
 };
 
@@ -505,6 +518,31 @@ export const MuteChangedSchema: GenMessage<MuteChanged> = /*@__PURE__*/
   messageDesc(file_toki, 15);
 
 /**
+ * A channel's mute state changed (see Admin.SetChannelMute), or the
+ * current state delivered on Join / ChangeFrequency.
+ *
+ * @generated from message toki.v1.ChannelMuteChanged
+ */
+export type ChannelMuteChanged = Message<"toki.v1.ChannelMuteChanged"> & {
+  /**
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.ChannelMuteChanged.
+ * Use `create(ChannelMuteChangedSchema)` to create a new message.
+ */
+export const ChannelMuteChangedSchema: GenMessage<ChannelMuteChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 16);
+
+/**
  * @generated from message toki.v1.PttEvent
  */
 export type PttEvent = Message<"toki.v1.PttEvent"> & {
@@ -543,7 +581,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 16);
+  messageDesc(file_toki, 17);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -556,7 +594,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 17);
+  messageDesc(file_toki, 18);
 
 /**
  * Signaling service for the Toki walkie-talkie network.

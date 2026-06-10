@@ -115,6 +115,75 @@ impl AdminApi {
         let _ = self.state.broadcaster.send(snap);
     }
 
+    /// Remove a live session from the registry and notify its room —
+    /// the shared core of `kick_client` and `ban_client`. Returns the
+    /// removed session's display name + frequency; `NOT_FOUND` when the
+    /// id isn't connected. The caller does its own audit + snapshot.
+    async fn remove_session(&self, id: &str) -> Result<(String, Option<String>), Status> {
+        // Snapshot the work under the lock; broadcast after releasing it.
+        let (display_name, frequency, recipients, was_holder) = {
+            let mut registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.remove(id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            registry.tokens.remove(&client.audio_token_hash);
+
+            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
+            let mut was_holder = false;
+            let frequency = client.current_frequency.clone();
+            if let Some(freq) = &frequency {
+                if let Some(room) = registry.rooms.get_mut(freq) {
+                    room.members.retain(|m| m != id);
+                    if room.holder.as_deref() == Some(id) {
+                        room.holder = None;
+                        was_holder = true;
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    if room.members.is_empty() && room.holder.is_none() {
+                        registry.rooms.remove(freq);
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    for mid in &room.members {
+                        if let Some(c) = registry.clients.get(mid) {
+                            if let Some(tx) = &c.events_tx {
+                                recipients.push(tx.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                client.display_name.clone(),
+                frequency,
+                recipients,
+                was_holder,
+            )
+        };
+
+        let left = Event {
+            event: Some(event::Event::Left(MemberLeft {
+                client_id: id.to_string(),
+            })),
+        };
+        let release = was_holder.then(|| Event {
+            event: Some(event::Event::Ptt(PttEvent {
+                client_id: id.to_string(),
+                pressed: false,
+                sequence: 0,
+                priority: false,
+            })),
+        });
+        for tx in recipients {
+            let _ = tx.send(left.clone()).await;
+            if let Some(ev) = &release {
+                let _ = tx.send(ev.clone()).await;
+            }
+        }
+        Ok((display_name, frequency))
+    }
+
     /// Event senders for every client currently in `frequency`'s room.
     /// Empty when the room doesn't exist (no one tuned there) — used by
     /// the channel-name RPCs to push a `ChannelNameChanged` to occupants.
@@ -387,47 +456,7 @@ impl Admin for AdminApi {
         let admin = self.authenticated(&req).await?;
         let id = req.get_ref().id.clone();
 
-        // Snapshot the work under the lock; broadcast after releasing it.
-        let (display_name, frequency, recipients, was_holder) = {
-            let mut registry = self.state.registry.lock().await;
-            let Some(client) = registry.clients.remove(&id) else {
-                return Err(Status::not_found("client not found"));
-            };
-            registry.tokens.remove(&client.audio_token_hash);
-
-            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
-            let mut was_holder = false;
-            let frequency = client.current_frequency.clone();
-            if let Some(freq) = &frequency {
-                if let Some(room) = registry.rooms.get_mut(freq) {
-                    room.members.retain(|m| m != &id);
-                    if room.holder.as_deref() == Some(id.as_str()) {
-                        room.holder = None;
-                        was_holder = true;
-                    }
-                }
-                if let Some(room) = registry.rooms.get(freq) {
-                    if room.members.is_empty() && room.holder.is_none() {
-                        registry.rooms.remove(freq);
-                    }
-                }
-                if let Some(room) = registry.rooms.get(freq) {
-                    for mid in &room.members {
-                        if let Some(c) = registry.clients.get(mid) {
-                            if let Some(tx) = &c.events_tx {
-                                recipients.push(tx.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            (
-                client.display_name.clone(),
-                frequency,
-                recipients,
-                was_holder,
-            )
-        };
+        let (display_name, frequency) = self.remove_session(&id).await?;
 
         tracing::info!(
             admin_user = %admin.0,
@@ -443,28 +472,167 @@ impl Admin for AdminApi {
             frequency.as_deref().unwrap_or(""),
             &format!("kicked {display_name}"),
         );
-
-        let left = Event {
-            event: Some(event::Event::Left(MemberLeft {
-                client_id: id.clone(),
-            })),
-        };
-        let release = was_holder.then(|| Event {
-            event: Some(event::Event::Ptt(PttEvent {
-                client_id: id.clone(),
-                pressed: false,
-                sequence: 0,
-                priority: false,
-            })),
-        });
-        for tx in recipients {
-            let _ = tx.send(left.clone()).await;
-            if let Some(ev) = &release {
-                let _ = tx.send(ev.clone()).await;
-            }
-        }
         self.push_snapshot().await;
         Ok(Response::new(pb::KickClientResponse {}))
+    }
+
+    async fn ban_client(
+        &self,
+        req: Request<pb::BanClientRequest>,
+    ) -> Result<Response<pb::BanClientResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let body = req.get_ref();
+        let id = body.id.clone();
+        let reason = body.reason.trim().to_string();
+        if reason.len() > 256 || reason.chars().any(char::is_control) {
+            return Err(Status::invalid_argument(
+                "reason must be ≤256 characters with no control characters",
+            ));
+        }
+
+        // Resolve the target's identity before touching anything — a
+        // ban needs something durable to key on. Identity-less members
+        // can only be kicked.
+        let (identity, display_name) = {
+            let registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.get(&id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            (client.identity.clone(), client.display_name.clone())
+        };
+        let Some(identity) = identity else {
+            return Err(Status::failed_precondition(
+                "member has no verified identity to ban — kick is the only available action",
+            ));
+        };
+        if body.ban_machine && identity.machine_hash.is_empty() {
+            return Err(Status::failed_precondition(
+                "member reported no machine hash — ban the identity alone",
+            ));
+        }
+
+        let record = crate::state::BanRecord {
+            display_id: identity.display_id.clone(),
+            last_callsign: display_name.clone(),
+            machine_hash: if body.ban_machine {
+                identity.machine_hash.clone()
+            } else {
+                String::new()
+            },
+            reason,
+            banned_by: admin.0.clone(),
+            banned_at: crate::admin::db::now_unix(),
+        };
+
+        // Durable first, then the live map — the ban must land even if
+        // the session vanishes mid-call or the kick below races a
+        // disconnect.
+        self.state
+            .db
+            .insert_ban(&identity.pubkey_hex, &record)
+            .await
+            .map_err(internal)?;
+        self.state
+            .bans
+            .write()
+            .await
+            .insert(identity.pubkey_hex.clone(), record.clone());
+
+        tracing::info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            target_name = %display_name,
+            identity = %identity.display_id,
+            ban_machine = body.ban_machine,
+            "admin banned client",
+        );
+        audit::record(
+            &self.state.audit,
+            "ban",
+            &admin.0,
+            "",
+            &format!(
+                "banned {display_name} ({}){}{}",
+                identity.display_id,
+                if body.ban_machine { " + machine" } else { "" },
+                if record.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", record.reason)
+                },
+            ),
+        );
+
+        // Kick the live session. It may legitimately be gone already
+        // (disconnected between the lookup above and now) — the ban
+        // stands either way.
+        match self.remove_session(&id).await {
+            Ok(_) => {}
+            Err(s) if s.code() == tonic::Code::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::BanClientResponse {}))
+    }
+
+    async fn list_bans(
+        &self,
+        req: Request<pb::ListBansRequest>,
+    ) -> Result<Response<pb::ListBansResponse>, Status> {
+        self.authenticated(&req).await?;
+        let bans = self.state.bans.read().await;
+        let mut out: Vec<pb::BanRecord> = bans
+            .iter()
+            .map(|(pubkey, b)| pb::BanRecord {
+                pubkey: pubkey.clone(),
+                display_id: b.display_id.clone(),
+                last_callsign: b.last_callsign.clone(),
+                machine_hash: b.machine_hash.clone(),
+                reason: b.reason.clone(),
+                banned_by: b.banned_by.clone(),
+                banned_at_unix: b.banned_at.max(0) as u64,
+            })
+            .collect();
+        drop(bans);
+        // Newest-first, with the pubkey as a stable tiebreak so the UI
+        // doesn't reshuffle rows banned in the same second.
+        out.sort_by(|a, b| {
+            b.banned_at_unix
+                .cmp(&a.banned_at_unix)
+                .then_with(|| a.pubkey.cmp(&b.pubkey))
+        });
+        Ok(Response::new(pb::ListBansResponse { bans: out }))
+    }
+
+    async fn lift_ban(
+        &self,
+        req: Request<pb::LiftBanRequest>,
+    ) -> Result<Response<pb::LiftBanResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pubkey = req.get_ref().pubkey.trim().to_ascii_lowercase();
+        if pubkey.is_empty() {
+            return Err(Status::invalid_argument("missing pubkey"));
+        }
+
+        self.state.db.delete_ban(&pubkey).await.map_err(internal)?;
+        let removed = self.state.bans.write().await.remove(&pubkey);
+        // Lifting an unknown ban is an idempotent no-op (a double-click
+        // never errors); only a real lift is worth an audit line.
+        if let Some(ban) = removed {
+            tracing::info!(
+                admin_user = %admin.0,
+                identity = %ban.display_id,
+                "admin lifted ban",
+            );
+            audit::record(
+                &self.state.audit,
+                "unban",
+                &admin.0,
+                "",
+                &format!("lifted ban on {} ({})", ban.last_callsign, ban.display_id),
+            );
+        }
+        Ok(Response::new(pb::LiftBanResponse {}))
     }
 
     async fn move_client(
@@ -1060,6 +1228,7 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            bans: crate::state::shared_bans(Default::default()),
             health: crate::metrics::shared_health(),
             live_rate: crate::metrics::shared_live_rate(),
             audit: crate::audit::channel().0,
@@ -1138,6 +1307,158 @@ mod tests {
             .into_inner();
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(!info.toml_password_override);
+    }
+
+    async fn seed_with_identity(reg: &SharedRegistry, id: &str, machine_hash: &str) {
+        let mut r = reg.lock().await;
+        let mut c = mk_client(id, id, None);
+        c.identity = Some(crate::state::ClientIdentity {
+            display_id: "FLNIHQMB".into(),
+            pubkey_hex: format!("{id:0<64}"),
+            machine_hash: machine_hash.into(),
+            first_seen: 1,
+        });
+        r.clients.insert(id.into(), c);
+    }
+
+    #[tokio::test]
+    async fn ban_unknown_is_not_found() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "ghost".into(),
+                    reason: "x".into(),
+                    ban_machine: false,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn ban_identityless_member_is_failed_precondition() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "anon", None).await; // mk_client → identity: None
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "anon".into(),
+                    reason: String::new(),
+                    ban_machine: false,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn ban_machine_without_machine_hash_is_failed_precondition() {
+        let (api, token) = test_api(false).await;
+        seed_with_identity(&api.state.registry, "alice", "").await;
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "alice".into(),
+                    reason: String::new(),
+                    ban_machine: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        // The identity ban must not have landed either (all-or-nothing).
+        assert!(api.state.bans.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ban_records_kicks_lists_and_lifts() {
+        let (api, token) = test_api(false).await;
+        let machine = "ab".repeat(32);
+        seed_with_identity(&api.state.registry, "alice", &machine).await;
+        let pubkey = format!("{:0<64}", "alice");
+
+        api.ban_client(authed(
+            pb::BanClientRequest {
+                id: "alice".into(),
+                reason: "spam".into(),
+                ban_machine: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        // Session kicked, ban in the live map AND durable in the db.
+        assert!(!api
+            .state
+            .registry
+            .lock()
+            .await
+            .clients
+            .contains_key("alice"));
+        let live = api.state.bans.read().await.get(&pubkey).cloned().unwrap();
+        assert_eq!(live.reason, "spam");
+        assert_eq!(live.machine_hash, machine);
+        assert_eq!(live.banned_by, "admin");
+        assert!(api
+            .state
+            .db
+            .load_bans()
+            .await
+            .unwrap()
+            .contains_key(&pubkey));
+
+        // Listed, newest-first shape.
+        let bans = api
+            .list_bans(authed(pb::ListBansRequest {}, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .bans;
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].pubkey, pubkey);
+        assert_eq!(bans[0].last_callsign, "alice");
+
+        // Lift removes from both stores; a second lift is a no-op.
+        api.lift_ban(authed(
+            pb::LiftBanRequest {
+                pubkey: pubkey.clone(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.bans.read().await.is_empty());
+        assert!(api.state.db.load_bans().await.unwrap().is_empty());
+        api.lift_ban(authed(pb::LiftBanRequest { pubkey }, &token))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ban_rejects_oversized_or_control_reason() {
+        let (api, token) = test_api(false).await;
+        seed_with_identity(&api.state.registry, "alice", "").await;
+        for bad in ["x".repeat(257), "evil\nreason".to_string()] {
+            let err = api
+                .ban_client(authed(
+                    pb::BanClientRequest {
+                        id: "alice".into(),
+                        reason: bad,
+                        ban_machine: false,
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::InvalidArgument);
+        }
     }
 
     #[tokio::test]

@@ -35,6 +35,21 @@ service Admin {
   rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
   rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
 
+  // ── Identity bans ───────────────────────────────────────────────
+  // Ban a connected member's *identity* (and optionally its machine
+  // hash) and kick the live session. Future registers presenting the
+  // banned identity — or, for a machine ban, the banned machine hash
+  // under ANY identity — are rejected with PERMISSION_DENIED + the
+  // reason. NOT_FOUND for an unknown client id; FAILED_PRECONDITION
+  // when the member registered without an identity (nothing durable
+  // to ban — kick is the only lever for those).
+  rpc BanClient(BanClientRequest) returns (BanClientResponse);
+  // Every active ban, newest-first.
+  rpc ListBans(ListBansRequest) returns (ListBansResponse);
+  // Lift a ban by banned pubkey. Idempotent (lifting an unknown ban
+  // is a no-op success, so a double-click never errors).
+  rpc LiftBan(LiftBanRequest) returns (LiftBanResponse);
+
   // Named channels. Assign or clear the human-readable name of a
   // frequency (empty `name` clears it). FAILED_PRECONDITION when the
   // feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
@@ -178,6 +193,33 @@ message SetPriorityRequest {
   bool grant = 2;
 }
 message SetPriorityResponse {}
+
+message BanClientRequest {
+  string id = 1;                    // live session client_id to ban + kick
+  string reason = 2;                // shown to the banned client on rejected registers
+  // Also ban the machine hash the session presented (when it presented
+  // one): a config wipe then mints a fresh identity but stays banned.
+  bool ban_machine = 3;
+}
+message BanClientResponse {}
+
+message ListBansRequest {}
+message ListBansResponse {
+  repeated BanRecord bans = 1;      // newest-first
+}
+
+message BanRecord {
+  string pubkey = 1;                // banned identity key, lowercase hex (the ban key)
+  string display_id = 2;            // its 8-char fingerprint, for display
+  string last_callsign = 3;         // display name at ban time (display aid)
+  string machine_hash = 4;          // non-empty → the machine tier is banned too
+  string reason = 5;
+  string banned_by = 6;             // admin username
+  uint64 banned_at_unix = 7;
+}
+
+message LiftBanRequest { string pubkey = 1; }
+message LiftBanResponse {}
 
 message SetChannelNameRequest {
   string frequency = 1;             // canonical "446.05"

@@ -33,6 +33,7 @@ use toki_proto::wire::{
 };
 
 use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
+use crate::dsp::{Dsp, DspParams};
 use crate::state::{ConnState, SharedState};
 
 pub enum Cmd {
@@ -96,6 +97,7 @@ pub fn spawn(
     mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
     beeps: BeepParams,
+    dsp_params: DspParams,
 ) -> UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
@@ -114,7 +116,7 @@ pub fn spawn(
                     return;
                 }
             };
-            rt.block_on(run(cmd_rx, state, mic_rx, playback, beeps));
+            rt.block_on(run(cmd_rx, state, mic_rx, playback, beeps, dsp_params));
         })
         .expect("spawn runtime thread");
     cmd_tx
@@ -126,8 +128,16 @@ async fn run(
     mut mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
     beeps: BeepParams,
+    dsp_params: DspParams,
 ) {
     let mut session: Option<Session> = None;
+    // Capture-side DSP (noise suppression + AGC), applied to every mic
+    // frame while a session is live — see the dsp module docs for why
+    // it runs outside the PTT gate too (keeps the denoiser/AGC state
+    // warm so a fresh transmission doesn't open with a settling burst).
+    // Toggles arrive live through `dsp_params`; with both stages off,
+    // `process` is a bit-exact passthrough.
+    let mut dsp = Dsp::new(dsp_params);
     // Tracks the confirmed-talking state across mic frames so we can
     // detect the talk→silent edge (PTT release) and flush the encoder's
     // trailing partial frame exactly once. The mic stream runs
@@ -148,8 +158,9 @@ async fn run(
                 }
             }
             frame = mic_rx.recv() => {
-                let Some(frame) = frame else { break; };
+                let Some(mut frame) = frame else { break; };
                 if let Some(s) = &session {
+                    dsp.process(&mut frame);
                     let talking = s.ptt.load(Ordering::Relaxed);
                     if talking {
                         s.send_audio(&frame).await;

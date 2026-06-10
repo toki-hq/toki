@@ -23,6 +23,7 @@ use crate::audio::{
     BeepPreset,
 };
 use crate::config::{self, HotkeyBinding};
+use crate::dsp::DspParams;
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -123,6 +124,11 @@ pub struct TokiApp {
     /// Settings takes effect on the next take-floor / clear-floor
     /// event without a reconnect.
     beep_params: BeepParams,
+    /// Live atomics behind the capture-DSP toggles (noise suppression
+    /// + AGC). Same sharing pattern as `beep_params`: the runtime's
+    /// mic loop reads them every frame, so flipping a Settings
+    /// checkbox takes effect on the next 10 ms frame.
+    dsp_params: DspParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -294,7 +300,17 @@ impl TokiApp {
             BeepPreset::index_of(&config.beeps.preset),
             config.beeps.volume,
         );
-        let cmd_tx = runtime::spawn(state.clone(), mic_rx, playback, beep_params.clone());
+        // Capture-DSP atomics — seeded from the saved toggles, shared
+        // live with the runtime's mic loop (same arrangement as the
+        // beep params above).
+        let dsp_params = DspParams::new(config.audio.noise_suppression, config.audio.agc);
+        let cmd_tx = runtime::spawn(
+            state.clone(),
+            mic_rx,
+            playback,
+            beep_params.clone(),
+            dsp_params.clone(),
+        );
 
         let initial = config.hotkey.to_input().or_else(|| {
             tracing::warn!(
@@ -354,6 +370,7 @@ impl TokiApp {
             audio_control: control,
             audio_gains: gains,
             beep_params,
+            dsp_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
@@ -3558,6 +3575,43 @@ impl TokiApp {
         // adjust the same `config.audio.{input,output}_gain` fields —
         // duplicating them in Settings just left two ways to change
         // the same value out of sync.
+
+        ui.add_space(14.0);
+        section_header(ui, "VOICE DSP");
+
+        // Capture-side processing toggles. Both write straight into
+        // the shared `DspParams` atomics, so the change lands on the
+        // very next 10 ms mic frame — no reconnect, no stream restart.
+        // Off = bit-exact raw mic, for operators who want the
+        // unprocessed CB character.
+        settings_row(ui, "NOISE FILTER", |ui| {
+            let mut v = self.config.audio.noise_suppression;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.noise_suppression = v;
+                self.dsp_params.set_noise_suppression(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("RNNoise — strips steady background noise")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "AUTO GAIN", |ui| {
+            let mut v = self.config.audio.agc;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.agc = v;
+                self.dsp_params.set_agc(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("levels quiet & hot mics toward a fixed target")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
 
         ui.add_space(14.0);
         section_header(ui, "ROGER BEEPS");

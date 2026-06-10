@@ -124,10 +124,10 @@ pub struct TokiApp {
     /// Settings takes effect on the next take-floor / clear-floor
     /// event without a reconnect.
     beep_params: BeepParams,
-    /// Live atomics behind the capture-DSP toggles (noise suppression
-    /// + AGC). Same sharing pattern as `beep_params`: the runtime's
-    /// mic loop reads them every frame, so flipping a Settings
-    /// checkbox takes effect on the next 10 ms frame.
+    /// Live atomics behind the capture-DSP toggles (noise
+    /// suppression and AGC). Same sharing pattern as `beep_params`:
+    /// the runtime's mic loop reads them every frame, so flipping a
+    /// Settings checkbox takes effect on the next 10 ms frame.
     dsp_params: DspParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU

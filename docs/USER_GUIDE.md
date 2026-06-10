@@ -272,6 +272,8 @@ Schema:
 | `[audio]` `input_gain` | f32 | `1.0` | Linear mic gain. UI range 0.0–2.0; clipped at i16 boundary. |
 | `[audio]` `output_gain` | f32 | `1.0` | Linear playback gain. Same range / clipping. |
 | `[audio]` `balance` | f32 | `0.0` | Stereo pan for received audio + beeps (−1.0 left … +1.0 right). |
+| `[audio]` `noise_suppression` | bool | `true` | Capture-side RNNoise noise filter (strips steady background noise before encoding). Toggleable live in Settings → Voice DSP. |
+| `[audio]` `agc` | bool | `true` | Capture-side automatic gain control (eases speech toward a fixed level: −18 dBFS target, up to +18 dB boost / −6 dB cut, speech-gated so pauses don't pump the noise floor). Toggleable live in Settings → Voice DSP. |
 | `[hotkey]` `binding` | string? | unset | Primary PTT binding, tagged form for any peripheral (e.g. `key:F8`, `mouse:Middle`, `gamepad:0:South`, `streamdeck:0x0fd9:0x0080:3`, `hid:0x046d:0xc52b:2:4`). Preferred over the legacy `key`/`mouse_button` below; written by all new saves. |
 | `[hotkey]` `secondary` | string? | unset | Optional fallback PTT binding (same tagged form). PTT fires while *either* the primary or this is held — e.g. a keyboard key backing up a gamepad button. |
 | `[hotkey]` `key` | string? | `"Backquote"` | Legacy PTT keyboard binding (`keyboard_types::Code` variant name). Read-only fallback used only when `binding` is absent. |
@@ -369,8 +371,13 @@ The UI is a single landscape "strip" widget. The main controls:
   connection/event log.
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio +
   beeps toward one ear).
-- **Settings** — input/output devices, gains, PTT binding, roger-beep preset,
-  global hotkeys, and the update-check toggle.
+- **Voice DSP** — capture-side **noise suppression** (RNNoise) and **auto
+  gain** run on your mic signal before it's encoded, so the cleanup benefits
+  everyone who hears you. Both are on by default; each has its own toggle in
+  Settings → Voice DSP, and turning both off gives a bit-exact raw mic for the
+  unprocessed CB character. Toggles apply instantly (next 10 ms frame).
+- **Settings** — input/output devices, voice DSP toggles, PTT binding,
+  roger-beep preset, global hotkeys, and the update-check toggle.
 
 #### Binding any input device
 

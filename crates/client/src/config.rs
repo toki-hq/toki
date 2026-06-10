@@ -364,6 +364,24 @@ mod tests {
     }
 
     #[test]
+    fn dsp_toggles_default_on_and_round_trip() {
+        // Absent keys (every pre-DSP config) resolve to on — existing
+        // users get the processed-mic experience without editing TOML.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.audio.noise_suppression);
+        assert!(cfg.audio.agc);
+        // An explicit opt-out survives a save/load round trip.
+        let raw = "[audio]\nnoise_suppression = false\nagc = false\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(!cfg.audio.noise_suppression);
+        assert!(!cfg.audio.agc);
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(!back.audio.noise_suppression);
+        assert!(!back.audio.agc);
+    }
+
+    #[test]
     fn freq_hotkeys_round_trip() {
         use crate::hotkey::Input;
         let mut hk = HotkeyConfig::default();
@@ -556,6 +574,15 @@ pub struct AudioConfig {
     /// earpiece. Default `0.0` (centered). No effect on mono outputs.
     #[serde(default = "default_balance")]
     pub balance: f32,
+    /// Capture-side RNNoise noise suppression (see `crate::dsp`).
+    /// Default on — the "just works in a noisy room" experience;
+    /// toggle off in Settings for the raw, unprocessed mic character.
+    #[serde(default = "default_true")]
+    pub noise_suppression: bool,
+    /// Capture-side automatic gain control. Default on, same
+    /// rationale (and same Settings toggle) as `noise_suppression`.
+    #[serde(default = "default_true")]
+    pub agc: bool,
 }
 
 fn default_gain() -> f32 {
@@ -574,6 +601,8 @@ impl Default for AudioConfig {
             input_gain: 1.0,
             output_gain: 1.0,
             balance: 0.0,
+            noise_suppression: true,
+            agc: true,
         }
     }
 }

@@ -14,6 +14,7 @@
 mod app;
 mod audio;
 mod config;
+mod dsp;
 mod hotkey;
 mod identity;
 mod runtime;

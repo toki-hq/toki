@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file admin.proto.
  */
 export const file_admin: GenFile = /*@__PURE__*/
-  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSKvAgoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJhCgRSb29tEhEKCWZyZXF1ZW5jeRgBIAEoCRITCgZob2xkZXIYAiABKAlIAIgBARImCgdtZW1iZXJzGAMgAygLMhUudG9raS5hZG1pbi52MS5NZW1iZXJCCQoHX2hvbGRlciLAAQoGTWVtYmVyEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIWCg5jb25uZWN0ZWRfc2VjcxgDIAEoBBIQCghwcmlvcml0eRgEIAEoCBIQCghpZGVudGl0eRgFIAEoCRIXCg9pZGVudGl0eV9wdWJrZXkYBiABKAkSHQoVaWRlbnRpdHlfbWFjaGluZV9oYXNoGAcgASgJEiAKGGlkZW50aXR5X2ZpcnN0X3NlZW5fdW5peBgIIAEoBCJqCgpTZXJ2ZXJJbmZvEg8KB3ZlcnNpb24YASABKAkSEgoKYWRtaW5fYmluZBgCIAEoCRIXCg9zdGFydGVkX2F0X3VuaXgYAyABKAQSHgoWdG9tbF9wYXNzd29yZF9vdmVycmlkZRgEIAEoCCK3AQoMU2VydmVyQ29uZmlnEhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIVCg1ncnBjX3Bhc3N3b3JkGAQgASgJEhkKEWdycGNfcGFzc3dvcmRfc2V0GAUgASgIEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBiABKAgSFQoNYXVkaW9fcXVhbGl0eRgHIAEoDSIOCgxXYXRjaFJlcXVlc3QiFgoUR2V0U2VydmVySW5mb1JlcXVlc3QiGAoWR2V0U2VydmVyQ29uZmlnUmVxdWVzdCKSAQoZVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SHgoWbmFtZWRfY2hhbm5lbHNfZW5hYmxlZBgEIAEoCBIVCg1hdWRpb19xdWFsaXR5GAUgASgNIiwKGFNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBIQCghwYXNzd29yZBgBIAEoCSIbChlTZXRTZXJ2ZXJQYXNzd29yZFJlc3BvbnNlIj4KFUNoYW5nZVBhc3N3b3JkUmVxdWVzdBIPCgdjdXJyZW50GAEgASgJEhQKDG5ld19wYXNzd29yZBgCIAEoCSIYChZDaGFuZ2VQYXNzd29yZFJlc3BvbnNlIh8KEUtpY2tDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJIhQKEktpY2tDbGllbnRSZXNwb25zZSIyChFNb3ZlQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiFAoSTW92ZUNsaWVudFJlc3BvbnNlIjcKE1JlbmFtZUNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIhYKFFJlbmFtZUNsaWVudFJlc3BvbnNlIi8KElNldFByaW9yaXR5UmVxdWVzdBIKCgJpZBgBIAEoCRINCgVncmFudBgCIAEoCCIVChNTZXRQcmlvcml0eVJlc3BvbnNlIjgKFVNldENoYW5uZWxOYW1lUmVxdWVzdBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSIYChZTZXRDaGFubmVsTmFtZVJlc3BvbnNlIh0KG0NsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdCIeChxDbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlIngKDE1ldHJpY1NhbXBsZRIPCgd0c191bml4GAEgASgEEhgKEHJ4X2J5dGVzX3Blcl9zZWMYAiABKAQSGAoQdHhfYnl0ZXNfcGVyX3NlYxgDIAEoBBINCgV1c2VycxgEIAEoDRIUCgx0cmFuc21pdHRpbmcYBSABKA0iPgoOTWV0cmljc1JlcXVlc3QSLAoGd2luZG93GAEgASgOMhwudG9raS5hZG1pbi52MS5NZXRyaWNzV2luZG93Ij8KD01ldHJpY3NSZXNwb25zZRIsCgdzYW1wbGVzGAEgAygLMhsudG9raS5hZG1pbi52MS5NZXRyaWNTYW1wbGUiGAoWR2V0U2VydmVySGVhbHRoUmVxdWVzdCKHAQoMU2VydmVySGVhbHRoEhMKC2NwdV9wZXJjZW50GAEgASgBEhYKDm1lbV91c2VkX2J5dGVzGAIgASgEEhcKD21lbV90b3RhbF9ieXRlcxgDIAEoBBIXCg9kaXNrX3VzZWRfYnl0ZXMYBCABKAQSGAoQZGlza190b3RhbF9ieXRlcxgFIAEoBCJpCgpBdWRpdEVudHJ5EgoKAmlkGAEgASgEEg8KB3RzX3VuaXgYAiABKAQSDAoEa2luZBgDIAEoCRINCgVhY3RvchgEIAEoCRIRCglmcmVxdWVuY3kYBSABKAkSDgoGZGV0YWlsGAYgASgJIl8KD0F1ZGl0TG9nUmVxdWVzdBIqCgZmaWx0ZXIYASABKA4yGi50b2tpLmFkbWluLnYxLkF1ZGl0RmlsdGVyEg0KBWxpbWl0GAIgASgNEhEKCWJlZm9yZV9pZBgDIAEoBCJNChBBdWRpdExvZ1Jlc3BvbnNlEioKB2VudHJpZXMYASADKAsyGS50b2tpLmFkbWluLnYxLkF1ZGl0RW50cnkSDQoFdG90YWwYAiABKAQqWQoNTWV0cmljc1dpbmRvdxIXChNNRVRSSUNTX1dJTkRPV19IT1VSEAASFgoSTUVUUklDU19XSU5ET1dfREFZEAESFwoTTUVUUklDU19XSU5ET1dfV0VFSxACKnQKC0F1ZGl0RmlsdGVyEhQKEEFVRElUX0ZJTFRFUl9BTEwQABIWChJBVURJVF9GSUxURVJfQURNSU4QARIcChhBVURJVF9GSUxURVJfQ09OTkVDVElPTlMQAhIZChVBVURJVF9GSUxURVJfU0VDVVJJVFkQAzKtCgoFQWRtaW4SPwoFV2F0Y2gSGy50b2tpLmFkbWluLnYxLldhdGNoUmVxdWVzdBoXLnRva2kuYWRtaW4udjEuU25hcHNob3QwARJPCg1HZXRTZXJ2ZXJJbmZvEiMudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJJbmZvUmVxdWVzdBoZLnRva2kuYWRtaW4udjEuU2VydmVySW5mbxJVCg9HZXRTZXJ2ZXJDb25maWcSJS50b2tpLmFkbWluLnYxLkdldFNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJbChJVcGRhdGVTZXJ2ZXJDb25maWcSKC50b2tpLmFkbWluLnYxLlVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJmChFTZXRTZXJ2ZXJQYXNzd29yZBInLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0GigudG9raS5hZG1pbi52MS5TZXRTZXJ2ZXJQYXNzd29yZFJlc3BvbnNlEl0KDkNoYW5nZVBhc3N3b3JkEiQudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlcXVlc3QaJS50b2tpLmFkbWluLnYxLkNoYW5nZVBhc3N3b3JkUmVzcG9uc2USUQoKS2lja0NsaWVudBIgLnRva2kuYWRtaW4udjEuS2lja0NsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXNwb25zZRJRCgpNb3ZlQ2xpZW50EiAudG9raS5hZG1pbi52MS5Nb3ZlQ2xpZW50UmVxdWVzdBohLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlc3BvbnNlElcKDFJlbmFtZUNsaWVudBIiLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVxdWVzdBojLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVzcG9uc2USVAoLU2V0UHJpb3JpdHkSIS50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVxdWVzdBoiLnRva2kuYWRtaW4udjEuU2V0UHJpb3JpdHlSZXNwb25zZRJdCg5TZXRDaGFubmVsTmFtZRIkLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlc3BvbnNlEm8KFENsZWFyQWxsQ2hhbm5lbE5hbWVzEioudG9raS5hZG1pbi52MS5DbGVhckFsbENoYW5uZWxOYW1lc1JlcXVlc3QaKy50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2USSwoKR2V0TWV0cmljcxIdLnRva2kuYWRtaW4udjEuTWV0cmljc1JlcXVlc3QaHi50b2tpLmFkbWluLnYxLk1ldHJpY3NSZXNwb25zZRJVCg9HZXRTZXJ2ZXJIZWFsdGgSJS50b2tpLmFkbWluLnYxLkdldFNlcnZlckhlYWx0aFJlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckhlYWx0aBJOCgtHZXRBdWRpdExvZxIeLnRva2kuYWRtaW4udjEuQXVkaXRMb2dSZXF1ZXN0Gh8udG9raS5hZG1pbi52MS5BdWRpdExvZ1Jlc3BvbnNlYgZwcm90bzM");
+  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSKvAgoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ASJhCgRSb29tEhEKCWZyZXF1ZW5jeRgBIAEoCRITCgZob2xkZXIYAiABKAlIAIgBARImCgdtZW1iZXJzGAMgAygLMhUudG9raS5hZG1pbi52MS5NZW1iZXJCCQoHX2hvbGRlciLAAQoGTWVtYmVyEgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCRIWCg5jb25uZWN0ZWRfc2VjcxgDIAEoBBIQCghwcmlvcml0eRgEIAEoCBIQCghpZGVudGl0eRgFIAEoCRIXCg9pZGVudGl0eV9wdWJrZXkYBiABKAkSHQoVaWRlbnRpdHlfbWFjaGluZV9oYXNoGAcgASgJEiAKGGlkZW50aXR5X2ZpcnN0X3NlZW5fdW5peBgIIAEoBCJqCgpTZXJ2ZXJJbmZvEg8KB3ZlcnNpb24YASABKAkSEgoKYWRtaW5fYmluZBgCIAEoCRIXCg9zdGFydGVkX2F0X3VuaXgYAyABKAQSHgoWdG9tbF9wYXNzd29yZF9vdmVycmlkZRgEIAEoCCK3AQoMU2VydmVyQ29uZmlnEhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIVCg1ncnBjX3Bhc3N3b3JkGAQgASgJEhkKEWdycGNfcGFzc3dvcmRfc2V0GAUgASgIEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBiABKAgSFQoNYXVkaW9fcXVhbGl0eRgHIAEoDSIOCgxXYXRjaFJlcXVlc3QiFgoUR2V0U2VydmVySW5mb1JlcXVlc3QiGAoWR2V0U2VydmVyQ29uZmlnUmVxdWVzdCKSAQoZVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SHgoWbmFtZWRfY2hhbm5lbHNfZW5hYmxlZBgEIAEoCBIVCg1hdWRpb19xdWFsaXR5GAUgASgNIiwKGFNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBIQCghwYXNzd29yZBgBIAEoCSIbChlTZXRTZXJ2ZXJQYXNzd29yZFJlc3BvbnNlIj4KFUNoYW5nZVBhc3N3b3JkUmVxdWVzdBIPCgdjdXJyZW50GAEgASgJEhQKDG5ld19wYXNzd29yZBgCIAEoCSIYChZDaGFuZ2VQYXNzd29yZFJlc3BvbnNlIh8KEUtpY2tDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJIhQKEktpY2tDbGllbnRSZXNwb25zZSIyChFNb3ZlQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiFAoSTW92ZUNsaWVudFJlc3BvbnNlIjcKE1JlbmFtZUNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIhYKFFJlbmFtZUNsaWVudFJlc3BvbnNlIi8KElNldFByaW9yaXR5UmVxdWVzdBIKCgJpZBgBIAEoCRINCgVncmFudBgCIAEoCCIVChNTZXRQcmlvcml0eVJlc3BvbnNlIkMKEEJhbkNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSDgoGcmVhc29uGAIgASgJEhMKC2Jhbl9tYWNoaW5lGAMgASgIIhMKEUJhbkNsaWVudFJlc3BvbnNlIhEKD0xpc3RCYW5zUmVxdWVzdCI6ChBMaXN0QmFuc1Jlc3BvbnNlEiYKBGJhbnMYASADKAsyGC50b2tpLmFkbWluLnYxLkJhblJlY29yZCKXAQoJQmFuUmVjb3JkEg4KBnB1YmtleRgBIAEoCRISCgpkaXNwbGF5X2lkGAIgASgJEhUKDWxhc3RfY2FsbHNpZ24YAyABKAkSFAoMbWFjaGluZV9oYXNoGAQgASgJEg4KBnJlYXNvbhgFIAEoCRIRCgliYW5uZWRfYnkYBiABKAkSFgoOYmFubmVkX2F0X3VuaXgYByABKAQiIAoOTGlmdEJhblJlcXVlc3QSDgoGcHVia2V5GAEgASgJIhEKD0xpZnRCYW5SZXNwb25zZSI4ChVTZXRDaGFubmVsTmFtZVJlcXVlc3QSEQoJZnJlcXVlbmN5GAEgASgJEgwKBG5hbWUYAiABKAkiGAoWU2V0Q2hhbm5lbE5hbWVSZXNwb25zZSIdChtDbGVhckFsbENoYW5uZWxOYW1lc1JlcXVlc3QiHgocQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZSJ4CgxNZXRyaWNTYW1wbGUSDwoHdHNfdW5peBgBIAEoBBIYChByeF9ieXRlc19wZXJfc2VjGAIgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYAyABKAQSDQoFdXNlcnMYBCABKA0SFAoMdHJhbnNtaXR0aW5nGAUgASgNIj4KDk1ldHJpY3NSZXF1ZXN0EiwKBndpbmRvdxgBIAEoDjIcLnRva2kuYWRtaW4udjEuTWV0cmljc1dpbmRvdyI/Cg9NZXRyaWNzUmVzcG9uc2USLAoHc2FtcGxlcxgBIAMoCzIbLnRva2kuYWRtaW4udjEuTWV0cmljU2FtcGxlIhgKFkdldFNlcnZlckhlYWx0aFJlcXVlc3QihwEKDFNlcnZlckhlYWx0aBITCgtjcHVfcGVyY2VudBgBIAEoARIWCg5tZW1fdXNlZF9ieXRlcxgCIAEoBBIXCg9tZW1fdG90YWxfYnl0ZXMYAyABKAQSFwoPZGlza191c2VkX2J5dGVzGAQgASgEEhgKEGRpc2tfdG90YWxfYnl0ZXMYBSABKAQiaQoKQXVkaXRFbnRyeRIKCgJpZBgBIAEoBBIPCgd0c191bml4GAIgASgEEgwKBGtpbmQYAyABKAkSDQoFYWN0b3IYBCABKAkSEQoJZnJlcXVlbmN5GAUgASgJEg4KBmRldGFpbBgGIAEoCSJfCg9BdWRpdExvZ1JlcXVlc3QSKgoGZmlsdGVyGAEgASgOMhoudG9raS5hZG1pbi52MS5BdWRpdEZpbHRlchINCgVsaW1pdBgCIAEoDRIRCgliZWZvcmVfaWQYAyABKAQiTQoQQXVkaXRMb2dSZXNwb25zZRIqCgdlbnRyaWVzGAEgAygLMhkudG9raS5hZG1pbi52MS5BdWRpdEVudHJ5Eg0KBXRvdGFsGAIgASgEKlkKDU1ldHJpY3NXaW5kb3cSFwoTTUVUUklDU19XSU5ET1dfSE9VUhAAEhYKEk1FVFJJQ1NfV0lORE9XX0RBWRABEhcKE01FVFJJQ1NfV0lORE9XX1dFRUsQAip0CgtBdWRpdEZpbHRlchIUChBBVURJVF9GSUxURVJfQUxMEAASFgoSQVVESVRfRklMVEVSX0FETUlOEAESHAoYQVVESVRfRklMVEVSX0NPTk5FQ1RJT05TEAISGQoVQVVESVRfRklMVEVSX1NFQ1VSSVRZEAMylAwKBUFkbWluEj8KBVdhdGNoEhsudG9raS5hZG1pbi52MS5XYXRjaFJlcXVlc3QaFy50b2tpLmFkbWluLnYxLlNuYXBzaG90MAESTwoNR2V0U2VydmVySW5mbxIjLnRva2kuYWRtaW4udjEuR2V0U2VydmVySW5mb1JlcXVlc3QaGS50b2tpLmFkbWluLnYxLlNlcnZlckluZm8SVQoPR2V0U2VydmVyQ29uZmlnEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSWwoSVXBkYXRlU2VydmVyQ29uZmlnEigudG9raS5hZG1pbi52MS5VcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJDb25maWcSZgoRU2V0U2VydmVyUGFzc3dvcmQSJy50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVxdWVzdBooLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZRJdCg5DaGFuZ2VQYXNzd29yZBIkLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlc3BvbnNlElEKCktpY2tDbGllbnQSIC50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVzcG9uc2USUQoKTW92ZUNsaWVudBIgLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXNwb25zZRJXCgxSZW5hbWVDbGllbnQSIi50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlcXVlc3QaIy50b2tpLmFkbWluLnYxLlJlbmFtZUNsaWVudFJlc3BvbnNlElQKC1NldFByaW9yaXR5EiEudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlcXVlc3QaIi50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVzcG9uc2USTgoJQmFuQ2xpZW50Eh8udG9raS5hZG1pbi52MS5CYW5DbGllbnRSZXF1ZXN0GiAudG9raS5hZG1pbi52MS5CYW5DbGllbnRSZXNwb25zZRJLCghMaXN0QmFucxIeLnRva2kuYWRtaW4udjEuTGlzdEJhbnNSZXF1ZXN0Gh8udG9raS5hZG1pbi52MS5MaXN0QmFuc1Jlc3BvbnNlEkgKB0xpZnRCYW4SHS50b2tpLmFkbWluLnYxLkxpZnRCYW5SZXF1ZXN0Gh4udG9raS5hZG1pbi52MS5MaWZ0QmFuUmVzcG9uc2USXQoOU2V0Q2hhbm5lbE5hbWUSJC50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVxdWVzdBolLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE5hbWVSZXNwb25zZRJvChRDbGVhckFsbENoYW5uZWxOYW1lcxIqLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0GisudG9raS5hZG1pbi52MS5DbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlEksKCkdldE1ldHJpY3MSHS50b2tpLmFkbWluLnYxLk1ldHJpY3NSZXF1ZXN0Gh4udG9raS5hZG1pbi52MS5NZXRyaWNzUmVzcG9uc2USVQoPR2V0U2VydmVySGVhbHRoEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJIZWFsdGhSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJIZWFsdGgSTgoLR2V0QXVkaXRMb2cSHi50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVxdWVzdBofLnRva2kuYWRtaW4udjEuQXVkaXRMb2dSZXNwb25zZWIGcHJvdG8z");
 
 /**
  * @generated from message toki.admin.v1.Snapshot
@@ -553,6 +553,172 @@ export const SetPriorityResponseSchema: GenMessage<SetPriorityResponse> = /*@__P
   messageDesc(file_admin, 20);
 
 /**
+ * @generated from message toki.admin.v1.BanClientRequest
+ */
+export type BanClientRequest = Message<"toki.admin.v1.BanClientRequest"> & {
+  /**
+   * live session client_id to ban + kick
+   *
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * shown to the banned client on rejected registers
+   *
+   * @generated from field: string reason = 2;
+   */
+  reason: string;
+
+  /**
+   * Also ban the machine hash the session presented (when it presented
+   * one): a config wipe then mints a fresh identity but stays banned.
+   *
+   * @generated from field: bool ban_machine = 3;
+   */
+  banMachine: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.BanClientRequest.
+ * Use `create(BanClientRequestSchema)` to create a new message.
+ */
+export const BanClientRequestSchema: GenMessage<BanClientRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 21);
+
+/**
+ * @generated from message toki.admin.v1.BanClientResponse
+ */
+export type BanClientResponse = Message<"toki.admin.v1.BanClientResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.BanClientResponse.
+ * Use `create(BanClientResponseSchema)` to create a new message.
+ */
+export const BanClientResponseSchema: GenMessage<BanClientResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 22);
+
+/**
+ * @generated from message toki.admin.v1.ListBansRequest
+ */
+export type ListBansRequest = Message<"toki.admin.v1.ListBansRequest"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.ListBansRequest.
+ * Use `create(ListBansRequestSchema)` to create a new message.
+ */
+export const ListBansRequestSchema: GenMessage<ListBansRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 23);
+
+/**
+ * @generated from message toki.admin.v1.ListBansResponse
+ */
+export type ListBansResponse = Message<"toki.admin.v1.ListBansResponse"> & {
+  /**
+   * newest-first
+   *
+   * @generated from field: repeated toki.admin.v1.BanRecord bans = 1;
+   */
+  bans: BanRecord[];
+};
+
+/**
+ * Describes the message toki.admin.v1.ListBansResponse.
+ * Use `create(ListBansResponseSchema)` to create a new message.
+ */
+export const ListBansResponseSchema: GenMessage<ListBansResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 24);
+
+/**
+ * @generated from message toki.admin.v1.BanRecord
+ */
+export type BanRecord = Message<"toki.admin.v1.BanRecord"> & {
+  /**
+   * banned identity key, lowercase hex (the ban key)
+   *
+   * @generated from field: string pubkey = 1;
+   */
+  pubkey: string;
+
+  /**
+   * its 8-char fingerprint, for display
+   *
+   * @generated from field: string display_id = 2;
+   */
+  displayId: string;
+
+  /**
+   * display name at ban time (display aid)
+   *
+   * @generated from field: string last_callsign = 3;
+   */
+  lastCallsign: string;
+
+  /**
+   * non-empty → the machine tier is banned too
+   *
+   * @generated from field: string machine_hash = 4;
+   */
+  machineHash: string;
+
+  /**
+   * @generated from field: string reason = 5;
+   */
+  reason: string;
+
+  /**
+   * admin username
+   *
+   * @generated from field: string banned_by = 6;
+   */
+  bannedBy: string;
+
+  /**
+   * @generated from field: uint64 banned_at_unix = 7;
+   */
+  bannedAtUnix: bigint;
+};
+
+/**
+ * Describes the message toki.admin.v1.BanRecord.
+ * Use `create(BanRecordSchema)` to create a new message.
+ */
+export const BanRecordSchema: GenMessage<BanRecord> = /*@__PURE__*/
+  messageDesc(file_admin, 25);
+
+/**
+ * @generated from message toki.admin.v1.LiftBanRequest
+ */
+export type LiftBanRequest = Message<"toki.admin.v1.LiftBanRequest"> & {
+  /**
+   * @generated from field: string pubkey = 1;
+   */
+  pubkey: string;
+};
+
+/**
+ * Describes the message toki.admin.v1.LiftBanRequest.
+ * Use `create(LiftBanRequestSchema)` to create a new message.
+ */
+export const LiftBanRequestSchema: GenMessage<LiftBanRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 26);
+
+/**
+ * @generated from message toki.admin.v1.LiftBanResponse
+ */
+export type LiftBanResponse = Message<"toki.admin.v1.LiftBanResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.LiftBanResponse.
+ * Use `create(LiftBanResponseSchema)` to create a new message.
+ */
+export const LiftBanResponseSchema: GenMessage<LiftBanResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 27);
+
+/**
  * @generated from message toki.admin.v1.SetChannelNameRequest
  */
 export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest"> & {
@@ -576,7 +742,7 @@ export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest
  * Use `create(SetChannelNameRequestSchema)` to create a new message.
  */
 export const SetChannelNameRequestSchema: GenMessage<SetChannelNameRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 21);
+  messageDesc(file_admin, 28);
 
 /**
  * @generated from message toki.admin.v1.SetChannelNameResponse
@@ -589,7 +755,7 @@ export type SetChannelNameResponse = Message<"toki.admin.v1.SetChannelNameRespon
  * Use `create(SetChannelNameResponseSchema)` to create a new message.
  */
 export const SetChannelNameResponseSchema: GenMessage<SetChannelNameResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 22);
+  messageDesc(file_admin, 29);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesRequest
@@ -602,7 +768,7 @@ export type ClearAllChannelNamesRequest = Message<"toki.admin.v1.ClearAllChannel
  * Use `create(ClearAllChannelNamesRequestSchema)` to create a new message.
  */
 export const ClearAllChannelNamesRequestSchema: GenMessage<ClearAllChannelNamesRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 23);
+  messageDesc(file_admin, 30);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesResponse
@@ -615,7 +781,7 @@ export type ClearAllChannelNamesResponse = Message<"toki.admin.v1.ClearAllChanne
  * Use `create(ClearAllChannelNamesResponseSchema)` to create a new message.
  */
 export const ClearAllChannelNamesResponseSchema: GenMessage<ClearAllChannelNamesResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 24);
+  messageDesc(file_admin, 31);
 
 /**
  * One sampled data point. `rx/tx_bytes_per_sec` are the average voice-
@@ -667,7 +833,7 @@ export type MetricSample = Message<"toki.admin.v1.MetricSample"> & {
  * Use `create(MetricSampleSchema)` to create a new message.
  */
 export const MetricSampleSchema: GenMessage<MetricSample> = /*@__PURE__*/
-  messageDesc(file_admin, 25);
+  messageDesc(file_admin, 32);
 
 /**
  * @generated from message toki.admin.v1.MetricsRequest
@@ -684,7 +850,7 @@ export type MetricsRequest = Message<"toki.admin.v1.MetricsRequest"> & {
  * Use `create(MetricsRequestSchema)` to create a new message.
  */
 export const MetricsRequestSchema: GenMessage<MetricsRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 26);
+  messageDesc(file_admin, 33);
 
 /**
  * @generated from message toki.admin.v1.MetricsResponse
@@ -703,7 +869,7 @@ export type MetricsResponse = Message<"toki.admin.v1.MetricsResponse"> & {
  * Use `create(MetricsResponseSchema)` to create a new message.
  */
 export const MetricsResponseSchema: GenMessage<MetricsResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 27);
+  messageDesc(file_admin, 34);
 
 /**
  * @generated from message toki.admin.v1.GetServerHealthRequest
@@ -716,7 +882,7 @@ export type GetServerHealthRequest = Message<"toki.admin.v1.GetServerHealthReque
  * Use `create(GetServerHealthRequestSchema)` to create a new message.
  */
 export const GetServerHealthRequestSchema: GenMessage<GetServerHealthRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 28);
+  messageDesc(file_admin, 35);
 
 /**
  * @generated from message toki.admin.v1.ServerHealth
@@ -757,7 +923,7 @@ export type ServerHealth = Message<"toki.admin.v1.ServerHealth"> & {
  * Use `create(ServerHealthSchema)` to create a new message.
  */
 export const ServerHealthSchema: GenMessage<ServerHealth> = /*@__PURE__*/
-  messageDesc(file_admin, 29);
+  messageDesc(file_admin, 36);
 
 /**
  * @generated from message toki.admin.v1.AuditEntry
@@ -809,7 +975,7 @@ export type AuditEntry = Message<"toki.admin.v1.AuditEntry"> & {
  * Use `create(AuditEntrySchema)` to create a new message.
  */
 export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
-  messageDesc(file_admin, 30);
+  messageDesc(file_admin, 37);
 
 /**
  * @generated from message toki.admin.v1.AuditLogRequest
@@ -840,7 +1006,7 @@ export type AuditLogRequest = Message<"toki.admin.v1.AuditLogRequest"> & {
  * Use `create(AuditLogRequestSchema)` to create a new message.
  */
 export const AuditLogRequestSchema: GenMessage<AuditLogRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 31);
+  messageDesc(file_admin, 38);
 
 /**
  * @generated from message toki.admin.v1.AuditLogResponse
@@ -866,7 +1032,7 @@ export type AuditLogResponse = Message<"toki.admin.v1.AuditLogResponse"> & {
  * Use `create(AuditLogResponseSchema)` to create a new message.
  */
 export const AuditLogResponseSchema: GenMessage<AuditLogResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 32);
+  messageDesc(file_admin, 39);
 
 /**
  * @generated from enum toki.admin.v1.MetricsWindow
@@ -1047,6 +1213,44 @@ export const Admin: GenService<{
     methodKind: "unary";
     input: typeof SetPriorityRequestSchema;
     output: typeof SetPriorityResponseSchema;
+  },
+  /**
+   * ── Identity bans ───────────────────────────────────────────────
+   * Ban a connected member's *identity* (and optionally its machine
+   * hash) and kick the live session. Future registers presenting the
+   * banned identity — or, for a machine ban, the banned machine hash
+   * under ANY identity — are rejected with PERMISSION_DENIED + the
+   * reason. NOT_FOUND for an unknown client id; FAILED_PRECONDITION
+   * when the member registered without an identity (nothing durable
+   * to ban — kick is the only lever for those).
+   *
+   * @generated from rpc toki.admin.v1.Admin.BanClient
+   */
+  banClient: {
+    methodKind: "unary";
+    input: typeof BanClientRequestSchema;
+    output: typeof BanClientResponseSchema;
+  },
+  /**
+   * Every active ban, newest-first.
+   *
+   * @generated from rpc toki.admin.v1.Admin.ListBans
+   */
+  listBans: {
+    methodKind: "unary";
+    input: typeof ListBansRequestSchema;
+    output: typeof ListBansResponseSchema;
+  },
+  /**
+   * Lift a ban by banned pubkey. Idempotent (lifting an unknown ban
+   * is a no-op success, so a double-click never errors).
+   *
+   * @generated from rpc toki.admin.v1.Admin.LiftBan
+   */
+  liftBan: {
+    methodKind: "unary";
+    input: typeof LiftBanRequestSchema;
+    output: typeof LiftBanResponseSchema;
   },
   /**
    * Named channels. Assign or clear the human-readable name of a

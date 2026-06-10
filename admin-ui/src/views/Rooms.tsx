@@ -10,6 +10,7 @@ import {
   Eraser,
   Check,
   Fingerprint,
+  Ban,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -18,6 +19,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -54,6 +56,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Member | null>(null);
+  const [banning, setBanning] = useState<Member | null>(null);
 
   useEffect(() => {
     // One-shot on mount (the section remounts on each visit, so a
@@ -152,6 +155,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               name={names[current.frequency]}
               namedEnabled={namedEnabled}
               onRename={setRenaming}
+              onBan={setBanning}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -164,6 +168,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
       {renaming && (
         <RenameDialog member={renaming} onClose={() => setRenaming(null)} />
       )}
+      {banning && <BanDialog member={banning} onClose={() => setBanning(null)} />}
     </div>
   );
 }
@@ -214,11 +219,13 @@ function ChannelDetail({
   name,
   namedEnabled,
   onRename,
+  onBan,
 }: {
   room: Room;
   name?: string;
   namedEnabled: boolean;
   onRename: (m: Member) => void;
+  onBan: (m: Member) => void;
 }) {
   return (
     <>
@@ -278,7 +285,7 @@ function ChannelDetail({
               <span className="ml-auto truncate font-mono text-xs text-muted-foreground/60">
                 {m.id.slice(0, 8)}
               </span>
-              <MemberMenu member={m} onRename={() => onRename(m)} />
+              <MemberMenu member={m} onRename={() => onRename(m)} onBan={() => onBan(m)} />
             </div>
           );
         })}
@@ -420,7 +427,15 @@ function IdentityBadge({ member }: { member: Member }) {
   );
 }
 
-function MemberMenu({ member, onRename }: { member: Member; onRename: () => void }) {
+function MemberMenu({
+  member,
+  onRename,
+  onBan,
+}: {
+  member: Member;
+  onRename: () => void;
+  onBan: () => void;
+}) {
   async function move(frequency: string) {
     try {
       await admin.moveClient({ id: member.id, frequency });
@@ -481,6 +496,13 @@ function MemberMenu({ member, onRename }: { member: Member; onRename: () => void
         <DropdownMenuItem onSelect={() => void kick()} className="text-warning">
           <Power /> Kick (disconnect)
         </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={onBan}
+          disabled={!member.identity}
+          className="text-destructive"
+        >
+          <Ban /> {member.identity ? "Ban identity\u2026" : "Ban (no identity)"}
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -524,6 +546,76 @@ function RenameDialog({ member, onClose }: { member: Member; onClose: () => void
               {busy ? "Saving…" : "Rename"}
             </Button>
           </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/// Confirm-and-reason dialog for banning a member's identity. Only
+/// reachable for members with a verified identity (the menu item is
+/// disabled otherwise). The machine toggle appears only when the
+/// session reported a machine hash.
+function BanDialog({ member, onClose }: { member: Member; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [banMachine, setBanMachine] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function ban() {
+    setBusy(true);
+    try {
+      await admin.banClient({ id: member.id, reason, banMachine });
+      toast.warning(`Banned ${member.displayName} (${member.identity})`);
+      onClose();
+    } catch (e) {
+      toast.error(`Ban failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Ban {member.displayName}{" "}
+            <span className="font-mono text-sm text-muted-foreground">({member.identity})</span>
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          The session is kicked immediately and this identity can no longer register. Display
+          names don&apos;t matter — the ban follows the key.
+        </p>
+        <div className="space-y-1.5">
+          <Label htmlFor="ban-reason">Reason (shown to the banned client)</Label>
+          <Input
+            id="ban-reason"
+            value={reason}
+            maxLength={256}
+            placeholder="optional"
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </div>
+        {member.identityMachineHash && (
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span>
+              Also ban this machine
+              <span className="block text-xs text-muted-foreground">
+                A wiped config gets a fresh identity but keeps the machine hash — this closes
+                that path.
+              </span>
+            </span>
+            <Switch checked={banMachine} onCheckedChange={setBanMachine} />
+          </label>
+        )}
+        <div className="flex justify-end gap-2">
+          <DialogClose asChild>
+            <Button variant="ghost">Cancel</Button>
+          </DialogClose>
+          <Button variant="destructive" disabled={busy} onClick={() => void ban()}>
+            <Ban /> Ban
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

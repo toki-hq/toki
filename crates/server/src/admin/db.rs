@@ -206,6 +206,12 @@ impl AdminDb {
                 "BIGINT NOT NULL DEFAULT 2",
                 "BIGINT NOT NULL DEFAULT 2",
             ),
+            (
+                "require_identity",
+                "INTEGER NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+            ),
         ];
         // Columns that existed in pre-release dev builds and were later
         // removed from the schema. A `NOT NULL` stray blocks inserts
@@ -277,7 +283,7 @@ impl AdminDb {
     /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                   named_channels_enabled, audio_quality \
+                   named_channels_enabled, audio_quality, require_identity \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -289,6 +295,7 @@ impl AdminDb {
                     grpc_password: r.try_get::<String, _>(3)?,
                     named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
                     audio_quality: r.try_get::<i64, _>(5)? as u32,
+                    require_identity: r.try_get::<i64, _>(6)? != 0,
                 },
                 None => ServerConfig::default(),
             })
@@ -300,7 +307,8 @@ impl AdminDb {
         let now = now_unix();
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
-                 named_channels_enabled = ?, audio_quality = ?, updated_at = ? \
+                 named_channels_enabled = ?, audio_quality = ?, require_identity = ?, \
+                 updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
             sqlx::query(&sql)
@@ -310,6 +318,7 @@ impl AdminDb {
                 .bind(cfg.grpc_password.as_str())
                 .bind(cfg.named_channels_enabled as i64)
                 .bind(cfg.audio_quality as i64)
+                .bind(cfg.require_identity as i64)
                 .bind(now)
                 .execute(p)
                 .await?;
@@ -1203,6 +1212,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled INTEGER NOT NULL DEFAULT 0,
     audio_quality   INTEGER NOT NULL DEFAULT 2,
+    require_identity INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO server_config (id) VALUES (1);
@@ -1269,6 +1279,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 INSERT IGNORE INTO server_config (id) VALUES (1);
@@ -1333,6 +1344,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
 INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
@@ -1518,6 +1530,7 @@ mod tests {
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
+            require_identity: true,
             audio_quality: 1,
         };
         db.save_server_config(&new).await.unwrap();
@@ -1556,6 +1569,7 @@ mod tests {
             grpc_password: "secret".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            require_identity: true,
         })
         .await
         .unwrap();

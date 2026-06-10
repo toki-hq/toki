@@ -93,6 +93,14 @@ pub struct ServerConfig {
     /// (~32 kbps). See [`opus_settings`]. Advisory — the relay forwards
     /// whatever a client sends and receivers decode per-packet.
     pub audio_quality: u32,
+
+    /// When `true`, identity-less registers are rejected — every member
+    /// must present a verified keypair identity, which makes identity
+    /// bans airtight (an evader can no longer connect anonymously).
+    /// `false` (the default) keeps the open/legacy behaviour: clients
+    /// without identity support, or whose identity handshake failed
+    /// transiently, still connect.
+    pub require_identity: bool,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -122,6 +130,9 @@ impl Default for ServerConfig {
             // Standard Opus by default — a fresh deployment compresses
             // voice out of the box (the headline win of this feature).
             audio_quality: 2,
+            // Off by default: identity stays optional until the operator
+            // opts in (gated-feature posture, like named channels).
+            require_identity: false,
         }
     }
 }
@@ -157,6 +168,10 @@ mod tests {
             "named channels off by default (gated feature)"
         );
         assert_eq!(d.audio_quality, 2, "Standard Opus by default");
+        assert!(
+            !d.require_identity,
+            "identity optional by default (gated feature)"
+        );
     }
 
     #[test]
@@ -179,6 +194,7 @@ mod tests {
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
             audio_quality: 3,
+            require_identity: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -187,6 +203,7 @@ mod tests {
         assert!(json.contains("\"grpcPassword\":\"hunter2\""));
         assert!(json.contains("\"namedChannelsEnabled\":true"));
         assert!(json.contains("\"audioQuality\":3"));
+        assert!(json.contains("\"requireIdentity\":true"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);
@@ -197,5 +214,6 @@ mod tests {
             original.named_channels_enabled
         );
         assert_eq!(parsed.audio_quality, original.audio_quality);
+        assert_eq!(parsed.require_identity, original.require_identity);
     }
 }

@@ -375,6 +375,7 @@ async fn boot_with_passwords(
         grpc_password: db_password.to_string(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -500,6 +501,7 @@ async fn register_rejected_when_at_max_peers() {
         grpc_password: String::new(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
     })
     .await;
     for i in 0..2 {
@@ -806,4 +808,51 @@ async fn identityless_register_unaffected_by_bans() {
         .insert("aa".repeat(32), ban_entry("", "someone"));
     let mut client = boot_with_bans(bans).await;
     register_or_fail(&mut client, "anon").await;
+}
+
+// ── Require-identity toggle ─────────────────────────────────────────
+
+fn require_identity_config() -> toki_server::server_config::ServerConfig {
+    toki_server::server_config::ServerConfig {
+        require_identity: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_rejects_identityless_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let err = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a client identity"),
+        "actionable message: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_accepts_identityful_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[60u8; 32]);
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("identity-ful register passes the gate");
 }

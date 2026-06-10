@@ -213,6 +213,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         grpc_password_set: !cfg.grpc_password.is_empty(),
         named_channels_enabled: cfg.named_channels_enabled,
         audio_quality: cfg.audio_quality,
+        require_identity: cfg.require_identity,
     }
 }
 
@@ -294,6 +295,7 @@ impl Admin for AdminApi {
                 grpc_password: current.grpc_password,
                 named_channels_enabled: body.named_channels_enabled,
                 audio_quality: body.audio_quality,
+                require_identity: body.require_identity,
             }
         };
         self.state
@@ -1508,6 +1510,7 @@ mod tests {
                     idle_kick_secs: 10,
                     named_channels_enabled: false,
                     audio_quality: 2,
+                    require_identity: false,
                 },
                 &token,
             ))

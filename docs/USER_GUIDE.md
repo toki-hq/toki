@@ -308,6 +308,8 @@ is exactly as sensitive as the stored server password):
   machine hash stays the same, so operators can spot config-wipe ban evasion.
 - Connecting to an older server (or one without identity support) silently
   falls back to an identity-less session — exactly the pre-0.5 behavior.
+  Servers can flip **require identity** in their settings, in which case an
+  identity-less register is refused with a clear message.
 
 To **reset** your identity, delete `identity.toml` and reconnect. To **move**
 it to another machine, copy the file (the identity follows the key; the
@@ -440,7 +442,9 @@ Sections:
 - **Channels** — assign human-readable names to frequencies (gated by the
   named-channels toggle).
 - **Server config** — edit `serverName`, `maxPeers`, `idleKickSecs`,
-  `voiceQuality`, the named-channels toggle, and `grpcPassword` at runtime.
+  `voiceQuality`, the named-channels toggle, the **require-identity** toggle
+  (reject clients without a verified identity — makes bans airtight), and
+  `grpcPassword` at runtime.
 - **Bans** — review and lift identity bans (who, why, by whom, when; a
   "machine" badge marks bans that also cover the machine hash).
 - **Account** — rotate the current admin user's password (revokes other

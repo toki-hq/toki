@@ -325,6 +325,23 @@ impl Signaling for SignalingSvc {
         // unauthenticated callers can't probe identity verification.
         let identity = self.process_identity(&req, &display_name, peer_ip).await?;
 
+        // Require-identity gate (off by default): with the toggle on,
+        // an identity-less register is refused — the lever that makes
+        // identity bans airtight, since an evader can no longer just
+        // connect anonymously. Read fresh so flipping the toggle in
+        // the admin panel applies to the next register, no restart.
+        if identity.is_none() && self.server_config.read().await.require_identity {
+            tracing::warn!(
+                ?peer_ip,
+                name = %display_name,
+                "register rejected: server requires a client identity"
+            );
+            return Err(Status::failed_precondition(
+                "this server requires a client identity; \
+                 update your client or repair its identity file and reconnect",
+            ));
+        }
+
         // Ban gate: a verified identity whose pubkey is banned — or, for
         // machine-tier bans, whose machine hash matches ANY ban row — is
         // refused with the operator's reason. Checked after identity

@@ -56,6 +56,31 @@ fn should_relay(
     holder.is_none() && matches!(last_released, Some((id, since)) if id == sender && since < grace)
 }
 
+/// Is a decrypted packet's payload the right length for its `version`?
+/// ChaCha20 is a stream cipher, so ciphertext length equals plaintext
+/// length — this validates the *shape* before we act on the packet.
+///
+///   * PCM — exactly one [`FRAME_BYTES`] frame.
+///   * Opus — non-empty, up to [`MAX_OPUS_PAYLOAD`].
+///   * Keepalive — empty (legacy) **or** exactly a [`PING_LEN`] RTT probe
+///     (since 0.6.0). The probe case is the one that regressed: a guard
+///     that demanded keepalives be empty silently dropped every probe-
+///     carrying keepalive, so `last_seen` never refreshed (reaper evicted
+///     the client) and no pong was ever sent (client RTT never measured).
+///   * Anything else (unknown version with a payload) — rejected.
+fn payload_shape_ok(version: u8, payload_len: usize) -> bool {
+    match version {
+        VERSION_AUDIO_PCM => payload_len == FRAME_BYTES,
+        VERSION_AUDIO_OPUS => payload_len != 0 && payload_len <= MAX_OPUS_PAYLOAD,
+        VERSION_KEEPALIVE => payload_len == 0 || payload_len == PING_LEN,
+        // PONG is server→client only; a client should never send one, and
+        // any other version is unknown. Reject a payload either way (an
+        // empty unknown-version packet is harmless and still dropped later
+        // by the codec routing).
+        _ => payload_len == 0,
+    }
+}
+
 /// Token bucket window. Counters reset every `RATE_WINDOW`. Smaller
 /// values give tighter shaping but burn more CPU on the HashMap
 /// scan; 1 s strikes a reasonable balance for human-paced traffic.
@@ -121,26 +146,10 @@ pub async fn run(
             .expect("slice has TAG_LEN bytes");
         let ciphertext_in = &buf[HEADER_LEN_C2S..len];
 
-        // Per-codec shape checks. ChaCha20 is a stream cipher, so the
-        // ciphertext length equals the plaintext length. PCM frames are
-        // *exactly* FRAME_BYTES; Opus frames are variable but bounded;
-        // keepalives carry no payload. Anything else is malformed/hostile.
-        if version == VERSION_AUDIO_PCM && ciphertext_in.len() != FRAME_BYTES {
-            debug!(
-                len,
-                expected = HEADER_LEN_C2S + FRAME_BYTES,
-                "PCM frame wrong size, dropping"
-            );
-            continue;
-        }
-        if version == VERSION_AUDIO_OPUS
-            && (ciphertext_in.is_empty() || ciphertext_in.len() > MAX_OPUS_PAYLOAD)
-        {
-            debug!(len, "Opus frame out of bounds, dropping");
-            continue;
-        }
-        if !is_audio(version) && !ciphertext_in.is_empty() {
-            debug!(len, version, "non-audio packet with payload, dropping");
+        // Per-codec payload-shape check (see `payload_shape_ok`). ChaCha20
+        // is a stream cipher, so ciphertext length equals plaintext length.
+        if !payload_shape_ok(version, ciphertext_in.len()) {
+            debug!(len, version, "packet payload wrong shape, dropping");
             continue;
         }
 
@@ -434,6 +443,39 @@ mod tests {
     #[test]
     fn relays_for_the_current_holder() {
         assert!(should_relay(Some("a"), None, "a", G));
+    }
+
+    // ── payload shape (regression: keepalive RTT probe must pass) ──
+
+    #[test]
+    fn keepalive_accepts_empty_and_probe_payloads() {
+        // The bug: a probe-carrying keepalive was dropped, so last_seen
+        // never refreshed (reaper evicted the client ~30 s in) and no
+        // pong was sent (RTT bars stayed gray). Both lengths must pass.
+        assert!(payload_shape_ok(VERSION_KEEPALIVE, 0));
+        assert!(payload_shape_ok(VERSION_KEEPALIVE, PING_LEN));
+        // A wrong-sized keepalive payload is still rejected.
+        assert!(!payload_shape_ok(VERSION_KEEPALIVE, PING_LEN - 1));
+        assert!(!payload_shape_ok(VERSION_KEEPALIVE, FRAME_BYTES));
+    }
+
+    #[test]
+    fn audio_payload_shapes() {
+        assert!(payload_shape_ok(VERSION_AUDIO_PCM, FRAME_BYTES));
+        assert!(!payload_shape_ok(VERSION_AUDIO_PCM, FRAME_BYTES - 2));
+        assert!(payload_shape_ok(VERSION_AUDIO_OPUS, 1));
+        assert!(payload_shape_ok(VERSION_AUDIO_OPUS, MAX_OPUS_PAYLOAD));
+        assert!(!payload_shape_ok(VERSION_AUDIO_OPUS, 0));
+        assert!(!payload_shape_ok(VERSION_AUDIO_OPUS, MAX_OPUS_PAYLOAD + 1));
+    }
+
+    #[test]
+    fn unknown_version_with_payload_is_rejected() {
+        // A client-sent PONG (or any unknown version) carrying a payload
+        // is malformed/hostile and dropped; an empty one is harmless.
+        assert!(!payload_shape_ok(VERSION_PONG, PING_LEN));
+        assert!(!payload_shape_ok(99, 1));
+        assert!(payload_shape_ok(99, 0));
     }
 
     #[test]

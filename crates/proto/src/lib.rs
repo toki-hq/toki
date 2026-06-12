@@ -76,13 +76,13 @@ pub mod wire {
     /// replay one to keep a session alive on the legitimate client's
     /// behalf.
     ///
-    /// Since 0.6.0 the keepalive *payload* carries a [`PING_LEN`]-byte
+    /// Since 0.5.0 the keepalive *payload* carries a [`PING_LEN`]-byte
     /// RTT probe (`ping_id` ‖ `send_unix_micros`, both le u64); the
     /// server bounces it straight back in a [`VERSION_PONG`] packet so
     /// the client can measure round-trip time. Older keepalives had an
     /// empty payload — the server tolerates either (an empty or short
     /// keepalive simply gets no pong), but the version gate already
-    /// rejects pre-0.6.0 clients, so in practice the probe is always
+    /// rejects pre-0.5.0 clients, so in practice the probe is always
     /// present.
     pub const VERSION_KEEPALIVE: u8 = 0;
 

@@ -63,7 +63,7 @@ fn should_relay(
 ///   * PCM — exactly one [`FRAME_BYTES`] frame.
 ///   * Opus — non-empty, up to [`MAX_OPUS_PAYLOAD`].
 ///   * Keepalive — empty (legacy) **or** exactly a [`PING_LEN`] RTT probe
-///     (since 0.6.0). The probe case is the one that regressed: a guard
+///     (since 0.5.0). The probe case is the one that regressed: a guard
 ///     that demanded keepalives be empty silently dropped every probe-
 ///     carrying keepalive, so `last_seen` never refreshed (reaper evicted
 ///     the client) and no pong was ever sent (client RTT never measured).

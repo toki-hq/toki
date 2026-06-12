@@ -418,13 +418,6 @@ The client sends its version on `Register`. The server requires a matching
 mismatch with `FAILED_PRECONDITION` and a "please update" message, rather than
 letting an incompatible build half-connect into silent dead air.
 
-> **0.6.0 is a coordinated upgrade.** The connection-quality telemetry adds an
-> RTT probe to the keepalive and a new `PONG` packet kind, changing the UDP
-> wire format — so a 0.6.0 server rejects 0.5.x clients (and vice versa) at the
-> version gate. Upgrade the server and clients together. (Pre-0.6.0 clients
-> would never have reported quality anyway; the admin column shows a dash for
-> any session that doesn't report.)
-
 ### Half-duplex behavior
 
 - One talker at a time per frequency. Pressing PTT while someone else is
@@ -525,7 +518,7 @@ client stays attributable.
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
 | `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
 | `Signaling.ReportConnectionQuality` | gRPC | Client pushes its locally-measured RTT / jitter / loss every few seconds; the server denormalizes the latest onto the session for the admin Rooms quality column. Advisory — a dropped report just delays the next refresh. |
-| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe since 0.6.0); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame; `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
+| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame; `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
 | `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |

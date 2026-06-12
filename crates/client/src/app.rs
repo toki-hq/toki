@@ -1781,14 +1781,19 @@ impl TokiApp {
         let n = 4usize;
         let gap = 2.0;
         let bar_w = (rect.width() - gap * (n as f32 - 1.0)) / n as f32;
+        // Cap the tallest bar to ~62% of the row height (shorter than the
+        // neighbouring icon buttons) and center the cluster vertically so
+        // it reads as a compact signal glyph rather than a full-height bar.
+        let max_h = (rect.height() * 0.62).round();
+        let baseline = rect.center().y + max_h / 2.0;
         for i in 0..n {
-            // Ascending heights: shortest bar ~40% up to full height.
+            // Ascending heights: shortest bar ~40% up to the capped height.
             let frac = 0.4 + 0.6 * (i as f32 / (n as f32 - 1.0));
-            let h = rect.height() * frac;
+            let h = max_h * frac;
             let bx = rect.left() + i as f32 * (bar_w + gap);
             let br = Rect::from_min_max(
-                Pos2::new(bx, rect.bottom() - h),
-                Pos2::new(bx + bar_w, rect.bottom()),
+                Pos2::new(bx, baseline - h),
+                Pos2::new(bx + bar_w, baseline),
             );
             if (i as u8) < lit {
                 painter.rect_filled(br, CornerRadius::same(1), fill);

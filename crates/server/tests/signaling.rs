@@ -102,6 +102,55 @@ async fn register_open_mode_succeeds() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn register_rejects_duplicate_callsign() {
+    // Default config has unique_callsigns on. First ECHO-1 wins; a
+    // second register with the same name — or a case variant — is
+    // refused with ALREADY_EXISTS.
+    let mut client = boot(None).await;
+    register_or_fail(&mut client, "ECHO-1").await;
+
+    let dup = client
+        .register(RegisterRequest {
+            display_name: "ECHO-1".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(dup.code(), tonic::Code::AlreadyExists);
+
+    // Case-insensitive: echo-1 collides with ECHO-1 too.
+    let dup_case = client
+        .register(RegisterRequest {
+            display_name: "echo-1".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(dup_case.code(), tonic::Code::AlreadyExists);
+
+    // A different callsign still registers fine.
+    register_or_fail(&mut client, "FOXTROT-2").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn register_allows_duplicate_when_uniqueness_disabled() {
+    let mut client = boot_with_config(server_config::ServerConfig {
+        unique_callsigns: false,
+        ..Default::default()
+    })
+    .await;
+    register_or_fail(&mut client, "ECHO-1").await;
+    // Second ECHO-1 is allowed with the toggle off (legacy behaviour).
+    register_or_fail(&mut client, "ECHO-1").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn register_advertises_opus_by_default() {
     // Default server_config audio_quality = 2 (Standard) → clients are
     // asked to Opus-encode at ~24 kbps.
@@ -378,6 +427,7 @@ async fn boot_with_passwords(
         named_channels_enabled: false,
         audio_quality: 2,
         require_identity: false,
+        unique_callsigns: true,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -505,6 +555,7 @@ async fn register_rejected_when_at_max_peers() {
         named_channels_enabled: false,
         audio_quality: 2,
         require_identity: false,
+        unique_callsigns: true,
     })
     .await;
     for i in 0..2 {

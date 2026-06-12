@@ -243,6 +243,7 @@ first boot:
 | `idleKickSecs` | `10` | Stale-client eviction threshold. A client with no inbound UDP packet for this long is removed and its peers are notified. |
 | `voiceQuality` | `Standard` | Codec/quality advertised to clients at register: Raw PCM, or Low/Standard/High Opus. |
 | `namedChannels` | `off` | When on, clients receive admin-assigned channel names beside their tuner. |
+| `uniqueCallsigns` | `on` | When on, a register or admin rename onto a callsign another connected member already holds is refused (`ALREADY_EXISTS`, case-insensitive). A name frees the instant its holder disconnects; a keypair client reconnecting keeps its own name. Off allows duplicates. |
 | `grpcPassword` | `""` | Runtime-editable shared secret. **Overridden** by `config.toml`'s `password` field — if TOML set one, the UI greys out this input. |
 
 ### Client: per-user config

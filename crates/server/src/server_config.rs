@@ -101,6 +101,17 @@ pub struct ServerConfig {
     /// without identity support, or whose identity handshake failed
     /// transiently, still connect.
     pub require_identity: bool,
+
+    /// When `true` (the default), callsigns (display names) must be
+    /// unique across connected members: a register with a name already
+    /// in use is rejected (`ALREADY_EXISTS`), and an admin can't rename
+    /// a member onto a name another live session holds. Comparison is
+    /// case-insensitive (`ECHO-1` ≈ `echo-1`) since callsigns are
+    /// uppercased client-side anyway. `false` restores the legacy
+    /// behaviour where duplicates are allowed. Scoped to *currently
+    /// connected* sessions — a name frees up the moment its holder
+    /// disconnects.
+    pub unique_callsigns: bool,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -133,6 +144,10 @@ impl Default for ServerConfig {
             // Off by default: identity stays optional until the operator
             // opts in (gated-feature posture, like named channels).
             require_identity: false,
+            // On by default: unique callsigns are the expected radio
+            // behaviour ("there's only one ECHO-1"). Operators who want
+            // duplicates can turn it off.
+            unique_callsigns: true,
         }
     }
 }
@@ -172,6 +187,10 @@ mod tests {
             !d.require_identity,
             "identity optional by default (gated feature)"
         );
+        assert!(
+            d.unique_callsigns,
+            "unique callsigns on by default (radio behaviour)"
+        );
     }
 
     #[test]
@@ -195,6 +214,7 @@ mod tests {
             named_channels_enabled: true,
             audio_quality: 3,
             require_identity: true,
+            unique_callsigns: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -204,6 +224,7 @@ mod tests {
         assert!(json.contains("\"namedChannelsEnabled\":true"));
         assert!(json.contains("\"audioQuality\":3"));
         assert!(json.contains("\"requireIdentity\":true"));
+        assert!(json.contains("\"uniqueCallsigns\":false"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);
@@ -215,5 +236,6 @@ mod tests {
         );
         assert_eq!(parsed.audio_quality, original.audio_quality);
         assert_eq!(parsed.require_identity, original.require_identity);
+        assert_eq!(parsed.unique_callsigns, original.unique_callsigns);
     }
 }

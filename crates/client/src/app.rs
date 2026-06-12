@@ -793,7 +793,9 @@ fn offline_reason(snap: &StateSnapshot, is_offline: bool) -> String {
             // error if we can recognize it — falls back to the raw
             // message otherwise.
             let lower = e.to_ascii_lowercase();
-            if lower.contains("auth") {
+            if lower.contains("already in use") || lower.contains("alreadyexists") {
+                "CALLSIGN TAKEN".into()
+            } else if lower.contains("auth") {
                 "AUTH FAILED".into()
             } else if lower.contains("refused")
                 || lower.contains("unreachable")

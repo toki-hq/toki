@@ -417,6 +417,7 @@ impl TokiApp {
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
             muted: s.locally_silenced(),
+            conn_quality: s.conn_quality.as_ref().map(|h| h.snapshot()),
             log_tail: s.log.iter().next_back().cloned().unwrap_or_default(),
         }
     }
@@ -685,6 +686,10 @@ struct StateSnapshot {
     /// channel we're tuned to. Drives the PTT button's disabled "UNABLE
     /// TO TALK" treatment. Moving to an unmuted channel clears it.
     muted: bool,
+    /// Live connection-quality readout (RTT / jitter / loss + a 0–4 bars
+    /// score), or `None` when disconnected or not yet measured. Drives
+    /// the topbar signal-bars glyph.
+    conn_quality: Option<crate::telemetry::ConnQuality>,
     #[allow(dead_code)]
     log_tail: String,
 }
@@ -1700,6 +1705,18 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::Disconnect);
             }
             x -= 14.0;
+
+            // Signal-quality bars — cell-style 4-bar glyph from the
+            // live loss/jitter/RTT score, with the raw numbers on hover.
+            // Only while connected (no link to rate otherwise).
+            let bars_w = 18.0;
+            x -= bars_w;
+            let bars_rect = Rect::from_min_size(
+                Pos2::new(x, y_mid - T::ICON_BTN_D / 2.0),
+                Vec2::new(bars_w, T::ICON_BTN_D),
+            );
+            self.paint_signal_bars(ui, painter, bars_rect, snap.conn_quality);
+            x -= 14.0;
         }
 
         // Status chip: dot + label. Transport-down states win over
@@ -1738,6 +1755,67 @@ impl TokiApp {
         );
         x -= 12.0;
         glow_dot(painter, Pos2::new(x, y_mid), 3.0, chip_color, chip_glow);
+    }
+
+    /// Cell-style 4-bar signal indicator driven by the connection-quality
+    /// score. Four ascending bars: filled green→amber→red up to the bar
+    /// count, the rest drawn as faint outlines. `None` (not yet measured)
+    /// shows all four as faint outlines. Hover reveals the raw
+    /// RTT / jitter / loss numbers.
+    fn paint_signal_bars(
+        &self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        quality: Option<crate::telemetry::ConnQuality>,
+    ) {
+        let bars = quality.and_then(|q| q.bars());
+        // Colour by score: 3–4 healthy, 2 marginal, 0–1 poor.
+        let fill = match bars {
+            Some(b) if b >= 3 => T::PRIMARY, // healthy (phosphor green)
+            Some(2) => Color32::from_rgb(0xff, 0xba, 0x4d), // marginal amber
+            Some(_) => T::WARN,              // poor (red)
+            None => T::INK_DIM,
+        };
+        let lit = bars.unwrap_or(0);
+        let n = 4usize;
+        let gap = 2.0;
+        let bar_w = (rect.width() - gap * (n as f32 - 1.0)) / n as f32;
+        for i in 0..n {
+            // Ascending heights: shortest bar ~40% up to full height.
+            let frac = 0.4 + 0.6 * (i as f32 / (n as f32 - 1.0));
+            let h = rect.height() * frac;
+            let bx = rect.left() + i as f32 * (bar_w + gap);
+            let br = Rect::from_min_max(
+                Pos2::new(bx, rect.bottom() - h),
+                Pos2::new(bx + bar_w, rect.bottom()),
+            );
+            if (i as u8) < lit {
+                painter.rect_filled(br, CornerRadius::same(1), fill);
+            } else {
+                painter.rect_stroke(
+                    br,
+                    CornerRadius::same(1),
+                    Stroke::new(1.0, T::DIVIDER),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+
+        // Hover tooltip with the raw metrics.
+        let resp = ui.allocate_rect(rect, Sense::hover());
+        if resp.hovered() {
+            let text = match quality {
+                Some(q) if q.fresh => format!(
+                    "RTT {} ms · jitter {} ms · loss {:.2}%",
+                    q.rtt_ms,
+                    q.jitter_ms,
+                    q.loss_pct_centi as f32 / 100.0,
+                ),
+                _ => "measuring link…".to_string(),
+            };
+            resp.on_hover_text(text);
+        }
     }
 
     /// Generic topbar icon button: 28×28 with a faint border. Returns

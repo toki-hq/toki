@@ -10,7 +10,66 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlItMDCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAEiwKDG11dGVfY2hhbmdlZBgHIAEoCzIULnRva2kudjEuTXV0ZUNoYW5nZWRIABI7ChRjaGFubmVsX211dGVfY2hhbmdlZBgIIAEoCzIbLnRva2kudjEuQ2hhbm5lbE11dGVDaGFuZ2VkSAASNAoQcHJpb3JpdHlfY2hhbmdlZBgJIAEoCzIYLnRva2kudjEuUHJpb3JpdHlDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIi8KC011dGVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRINCgVtdXRlZBgCIAEoCCI2ChJDaGFubmVsTXV0ZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEg0KBW11dGVkGAIgASgIIkgKD1ByaW9yaXR5Q2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJEg8KB2dyYW50ZWQYAyABKAgiUgoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiCAoGUHR0QWNrMpoDCglTaWduYWxpbmcSPwoIUmVnaXN0ZXISGC50b2tpLnYxLlJlZ2lzdGVyUmVxdWVzdBoZLnRva2kudjEuUmVnaXN0ZXJSZXNwb25zZRIuCgRKb2luEhQudG9raS52MS5Kb2luUmVxdWVzdBoOLnRva2kudjEuRXZlbnQwARI2CgVMZWF2ZRIVLnRva2kudjEuTGVhdmVSZXF1ZXN0GhYudG9raS52MS5MZWF2ZVJlc3BvbnNlElQKD0NoYW5nZUZyZXF1ZW5jeRIfLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBogLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2USMgoKUHVzaFRvVGFsaxIRLnRva2kudjEuUHR0RXZlbnQaDy50b2tpLnYxLlB0dEFjaygBEloKEUlkZW50aXR5Q2hhbGxlbmdlEiEudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlcXVlc3QaIi50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVzcG9uc2ViBnByb3RvMw");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxImcKF0Nvbm5lY3Rpb25RdWFsaXR5UmVwb3J0EhEKCWNsaWVudF9pZBgBIAEoCRIOCgZydHRfbXMYAiABKA0SEQoJaml0dGVyX21zGAMgASgNEhYKDmxvc3NfcGN0X2NlbnRpGAQgASgNIhYKFENvbm5lY3Rpb25RdWFsaXR5QWNrIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIpUBChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0iMwoLSm9pblJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIhCgxMZWF2ZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJIg8KDUxlYXZlUmVzcG9uc2UiPgoWQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhkKF0NoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlItMDCgVFdmVudBInCgZqb2luZWQYASABKAsyFS50b2tpLnYxLk1lbWJlckpvaW5lZEgAEiMKBGxlZnQYAiABKAsyEy50b2tpLnYxLk1lbWJlckxlZnRIABIgCgNwdHQYAyABKAsyES50b2tpLnYxLlB0dEV2ZW50SAASNgoRZnJlcXVlbmN5X2NoYW5nZWQYBCABKAsyGS50b2tpLnYxLkZyZXF1ZW5jeUNoYW5nZWRIABI7ChRkaXNwbGF5X25hbWVfY2hhbmdlZBgFIAEoCzIbLnRva2kudjEuRGlzcGxheU5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9uYW1lX2NoYW5nZWQYBiABKAsyGy50b2tpLnYxLkNoYW5uZWxOYW1lQ2hhbmdlZEgAEiwKDG11dGVfY2hhbmdlZBgHIAEoCzIULnRva2kudjEuTXV0ZUNoYW5nZWRIABI7ChRjaGFubmVsX211dGVfY2hhbmdlZBgIIAEoCzIbLnRva2kudjEuQ2hhbm5lbE11dGVDaGFuZ2VkSAASNAoQcHJpb3JpdHlfY2hhbmdlZBgJIAEoCzIYLnRva2kudjEuUHJpb3JpdHlDaGFuZ2VkSABCBwoFZXZlbnQiNwoMTWVtYmVySm9pbmVkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiHwoKTWVtYmVyTGVmdBIRCgljbGllbnRfaWQYASABKAkiJQoQRnJlcXVlbmN5Q2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkiPQoSRGlzcGxheU5hbWVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiNQoSQ2hhbm5lbE5hbWVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIi8KC011dGVDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRINCgVtdXRlZBgCIAEoCCI2ChJDaGFubmVsTXV0ZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEg0KBW11dGVkGAIgASgIIkgKD1ByaW9yaXR5Q2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJEg8KB2dyYW50ZWQYAyABKAgiUgoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiCAoGUHR0QWNrMvYDCglTaWduYWxpbmcSPwoIUmVnaXN0ZXISGC50b2tpLnYxLlJlZ2lzdGVyUmVxdWVzdBoZLnRva2kudjEuUmVnaXN0ZXJSZXNwb25zZRIuCgRKb2luEhQudG9raS52MS5Kb2luUmVxdWVzdBoOLnRva2kudjEuRXZlbnQwARI2CgVMZWF2ZRIVLnRva2kudjEuTGVhdmVSZXF1ZXN0GhYudG9raS52MS5MZWF2ZVJlc3BvbnNlElQKD0NoYW5nZUZyZXF1ZW5jeRIfLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBogLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2USMgoKUHVzaFRvVGFsaxIRLnRva2kudjEuUHR0RXZlbnQaDy50b2tpLnYxLlB0dEFjaygBEloKEUlkZW50aXR5Q2hhbGxlbmdlEiEudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlcXVlc3QaIi50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVzcG9uc2USWgoXUmVwb3J0Q29ubmVjdGlvblF1YWxpdHkSIC50b2tpLnYxLkNvbm5lY3Rpb25RdWFsaXR5UmVwb3J0Gh0udG9raS52MS5Db25uZWN0aW9uUXVhbGl0eUFja2IGcHJvdG8z");
+
+/**
+ * One client-measured connection-quality sample. All three metrics are
+ * computed on the client over a short sliding window and reported as of
+ * "now"; absent/zero means "not yet measured" (e.g. RTT before the
+ * first pong, loss before enough packets have arrived to estimate it).
+ *
+ * @generated from message toki.v1.ConnectionQualityReport
+ */
+export type ConnectionQualityReport = Message<"toki.v1.ConnectionQualityReport"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * Smoothed round-trip time in milliseconds, from the keepalive/pong
+   * probe. 0 until the first pong lands.
+   *
+   * @generated from field: uint32 rtt_ms = 2;
+   */
+  rttMs: number;
+
+  /**
+   * Inter-arrival jitter in milliseconds (mean deviation of S2C packet
+   * spacing from the nominal 10 ms cadence).
+   *
+   * @generated from field: uint32 jitter_ms = 3;
+   */
+  jitterMs: number;
+
+  /**
+   * Inbound packet-loss percentage over the window, 0–100, ×100 for two
+   * decimals of resolution (e.g. 250 = 2.50%). Derived from S2C seq gaps.
+   *
+   * @generated from field: uint32 loss_pct_centi = 4;
+   */
+  lossPctCenti: number;
+};
+
+/**
+ * Describes the message toki.v1.ConnectionQualityReport.
+ * Use `create(ConnectionQualityReportSchema)` to create a new message.
+ */
+export const ConnectionQualityReportSchema: GenMessage<ConnectionQualityReport> = /*@__PURE__*/
+  messageDesc(file_toki, 0);
+
+/**
+ * @generated from message toki.v1.ConnectionQualityAck
+ */
+export type ConnectionQualityAck = Message<"toki.v1.ConnectionQualityAck"> & {
+};
+
+/**
+ * Describes the message toki.v1.ConnectionQualityAck.
+ * Use `create(ConnectionQualityAckSchema)` to create a new message.
+ */
+export const ConnectionQualityAckSchema: GenMessage<ConnectionQualityAck> = /*@__PURE__*/
+  messageDesc(file_toki, 1);
 
 /**
  * @generated from message toki.v1.IdentityChallengeRequest
@@ -23,7 +82,7 @@ export type IdentityChallengeRequest = Message<"toki.v1.IdentityChallengeRequest
  * Use `create(IdentityChallengeRequestSchema)` to create a new message.
  */
 export const IdentityChallengeRequestSchema: GenMessage<IdentityChallengeRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 0);
+  messageDesc(file_toki, 2);
 
 /**
  * @generated from message toki.v1.IdentityChallengeResponse
@@ -45,7 +104,7 @@ export type IdentityChallengeResponse = Message<"toki.v1.IdentityChallengeRespon
  * Use `create(IdentityChallengeResponseSchema)` to create a new message.
  */
 export const IdentityChallengeResponseSchema: GenMessage<IdentityChallengeResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 1);
+  messageDesc(file_toki, 3);
 
 /**
  * @generated from message toki.v1.RegisterRequest
@@ -132,7 +191,7 @@ export type RegisterRequest = Message<"toki.v1.RegisterRequest"> & {
  * Use `create(RegisterRequestSchema)` to create a new message.
  */
 export const RegisterRequestSchema: GenMessage<RegisterRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 2);
+  messageDesc(file_toki, 4);
 
 /**
  * @generated from message toki.v1.RegisterResponse
@@ -194,7 +253,7 @@ export type RegisterResponse = Message<"toki.v1.RegisterResponse"> & {
  * Use `create(RegisterResponseSchema)` to create a new message.
  */
 export const RegisterResponseSchema: GenMessage<RegisterResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 3);
+  messageDesc(file_toki, 5);
 
 /**
  * @generated from message toki.v1.JoinRequest
@@ -218,7 +277,7 @@ export type JoinRequest = Message<"toki.v1.JoinRequest"> & {
  * Use `create(JoinRequestSchema)` to create a new message.
  */
 export const JoinRequestSchema: GenMessage<JoinRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 4);
+  messageDesc(file_toki, 6);
 
 /**
  * @generated from message toki.v1.LeaveRequest
@@ -235,7 +294,7 @@ export type LeaveRequest = Message<"toki.v1.LeaveRequest"> & {
  * Use `create(LeaveRequestSchema)` to create a new message.
  */
 export const LeaveRequestSchema: GenMessage<LeaveRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 5);
+  messageDesc(file_toki, 7);
 
 /**
  * @generated from message toki.v1.LeaveResponse
@@ -248,7 +307,7 @@ export type LeaveResponse = Message<"toki.v1.LeaveResponse"> & {
  * Use `create(LeaveResponseSchema)` to create a new message.
  */
 export const LeaveResponseSchema: GenMessage<LeaveResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 6);
+  messageDesc(file_toki, 8);
 
 /**
  * Move the client from their current frequency room to a new one. The
@@ -275,7 +334,7 @@ export type ChangeFrequencyRequest = Message<"toki.v1.ChangeFrequencyRequest"> &
  * Use `create(ChangeFrequencyRequestSchema)` to create a new message.
  */
 export const ChangeFrequencyRequestSchema: GenMessage<ChangeFrequencyRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 7);
+  messageDesc(file_toki, 9);
 
 /**
  * @generated from message toki.v1.ChangeFrequencyResponse
@@ -288,7 +347,7 @@ export type ChangeFrequencyResponse = Message<"toki.v1.ChangeFrequencyResponse">
  * Use `create(ChangeFrequencyResponseSchema)` to create a new message.
  */
 export const ChangeFrequencyResponseSchema: GenMessage<ChangeFrequencyResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 8);
+  messageDesc(file_toki, 10);
 
 /**
  * @generated from message toki.v1.Event
@@ -401,7 +460,7 @@ export type Event = Message<"toki.v1.Event"> & {
  * Use `create(EventSchema)` to create a new message.
  */
 export const EventSchema: GenMessage<Event> = /*@__PURE__*/
-  messageDesc(file_toki, 9);
+  messageDesc(file_toki, 11);
 
 /**
  * @generated from message toki.v1.MemberJoined
@@ -423,7 +482,7 @@ export type MemberJoined = Message<"toki.v1.MemberJoined"> & {
  * Use `create(MemberJoinedSchema)` to create a new message.
  */
 export const MemberJoinedSchema: GenMessage<MemberJoined> = /*@__PURE__*/
-  messageDesc(file_toki, 10);
+  messageDesc(file_toki, 12);
 
 /**
  * @generated from message toki.v1.MemberLeft
@@ -440,7 +499,7 @@ export type MemberLeft = Message<"toki.v1.MemberLeft"> & {
  * Use `create(MemberLeftSchema)` to create a new message.
  */
 export const MemberLeftSchema: GenMessage<MemberLeft> = /*@__PURE__*/
-  messageDesc(file_toki, 11);
+  messageDesc(file_toki, 13);
 
 /**
  * @generated from message toki.v1.FrequencyChanged
@@ -457,7 +516,7 @@ export type FrequencyChanged = Message<"toki.v1.FrequencyChanged"> & {
  * Use `create(FrequencyChangedSchema)` to create a new message.
  */
 export const FrequencyChangedSchema: GenMessage<FrequencyChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 12);
+  messageDesc(file_toki, 14);
 
 /**
  * @generated from message toki.v1.DisplayNameChanged
@@ -479,7 +538,7 @@ export type DisplayNameChanged = Message<"toki.v1.DisplayNameChanged"> & {
  * Use `create(DisplayNameChangedSchema)` to create a new message.
  */
 export const DisplayNameChangedSchema: GenMessage<DisplayNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 13);
+  messageDesc(file_toki, 15);
 
 /**
  * The admin-assigned name of a frequency channel (≤16 chars). An empty
@@ -506,7 +565,7 @@ export type ChannelNameChanged = Message<"toki.v1.ChannelNameChanged"> & {
  * Use `create(ChannelNameChangedSchema)` to create a new message.
  */
 export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 14);
+  messageDesc(file_toki, 16);
 
 /**
  * A member's server-side mute state changed (see Admin.SetMute).
@@ -530,7 +589,7 @@ export type MuteChanged = Message<"toki.v1.MuteChanged"> & {
  * Use `create(MuteChangedSchema)` to create a new message.
  */
 export const MuteChangedSchema: GenMessage<MuteChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 15);
+  messageDesc(file_toki, 17);
 
 /**
  * A channel's mute state changed (see Admin.SetChannelMute), or the
@@ -555,7 +614,7 @@ export type ChannelMuteChanged = Message<"toki.v1.ChannelMuteChanged"> & {
  * Use `create(ChannelMuteChangedSchema)` to create a new message.
  */
 export const ChannelMuteChangedSchema: GenMessage<ChannelMuteChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 16);
+  messageDesc(file_toki, 18);
 
 /**
  * A member's priority-speaker standing changed (see Admin.SetPriority),
@@ -587,7 +646,7 @@ export type PriorityChanged = Message<"toki.v1.PriorityChanged"> & {
  * Use `create(PriorityChangedSchema)` to create a new message.
  */
 export const PriorityChangedSchema: GenMessage<PriorityChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 17);
+  messageDesc(file_toki, 19);
 
 /**
  * @generated from message toki.v1.PttEvent
@@ -628,7 +687,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 18);
+  messageDesc(file_toki, 20);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -641,7 +700,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 19);
+  messageDesc(file_toki, 21);
 
 /**
  * Signaling service for the Toki walkie-talkie network.
@@ -717,6 +776,25 @@ export const Signaling: GenService<{
     methodKind: "unary";
     input: typeof IdentityChallengeRequestSchema;
     output: typeof IdentityChallengeResponseSchema;
+  },
+  /**
+   * Periodic client→server report of the connection quality the client
+   * is *measuring locally* on the inbound audio path: round-trip time
+   * (from the UDP keepalive/pong probe), inter-arrival jitter, and
+   * packet-loss rate (from gaps in the server→client sequence numbers).
+   * The server can't compute these itself — only the receiver sees its
+   * own loss/jitter, and RTT is a client-stamped round trip — so the
+   * client pushes them up roughly every few seconds for the admin
+   * dashboard. Best-effort and advisory: dropping a report only delays
+   * the panel's next refresh. Sent on a fire-and-forget cadence; the
+   * unary response is empty.
+   *
+   * @generated from rpc toki.v1.Signaling.ReportConnectionQuality
+   */
+  reportConnectionQuality: {
+    methodKind: "unary";
+    input: typeof ConnectionQualityReportSchema;
+    output: typeof ConnectionQualityAckSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_toki, 0);

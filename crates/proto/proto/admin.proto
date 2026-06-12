@@ -151,6 +151,20 @@ message Member {
   // refuses this session's PTT presses — it stays connected and
   // hears the channel but cannot transmit. Session-scoped.
   bool muted = 9;
+
+  // ── Connection quality (client-reported) ────────────────────────
+  // Most-recent metrics the client reported via
+  // Signaling.ReportConnectionQuality. All zero until the first report
+  // lands (a just-connected member, or a pre-0.6.0 client that never
+  // reports). `quality_fresh` distinguishes "0 ms, freshly reported"
+  // from "never reported": false ⇒ show a dash, not green bars.
+  uint32 rtt_ms = 10;
+  uint32 jitter_ms = 11;
+  // Loss percentage ×100 (250 = 2.50%); see ConnectionQualityReport.
+  uint32 loss_pct_centi = 12;
+  // True once at least one quality report has been received for this
+  // session. Gates the panel between "—" and an actual reading.
+  bool quality_fresh = 13;
 }
 
 // ── Server metadata + config ──────────────────────────────────────

@@ -1504,6 +1504,7 @@ mod tests {
             priority_freq: None,
             expected_ip: None,
             muted: false,
+            quality: None,
         }
     }
 

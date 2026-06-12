@@ -10,8 +10,9 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::wire::{
-    build_nonce, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
-    MAX_OPUS_PAYLOAD, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM,
+    build_nonce, decode_ping, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C,
+    MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD, PING_LEN, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS,
+    VERSION_AUDIO_PCM, VERSION_KEEPALIVE, VERSION_PONG,
 };
 
 use crate::state::{hash_token, SharedRegistry};
@@ -259,7 +260,29 @@ pub async fn run(
 
             if !is_audio(version) {
                 // Keepalive: address + seq + heartbeat updated above;
-                // nothing to forward.
+                // nothing to forward to peers. But if it carries an RTT
+                // probe, bounce it straight back as a PONG so the client
+                // can measure round-trip time. We seal the echo with the
+                // sender's own session key + a fresh outbound seq (same
+                // S2C framing as audio), so it's authenticated and
+                // replay-protected exactly like a voice packet.
+                if version == VERSION_KEEPALIVE {
+                    if let Some((ping_id, send_ts)) = decode_ping(&plaintext) {
+                        let pong = {
+                            let Some(client) = registry.clients.get_mut(&sender_id) else {
+                                continue;
+                            };
+                            let out_seq = client.audio_outbound_seq;
+                            client.audio_outbound_seq = out_seq.saturating_add(1);
+                            seal_pong(&session_key, out_seq, ping_id, send_ts)
+                        };
+                        if let Some(pkt) = pong {
+                            if let Err(e) = socket.send_to(&pkt, peer).await {
+                                warn!(error = %e, ?peer, "failed to send pong");
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -368,6 +391,29 @@ pub async fn run(
             }
         }
     }
+}
+
+/// Seal a `VERSION_PONG` reply echoing a keepalive's RTT probe. Same
+/// S2C framing + AEAD as an audio packet (`VERSION_PONG` as both the
+/// header byte and the AAD, the session key, a fresh outbound seq as
+/// nonce), so the client verifies and replay-checks it on the existing
+/// inbound path. Returns `None` only if the AEAD encrypt fails (never,
+/// in practice).
+fn seal_pong(session_key: &[u8], out_seq: u64, ping_id: u64, send_ts: u64) -> Option<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(session_key));
+    let nonce_bytes = build_nonce(out_seq);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let mut buf_ct = toki_proto::wire::encode_ping(ping_id, send_ts).to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, &[VERSION_PONG], &mut buf_ct)
+        .ok()?;
+    debug_assert_eq!(buf_ct.len(), PING_LEN);
+    let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
+    pkt.push(VERSION_PONG);
+    pkt.extend_from_slice(&out_seq.to_le_bytes());
+    pkt.extend_from_slice(tag.as_slice());
+    pkt.extend_from_slice(&buf_ct);
+    Some(pkt)
 }
 
 /// Snapshot of what we need to send to each peer in the fan-out.

@@ -92,6 +92,25 @@ pub struct Client {
     /// disconnect — session-scoped, like `priority_freq`. The durable,
     /// identity-keyed tier is a deliberate later slice.
     pub muted: bool,
+    /// Most-recent connection-quality sample the client reported via
+    /// `Signaling.ReportConnectionQuality`. `None` until the first
+    /// report lands — the server can't measure these itself (only the
+    /// receiver sees its own loss/jitter, and RTT is a client-stamped
+    /// round trip), so it just stores what the client pushes up for the
+    /// admin dashboard.
+    pub quality: Option<ConnQuality>,
+}
+
+/// Client-reported connection-quality metrics, denormalized onto the
+/// session for the admin snapshot. All as-of the last report.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConnQuality {
+    /// Smoothed round-trip time, milliseconds (keepalive/pong probe).
+    pub rtt_ms: u32,
+    /// Inter-arrival jitter, milliseconds.
+    pub jitter_ms: u32,
+    /// Inbound packet loss, percent ×100 (250 = 2.50%).
+    pub loss_pct_centi: u32,
 }
 
 impl Client {

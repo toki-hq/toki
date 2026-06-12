@@ -308,6 +308,7 @@ function ChannelDetail({
               <span className="font-mono text-xs text-muted-foreground tabular">
                 {formatDuration(Number(m.connectedSecs))}
               </span>
+              <QualityReadout member={m} />
               <span className="ml-auto truncate font-mono text-xs text-muted-foreground/60">
                 {m.id.slice(0, 8)}
               </span>
@@ -442,6 +443,32 @@ function NameEditor({
 /// hovering reveals the full public key, the machine-hash prefix, and
 /// when this identity was first seen by the server. Members that
 /// registered without an identity (pre-identity clients) render nothing.
+/// Compact connection-quality readout: RTT / jitter / loss as the client
+/// last reported them, colour-coded by a worst-of-three health score.
+/// Shows a dash until the client's first report lands (a just-connected
+/// member, or a client too old to report). Mirrors the client strip's
+/// signal score so operator and user see the same verdict.
+function QualityReadout({ member }: { member: Member }) {
+  if (!member.qualityFresh) {
+    return <span className="font-mono text-xs text-muted-foreground/40 tabular">—</span>;
+  }
+  const rtt = member.rttMs;
+  const jit = member.jitterMs;
+  const lossPct = member.lossPctCenti / 100;
+  // Worst-of-three → colour, matching the client's bar thresholds.
+  const bad = rtt >= 250 || jit >= 50 || member.lossPctCenti >= 500;
+  const marginal = rtt >= 150 || jit >= 25 || member.lossPctCenti >= 200;
+  const tone = bad ? "text-destructive" : marginal ? "text-warning" : "text-primary/80";
+  return (
+    <span
+      className={cn("font-mono text-xs tabular", tone)}
+      title={`Round-trip ${rtt} ms · jitter ${jit} ms · packet loss ${lossPct.toFixed(2)}%`}
+    >
+      {rtt}ms · {lossPct.toFixed(1)}%
+    </span>
+  );
+}
+
 function IdentityBadge({ member }: { member: Member }) {
   if (!member.identity) return null;
   const firstSeen =

@@ -36,6 +36,12 @@ fn fill_member_identity(m: &mut pb::Member, c: &Client) {
         m.identity_first_seen_unix = identity.first_seen.max(0) as u64;
     }
     m.muted = c.muted;
+    if let Some(q) = &c.quality {
+        m.rtt_ms = q.rtt_ms;
+        m.jitter_ms = q.jitter_ms;
+        m.loss_pct_centi = q.loss_pct_centi;
+        m.quality_fresh = true;
+    }
 }
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
@@ -230,6 +236,7 @@ mod tests {
             priority_freq: None,
             expected_ip: None,
             muted: false,
+            quality: None,
         }
     }
 

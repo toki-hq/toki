@@ -28,13 +28,15 @@ use toki_proto::v1::{
     IdentityChallengeRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
 };
 use toki_proto::wire::{
-    build_nonce, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD,
-    OPUS_FRAME_SAMPLES, SEQ_LEN, TAG_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM, VERSION_KEEPALIVE,
+    build_nonce, decode_ping, encode_ping, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
+    MAX_OPUS_PAYLOAD, OPUS_FRAME_SAMPLES, PING_LEN, SEQ_LEN, TAG_LEN, VERSION_AUDIO_OPUS,
+    VERSION_AUDIO_PCM, VERSION_KEEPALIVE, VERSION_PONG,
 };
 
 use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
 use crate::dsp::{Dsp, DspParams};
 use crate::state::{ConnState, SharedState};
+use crate::telemetry::QualityTracker;
 
 pub enum Cmd {
     Connect {
@@ -265,6 +267,7 @@ async fn handle_cmd(
                 st.self_id = None;
                 st.frequency = None;
                 st.channel_name = None;
+                st.conn_quality = None;
                 st.log("disconnected");
             }
         }
@@ -639,8 +642,9 @@ impl Session {
         let udp = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
         udp.connect(audio_addr).await?;
         // Immediately punch a hole: server records our source addr so
-        // peers' audio can find us before we've ever transmitted.
-        send_keepalive(&udp, &audio_token, &audio_mac_key, &udp_seq).await?;
+        // peers' audio can find us before we've ever transmitted. ping_id
+        // 0 is the initial probe; the keepalive task counts up from 1.
+        send_keepalive(&udp, &audio_token, &audio_mac_key, &udp_seq, 0).await?;
         info!(?audio_addr, "udp audio connected");
 
         // ── Event stream (server → us) ────────────────────────────────
@@ -982,6 +986,7 @@ impl Session {
             st.holder = None;
             st.frequency = None;
             st.channel_name = None;
+            st.conn_quality = None;
             st.log("⚠ disconnected by server");
         });
 
@@ -996,6 +1001,11 @@ impl Session {
         });
 
         // ── UDP recv → playback ───────────────────────────────────────
+        // Connection-quality tracker lives on the recv task — it's the
+        // single writer for loss/jitter (from inbound audio seqs/timing)
+        // and RTT (from pongs, which arrive on this same socket). The
+        // UI + the periodic report task read the published handle.
+        let (mut quality, quality_handle) = QualityTracker::new();
         let udp_for_recv = udp.clone();
         let key_for_recv = audio_mac_key;
         let recv_task = tokio::spawn(async move {
@@ -1052,6 +1062,20 @@ impl Session {
                             continue;
                         }
                         server_last_seq = seq;
+
+                        // PONG: the server bounced our RTT probe back.
+                        // Compute round-trip from the echoed send time and
+                        // feed the tracker. Not audio — never reaches the
+                        // decoder or playback.
+                        if version == VERSION_PONG {
+                            if let Some((_ping_id, send_ts)) = decode_ping(&plaintext) {
+                                let rtt_ms =
+                                    now_unix_micros().saturating_sub(send_ts) as f64 / 1000.0;
+                                quality.on_rtt(rtt_ms);
+                            }
+                            continue;
+                        }
+
                         // Decode per the codec the sender used.
                         let samples = match version {
                             VERSION_AUDIO_PCM => pcm_from_bytes(&plaintext),
@@ -1061,6 +1085,10 @@ impl Session {
                                 continue;
                             }
                         };
+                        // Feed the quality tracker: this seq advanced the
+                        // S2C counter (loss = gaps) and arrived now
+                        // (jitter = spacing deviation).
+                        quality.on_audio(seq, Instant::now());
                         // Latency-managed: keeps the voice backlog tight
                         // so playback can't fall progressively behind.
                         push_voice(&playback, &samples);
@@ -1073,6 +1101,38 @@ impl Session {
             }
         });
 
+        // ── Connection-quality report ─────────────────────────────────
+        // Push the locally-measured metrics up to the server every few
+        // seconds so the admin dashboard can show this client's link
+        // health. Fire-and-forget: a failed report just waits for the
+        // next tick. Skips reporting until at least one metric exists.
+        let mut signaling_for_report = signaling.clone();
+        let report_client_id = client_id.clone();
+        let quality_for_report = quality_handle.clone();
+        let report_task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(3));
+            tick.tick().await; // skip the immediate tick
+            loop {
+                tick.tick().await;
+                let q = quality_for_report.snapshot();
+                if !q.fresh {
+                    continue;
+                }
+                let req = toki_proto::v1::ConnectionQualityReport {
+                    client_id: report_client_id.clone(),
+                    rtt_ms: q.rtt_ms,
+                    jitter_ms: q.jitter_ms,
+                    loss_pct_centi: q.loss_pct_centi,
+                };
+                if let Err(e) = signaling_for_report.report_connection_quality(req).await {
+                    debug!(error = %e, "connection-quality report failed");
+                }
+            }
+        });
+
+        // Publish the quality handle to the UI via shared state.
+        state.lock().unwrap().conn_quality = Some(quality_handle);
+
         // ── Keepalives ────────────────────────────────────────────────
         let udp_for_keepalive = udp.clone();
         let token_for_keepalive = audio_token.clone();
@@ -1081,13 +1141,16 @@ impl Session {
         let keepalive_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(3));
             tick.tick().await; // consume the immediate first tick
+            let mut ping_id: u64 = 0;
             loop {
                 tick.tick().await;
+                ping_id = ping_id.wrapping_add(1);
                 if let Err(e) = send_keepalive(
                     &udp_for_keepalive,
                     &token_for_keepalive,
                     &key_for_keepalive,
                     &seq_for_keepalive,
+                    ping_id,
                 )
                 .await
                 {
@@ -1114,7 +1177,13 @@ impl Session {
             encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
             alive,
             self_muted,
-            tasks: vec![events_task, ptt_task, recv_task, keepalive_task],
+            tasks: vec![
+                events_task,
+                ptt_task,
+                recv_task,
+                keepalive_task,
+                report_task,
+            ],
         })
     }
 
@@ -1285,10 +1354,27 @@ async fn send_keepalive(
     token: &[u8],
     mac_key: &[u8; toki_proto::wire::MAC_KEY_LEN],
     udp_seq: &Arc<AtomicU64>,
+    ping_id: u64,
 ) -> Result<()> {
-    let pkt = build_authenticated_packet(token, VERSION_KEEPALIVE, mac_key, udp_seq, &[]);
+    // Carry an RTT probe (ping id + send timestamp) the server echoes in
+    // a PONG so the recv task can measure round-trip time.
+    let probe = encode_ping(ping_id, now_unix_micros());
+    let pkt = build_authenticated_packet(token, VERSION_KEEPALIVE, mac_key, udp_seq, &probe);
+    debug_assert_eq!(probe.len(), PING_LEN);
     udp.send(&pkt).await?;
     Ok(())
+}
+
+/// Wall-clock microseconds since the Unix epoch, for the RTT probe
+/// timestamp. The server echoes this verbatim and the recv task diffs it
+/// against `now` — so only this client's clock matters (no cross-host
+/// sync needed); a backwards clock step just yields one discarded
+/// sample. Saturates to 0 before 1970 (never happens).
+fn now_unix_micros() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_micros() as u64)
+        .unwrap_or(0)
 }
 
 /// Assemble an outbound UDP packet with the AEAD-encrypted header

@@ -417,6 +417,13 @@ The client sends its version on `Register`. The server requires a matching
 mismatch with `FAILED_PRECONDITION` and a "please update" message, rather than
 letting an incompatible build half-connect into silent dead air.
 
+> **0.6.0 is a coordinated upgrade.** The connection-quality telemetry adds an
+> RTT probe to the keepalive and a new `PONG` packet kind, changing the UDP
+> wire format — so a 0.6.0 server rejects 0.5.x clients (and vice versa) at the
+> version gate. Upgrade the server and clients together. (Pre-0.6.0 clients
+> would never have reported quality anyway; the admin column shows a dash for
+> any session that doesn't report.)
+
 ### Half-duplex behavior
 
 - One talker at a time per frequency. Pressing PTT while someone else is
@@ -437,8 +444,15 @@ same-origin.
 Sections:
 
 - **Overview** — live dashboard (gRPC-Web `Watch` stream): members per
-  frequency, current PTT holder, session age; updates on a 1 Hz tick and
-  immediately after any admin action.
+  frequency, current PTT holder, session age, and a per-member
+  **connection-quality** readout (`RTT · loss`, jitter on hover); updates on
+  a 1 Hz tick and immediately after any admin action.
+- **Connection quality** — each client measures its own inbound link and
+  reports it up: round-trip time (a timestamped probe ridden on the UDP
+  keepalive that the server echoes back as a `PONG`), inter-arrival jitter,
+  and packet loss (gaps in the server→client sequence). The client shows it
+  as 4 signal bars on its radio strip; the admin Rooms column mirrors the
+  same verdict. A dash means "not yet measured" (a just-connected member).
 - **Metrics & KPIs** — time-series charts of voice-relay bandwidth
   (ingress/egress) and users over time (1h / 24h / 7d), plus uptime / peers /
   transmitting / busiest-channel KPIs and a host-health card (CPU, memory, disk).
@@ -509,7 +523,8 @@ client stays attributable.
 | `Signaling.Leave` | gRPC | Explicit disconnect. |
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
 | `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
-| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive; `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame. Server→peer packets prepend the codec version. |
+| `Signaling.ReportConnectionQuality` | gRPC | Client pushes its locally-measured RTT / jitter / loss every few seconds; the server denormalizes the latest onto the session for the admin Rooms quality column. Advisory — a dropped report just delays the next refresh. |
+| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe since 0.6.0); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame; `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
 | `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |

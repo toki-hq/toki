@@ -19,6 +19,7 @@ mod hotkey;
 mod identity;
 mod runtime;
 mod state;
+mod telemetry;
 mod theme;
 mod update;
 

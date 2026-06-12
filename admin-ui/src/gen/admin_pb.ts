@@ -202,7 +202,7 @@ export type Member = Message<"toki.admin.v1.Member"> & {
    * ── Connection quality (client-reported) ────────────────────────
    * Most-recent metrics the client reported via
    * Signaling.ReportConnectionQuality. All zero until the first report
-   * lands (a just-connected member, or a pre-0.6.0 client that never
+   * lands (a just-connected member, or a pre-0.5.0 client that never
    * reports). `quality_fresh` distinguishes "0 ms, freshly reported"
    * from "never reported": false ⇒ show a dash, not green bars.
    *

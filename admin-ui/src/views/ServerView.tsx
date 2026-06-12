@@ -95,6 +95,7 @@ function RuntimeConfig() {
   const [idleKick, setIdleKick] = useState("");
   const [namedChannels, setNamedChannels] = useState(false);
   const [requireIdentity, setRequireIdentity] = useState(false);
+  const [uniqueCallsigns, setUniqueCallsigns] = useState(true);
   const [audioQuality, setAudioQuality] = useState(2);
   const [busy, setBusy] = useState(false);
 
@@ -108,6 +109,7 @@ function RuntimeConfig() {
         setIdleKick(String(c.idleKickSecs));
         setNamedChannels(c.namedChannelsEnabled);
         setRequireIdentity(c.requireIdentity);
+        setUniqueCallsigns(c.uniqueCallsigns);
         setAudioQuality(c.audioQuality);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
@@ -120,6 +122,7 @@ function RuntimeConfig() {
       idleKick !== String(cfg.idleKickSecs) ||
       namedChannels !== cfg.namedChannelsEnabled ||
       requireIdentity !== cfg.requireIdentity ||
+      uniqueCallsigns !== cfg.uniqueCallsigns ||
       audioQuality !== cfg.audioQuality);
 
   async function save() {
@@ -131,6 +134,7 @@ function RuntimeConfig() {
         idleKickSecs: Number(idleKick),
         namedChannelsEnabled: namedChannels,
         requireIdentity,
+        uniqueCallsigns,
         audioQuality,
       });
       setCfg(updated);
@@ -196,6 +200,19 @@ function RuntimeConfig() {
             checked={requireIdentity}
             onCheckedChange={setRequireIdentity}
             aria-label="Toggle require identity"
+          />
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Unique callsigns</span>
+            <span className="text-xs text-muted-foreground">
+              Refuse a register or rename onto a callsign already in use (case-insensitive).
+            </span>
+          </div>
+          <Switch
+            checked={uniqueCallsigns}
+            onCheckedChange={setUniqueCallsigns}
+            aria-label="Toggle unique callsigns"
           />
         </div>
         <div className="flex flex-col gap-1.5 border-t border-border pt-3">

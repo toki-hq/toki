@@ -515,7 +515,27 @@ impl Signaling for SignalingSvc {
             quality: None,
         };
 
+        // Unique-callsign gate (on by default). Read the toggle before
+        // the lock, then do the taken-check *inside* the same registry
+        // lock that inserts, so two simultaneous registers of the same
+        // name can't both slip through (no TOCTOU window). Case-
+        // insensitive — `ECHO-1` and `echo-1` collide. A name frees up
+        // the instant its holder disconnects (we only scan live clients).
+        let unique_callsigns = self.server_config.read().await.unique_callsigns;
+
         let mut registry = self.registry.lock().await;
+        let own_pubkey = identity.as_ref().map(|i| i.pubkey_hex.as_str());
+        if unique_callsigns && registry.callsign_taken(&display_name, None, own_pubkey) {
+            drop(registry);
+            tracing::warn!(
+                ?peer_ip,
+                name = %display_name,
+                "register rejected: callsign already in use"
+            );
+            return Err(Status::already_exists(format!(
+                "callsign \"{display_name}\" is already in use on this server"
+            )));
+        }
         registry.tokens.insert(token_hash, id.clone());
         registry.clients.insert(id.clone(), client);
         let total = registry.clients.len();

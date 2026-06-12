@@ -177,6 +177,46 @@ pub struct Registry {
     pub tokens: HashMap<[u8; TOKEN_HASH_LEN], String>,
 }
 
+impl Registry {
+    /// Is `callsign` already used by a connected client other than
+    /// `except` (a `client_id` to skip — e.g. the subject of a rename,
+    /// who legitimately keeps their own name)?
+    ///
+    /// `own_identity` exempts a holder that is *the same identity* as the
+    /// caller: a keypair-backed client reconnecting (a fresh session id,
+    /// same identity) before its old session is reaped should keep its
+    /// own callsign rather than be locked out by its own ghost. `None`
+    /// (identity-less register/rename) never matches this exemption.
+    ///
+    /// Case-insensitive, since callsigns are uppercased client-side and
+    /// `ECHO-1` / `echo-1` should collide. Drives the unique-callsign
+    /// gate on register and admin rename. Linear scan over the live
+    /// clients — fine at the hundreds-of-peers scale Toki targets, and
+    /// only runs on the two cold paths (register, rename), never per
+    /// audio packet.
+    pub fn callsign_taken(
+        &self,
+        callsign: &str,
+        except: Option<&str>,
+        own_identity: Option<&str>,
+    ) -> bool {
+        let want = callsign.to_lowercase();
+        self.clients.iter().any(|(id, c)| {
+            if Some(id.as_str()) == except {
+                return false;
+            }
+            if c.display_name.to_lowercase() != want {
+                return false;
+            }
+            // Same-identity reconnect keeps its name (not a collision).
+            !matches!(
+                (own_identity, c.identity.as_ref()),
+                (Some(mine), Some(theirs)) if theirs.pubkey_hex == mine
+            )
+        })
+    }
+}
+
 /// BLAKE3 the raw token and truncate to `TOKEN_HASH_LEN` bytes for
 /// use as the `tokens` HashMap key.
 pub fn hash_token(token: &[u8]) -> [u8; TOKEN_HASH_LEN] {

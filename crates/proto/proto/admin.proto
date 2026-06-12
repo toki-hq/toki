@@ -155,7 +155,7 @@ message Member {
   // ── Connection quality (client-reported) ────────────────────────
   // Most-recent metrics the client reported via
   // Signaling.ReportConnectionQuality. All zero until the first report
-  // lands (a just-connected member, or a pre-0.6.0 client that never
+  // lands (a just-connected member, or a pre-0.5.0 client that never
   // reports). `quality_fresh` distinguishes "0 ms, freshly reported"
   // from "never reported": false ⇒ show a dash, not green bars.
   uint32 rtt_ms = 10;
@@ -194,6 +194,11 @@ message ServerConfig {
   // airtight (an evader can no longer connect anonymously). Off by
   // default so open/legacy deployments keep working unchanged.
   bool require_identity = 8;
+  // When on (the default), callsigns must be unique across connected
+  // members: a register or rename onto a name already in use is
+  // refused. Case-insensitive. Off restores the legacy behaviour where
+  // duplicate callsigns are allowed.
+  bool unique_callsigns = 9;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -210,6 +215,8 @@ message UpdateServerConfigRequest {
   uint32 audio_quality = 5;         // 0=Raw, 1=Low, 2=Standard, 3=High
   // Reject identity-less registers (see ServerConfig.require_identity).
   bool require_identity = 6;
+  // Enforce unique callsigns (see ServerConfig.unique_callsigns).
+  bool unique_callsigns = 7;
 }
 
 message SetServerPasswordRequest {

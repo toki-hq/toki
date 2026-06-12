@@ -215,6 +215,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         named_channels_enabled: cfg.named_channels_enabled,
         audio_quality: cfg.audio_quality,
         require_identity: cfg.require_identity,
+        unique_callsigns: cfg.unique_callsigns,
     }
 }
 
@@ -298,6 +299,7 @@ impl Admin for AdminApi {
                 named_channels_enabled: body.named_channels_enabled,
                 audio_quality: body.audio_quality,
                 require_identity: body.require_identity,
+                unique_callsigns: body.unique_callsigns,
             }
         };
         self.state
@@ -793,11 +795,30 @@ impl Admin for AdminApi {
         let new_name = validation::display_name(&req.get_ref().display_name)
             .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
 
+        // Refuse a rename onto a callsign another live session already
+        // holds, when the server enforces unique callsigns. `except` is
+        // the subject itself, so renaming to one's own current name (or a
+        // case variant of it) is always allowed. Checked inside the same
+        // lock as the swap so it's atomic against concurrent renames.
+        let unique_callsigns = self.state.server_config.read().await.unique_callsigns;
+
         let (old_name, self_tx, peer_recipients) = {
             let mut registry = self.state.registry.lock().await;
-            let Some(client) = registry.clients.get_mut(&id) else {
+            if !registry.clients.contains_key(&id) {
                 return Err(Status::not_found("client not found"));
-            };
+            }
+            // No identity exemption on admin rename: renaming a member
+            // onto a name another live session holds is always a real
+            // collision (there's no "reconnect" notion here).
+            if unique_callsigns && registry.callsign_taken(&new_name, Some(&id), None) {
+                return Err(Status::already_exists(format!(
+                    "callsign \"{new_name}\" is already in use on this server"
+                )));
+            }
+            let client = registry
+                .clients
+                .get_mut(&id)
+                .expect("client present (checked above)");
             let old_name = std::mem::replace(&mut client.display_name, new_name.clone());
             let frequency = client.current_frequency.clone();
             let self_tx = client.events_tx.clone();
@@ -1521,6 +1542,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rename_rejects_collision_with_another_callsign() {
+        let (api, token) = test_api(false).await; // unique_callsigns on by default
+        seed(&api.state.registry, "alice", Some("447.00")).await;
+        seed(&api.state.registry, "bob", Some("447.00")).await;
+
+        // Renaming bob → alice (case-insensitive) collides with the live
+        // "alice" session.
+        let err = api
+            .rename_client(authed(
+                pb::RenameClientRequest {
+                    id: "bob".into(),
+                    display_name: "ALICE".into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::AlreadyExists);
+        // bob's name is unchanged after the rejected rename.
+        assert_eq!(
+            api.state.registry.lock().await.clients["bob"].display_name,
+            "bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_to_a_free_name_and_to_own_name_succeed() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "alice", Some("447.00")).await;
+
+        // A free name renames fine.
+        api.rename_client(authed(
+            pb::RenameClientRequest {
+                id: "alice".into(),
+                display_name: "ECHO-9".into(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            api.state.registry.lock().await.clients["alice"].display_name,
+            "ECHO-9"
+        );
+
+        // Renaming to one's own current name (the `except` carve-out) is
+        // allowed, not a self-collision.
+        api.rename_client(authed(
+            pb::RenameClientRequest {
+                id: "alice".into(),
+                display_name: "ECHO-9".into(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn unauthenticated_without_token() {
         let (api, _t) = test_api(false).await;
         // No RawSessionToken in extensions → Unauthenticated.
@@ -1743,6 +1823,7 @@ mod tests {
                     named_channels_enabled: false,
                     audio_quality: 2,
                     require_identity: false,
+                    unique_callsigns: true,
                 },
                 &token,
             ))

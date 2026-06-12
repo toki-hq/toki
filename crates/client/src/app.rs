@@ -1791,10 +1791,8 @@ impl TokiApp {
             let frac = 0.4 + 0.6 * (i as f32 / (n as f32 - 1.0));
             let h = max_h * frac;
             let bx = rect.left() + i as f32 * (bar_w + gap);
-            let br = Rect::from_min_max(
-                Pos2::new(bx, baseline - h),
-                Pos2::new(bx + bar_w, baseline),
-            );
+            let br =
+                Rect::from_min_max(Pos2::new(bx, baseline - h), Pos2::new(bx + bar_w, baseline));
             if (i as u8) < lit {
                 painter.rect_filled(br, CornerRadius::same(1), fill);
             } else {

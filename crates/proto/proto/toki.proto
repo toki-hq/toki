@@ -31,7 +31,38 @@ service Signaling {
   // rejection from Register, fetch a fresh one and retry.
   // Identity-less clients never call this.
   rpc IdentityChallenge(IdentityChallengeRequest) returns (IdentityChallengeResponse);
+
+  // Periodic client→server report of the connection quality the client
+  // is *measuring locally* on the inbound audio path: round-trip time
+  // (from the UDP keepalive/pong probe), inter-arrival jitter, and
+  // packet-loss rate (from gaps in the server→client sequence numbers).
+  // The server can't compute these itself — only the receiver sees its
+  // own loss/jitter, and RTT is a client-stamped round trip — so the
+  // client pushes them up roughly every few seconds for the admin
+  // dashboard. Best-effort and advisory: dropping a report only delays
+  // the panel's next refresh. Sent on a fire-and-forget cadence; the
+  // unary response is empty.
+  rpc ReportConnectionQuality(ConnectionQualityReport) returns (ConnectionQualityAck);
 }
+
+// One client-measured connection-quality sample. All three metrics are
+// computed on the client over a short sliding window and reported as of
+// "now"; absent/zero means "not yet measured" (e.g. RTT before the
+// first pong, loss before enough packets have arrived to estimate it).
+message ConnectionQualityReport {
+  string client_id = 1;
+  // Smoothed round-trip time in milliseconds, from the keepalive/pong
+  // probe. 0 until the first pong lands.
+  uint32 rtt_ms = 2;
+  // Inter-arrival jitter in milliseconds (mean deviation of S2C packet
+  // spacing from the nominal 10 ms cadence).
+  uint32 jitter_ms = 3;
+  // Inbound packet-loss percentage over the window, 0–100, ×100 for two
+  // decimals of resolution (e.g. 250 = 2.50%). Derived from S2C seq gaps.
+  uint32 loss_pct_centi = 4;
+}
+
+message ConnectionQualityAck {}
 
 message IdentityChallengeRequest {}
 

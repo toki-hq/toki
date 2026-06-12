@@ -10,8 +10,9 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::wire::{
-    build_nonce, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
-    MAX_OPUS_PAYLOAD, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM,
+    build_nonce, decode_ping, is_audio, FRAME_BYTES, HEADER_LEN_C2S, HEADER_LEN_S2C,
+    MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD, PING_LEN, SEQ_LEN, TAG_LEN, TOKEN_LEN, VERSION_AUDIO_OPUS,
+    VERSION_AUDIO_PCM, VERSION_KEEPALIVE, VERSION_PONG,
 };
 
 use crate::state::{hash_token, SharedRegistry};
@@ -53,6 +54,31 @@ fn should_relay(
         return true;
     }
     holder.is_none() && matches!(last_released, Some((id, since)) if id == sender && since < grace)
+}
+
+/// Is a decrypted packet's payload the right length for its `version`?
+/// ChaCha20 is a stream cipher, so ciphertext length equals plaintext
+/// length — this validates the *shape* before we act on the packet.
+///
+///   * PCM — exactly one [`FRAME_BYTES`] frame.
+///   * Opus — non-empty, up to [`MAX_OPUS_PAYLOAD`].
+///   * Keepalive — empty (legacy) **or** exactly a [`PING_LEN`] RTT probe
+///     (since 0.6.0). The probe case is the one that regressed: a guard
+///     that demanded keepalives be empty silently dropped every probe-
+///     carrying keepalive, so `last_seen` never refreshed (reaper evicted
+///     the client) and no pong was ever sent (client RTT never measured).
+///   * Anything else (unknown version with a payload) — rejected.
+fn payload_shape_ok(version: u8, payload_len: usize) -> bool {
+    match version {
+        VERSION_AUDIO_PCM => payload_len == FRAME_BYTES,
+        VERSION_AUDIO_OPUS => payload_len != 0 && payload_len <= MAX_OPUS_PAYLOAD,
+        VERSION_KEEPALIVE => payload_len == 0 || payload_len == PING_LEN,
+        // PONG is server→client only; a client should never send one, and
+        // any other version is unknown. Reject a payload either way (an
+        // empty unknown-version packet is harmless and still dropped later
+        // by the codec routing).
+        _ => payload_len == 0,
+    }
 }
 
 /// Token bucket window. Counters reset every `RATE_WINDOW`. Smaller
@@ -120,26 +146,10 @@ pub async fn run(
             .expect("slice has TAG_LEN bytes");
         let ciphertext_in = &buf[HEADER_LEN_C2S..len];
 
-        // Per-codec shape checks. ChaCha20 is a stream cipher, so the
-        // ciphertext length equals the plaintext length. PCM frames are
-        // *exactly* FRAME_BYTES; Opus frames are variable but bounded;
-        // keepalives carry no payload. Anything else is malformed/hostile.
-        if version == VERSION_AUDIO_PCM && ciphertext_in.len() != FRAME_BYTES {
-            debug!(
-                len,
-                expected = HEADER_LEN_C2S + FRAME_BYTES,
-                "PCM frame wrong size, dropping"
-            );
-            continue;
-        }
-        if version == VERSION_AUDIO_OPUS
-            && (ciphertext_in.is_empty() || ciphertext_in.len() > MAX_OPUS_PAYLOAD)
-        {
-            debug!(len, "Opus frame out of bounds, dropping");
-            continue;
-        }
-        if !is_audio(version) && !ciphertext_in.is_empty() {
-            debug!(len, version, "non-audio packet with payload, dropping");
+        // Per-codec payload-shape check (see `payload_shape_ok`). ChaCha20
+        // is a stream cipher, so ciphertext length equals plaintext length.
+        if !payload_shape_ok(version, ciphertext_in.len()) {
+            debug!(len, version, "packet payload wrong shape, dropping");
             continue;
         }
 
@@ -259,7 +269,29 @@ pub async fn run(
 
             if !is_audio(version) {
                 // Keepalive: address + seq + heartbeat updated above;
-                // nothing to forward.
+                // nothing to forward to peers. But if it carries an RTT
+                // probe, bounce it straight back as a PONG so the client
+                // can measure round-trip time. We seal the echo with the
+                // sender's own session key + a fresh outbound seq (same
+                // S2C framing as audio), so it's authenticated and
+                // replay-protected exactly like a voice packet.
+                if version == VERSION_KEEPALIVE {
+                    if let Some((ping_id, send_ts)) = decode_ping(&plaintext) {
+                        let pong = {
+                            let Some(client) = registry.clients.get_mut(&sender_id) else {
+                                continue;
+                            };
+                            let out_seq = client.audio_outbound_seq;
+                            client.audio_outbound_seq = out_seq.saturating_add(1);
+                            seal_pong(&session_key, out_seq, ping_id, send_ts)
+                        };
+                        if let Some(pkt) = pong {
+                            if let Err(e) = socket.send_to(&pkt, peer).await {
+                                warn!(error = %e, ?peer, "failed to send pong");
+                            }
+                        }
+                    }
+                }
                 continue;
             }
 
@@ -370,6 +402,29 @@ pub async fn run(
     }
 }
 
+/// Seal a `VERSION_PONG` reply echoing a keepalive's RTT probe. Same
+/// S2C framing + AEAD as an audio packet (`VERSION_PONG` as both the
+/// header byte and the AAD, the session key, a fresh outbound seq as
+/// nonce), so the client verifies and replay-checks it on the existing
+/// inbound path. Returns `None` only if the AEAD encrypt fails (never,
+/// in practice).
+fn seal_pong(session_key: &[u8], out_seq: u64, ping_id: u64, send_ts: u64) -> Option<Vec<u8>> {
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(session_key));
+    let nonce_bytes = build_nonce(out_seq);
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let mut buf_ct = toki_proto::wire::encode_ping(ping_id, send_ts).to_vec();
+    let tag = cipher
+        .encrypt_in_place_detached(nonce, &[VERSION_PONG], &mut buf_ct)
+        .ok()?;
+    debug_assert_eq!(buf_ct.len(), PING_LEN);
+    let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
+    pkt.push(VERSION_PONG);
+    pkt.extend_from_slice(&out_seq.to_le_bytes());
+    pkt.extend_from_slice(tag.as_slice());
+    pkt.extend_from_slice(&buf_ct);
+    Some(pkt)
+}
+
 /// Snapshot of what we need to send to each peer in the fan-out.
 /// Collected under the registry lock; the actual `send_to` happens
 /// outside so a slow recipient can't block the relay.
@@ -388,6 +443,39 @@ mod tests {
     #[test]
     fn relays_for_the_current_holder() {
         assert!(should_relay(Some("a"), None, "a", G));
+    }
+
+    // ── payload shape (regression: keepalive RTT probe must pass) ──
+
+    #[test]
+    fn keepalive_accepts_empty_and_probe_payloads() {
+        // The bug: a probe-carrying keepalive was dropped, so last_seen
+        // never refreshed (reaper evicted the client ~30 s in) and no
+        // pong was sent (RTT bars stayed gray). Both lengths must pass.
+        assert!(payload_shape_ok(VERSION_KEEPALIVE, 0));
+        assert!(payload_shape_ok(VERSION_KEEPALIVE, PING_LEN));
+        // A wrong-sized keepalive payload is still rejected.
+        assert!(!payload_shape_ok(VERSION_KEEPALIVE, PING_LEN - 1));
+        assert!(!payload_shape_ok(VERSION_KEEPALIVE, FRAME_BYTES));
+    }
+
+    #[test]
+    fn audio_payload_shapes() {
+        assert!(payload_shape_ok(VERSION_AUDIO_PCM, FRAME_BYTES));
+        assert!(!payload_shape_ok(VERSION_AUDIO_PCM, FRAME_BYTES - 2));
+        assert!(payload_shape_ok(VERSION_AUDIO_OPUS, 1));
+        assert!(payload_shape_ok(VERSION_AUDIO_OPUS, MAX_OPUS_PAYLOAD));
+        assert!(!payload_shape_ok(VERSION_AUDIO_OPUS, 0));
+        assert!(!payload_shape_ok(VERSION_AUDIO_OPUS, MAX_OPUS_PAYLOAD + 1));
+    }
+
+    #[test]
+    fn unknown_version_with_payload_is_rejected() {
+        // A client-sent PONG (or any unknown version) carrying a payload
+        // is malformed/hostile and dropped; an empty one is harmless.
+        assert!(!payload_shape_ok(VERSION_PONG, PING_LEN));
+        assert!(!payload_shape_ok(99, 1));
+        assert!(payload_shape_ok(99, 0));
     }
 
     #[test]

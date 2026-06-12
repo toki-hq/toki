@@ -47,6 +47,11 @@ pub struct ClientState {
     /// even on a muted channel — so this *overrides* `channel_muted` in
     /// `locally_silenced` (but never an individual member-mute).
     pub channel_priority: bool,
+    /// Live connection-quality readout for the current session, published
+    /// by the runtime's measurement task. `None` while disconnected; the
+    /// UI strip reads it each frame for the signal-bars glyph. Not part of
+    /// `#[derive(Default)]`'s concern — it's an `Option`, so default-None.
+    pub conn_quality: Option<crate::telemetry::QualityHandle>,
     pub log: VecDeque<String>,
 }
 

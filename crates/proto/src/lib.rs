@@ -70,12 +70,37 @@ pub mod wire {
     #[deprecated(note = "use HEADER_LEN_C2S or HEADER_LEN_S2C explicitly")]
     pub const HEADER_LEN: usize = HEADER_LEN_C2S;
 
-    /// Empty payload packet used to register the client's UDP source
-    /// address with the server (and keep NAT mappings alive). Not
-    /// forwarded to peers. Still carries a sequence + tag so an off-
-    /// path attacker can't replay one to keep a session alive on the
-    /// legitimate client's behalf.
+    /// Keepalive packet: registers the client's UDP source address with
+    /// the server and keeps NAT mappings alive. Not forwarded to peers.
+    /// Still carries a sequence + tag so an off-path attacker can't
+    /// replay one to keep a session alive on the legitimate client's
+    /// behalf.
+    ///
+    /// Since 0.6.0 the keepalive *payload* carries a [`PING_LEN`]-byte
+    /// RTT probe (`ping_id` ‖ `send_unix_micros`, both le u64); the
+    /// server bounces it straight back in a [`VERSION_PONG`] packet so
+    /// the client can measure round-trip time. Older keepalives had an
+    /// empty payload — the server tolerates either (an empty or short
+    /// keepalive simply gets no pong), but the version gate already
+    /// rejects pre-0.6.0 clients, so in practice the probe is always
+    /// present.
     pub const VERSION_KEEPALIVE: u8 = 0;
+
+    /// Server→client RTT echo. Sent only in response to a keepalive that
+    /// carried a [`PING_LEN`]-byte probe: the server copies the probe
+    /// verbatim into the pong payload and the client diffs the embedded
+    /// timestamp against the arrival time. Carries no audio and is never
+    /// part of the peer fan-out. A distinct kind (not an audio version)
+    /// so the client's audio decode path skips it and old clients —
+    /// which never see one, being gated out — would simply drop an
+    /// unknown version.
+    pub const VERSION_PONG: u8 = 3;
+
+    /// Length of the RTT probe carried in a keepalive payload and echoed
+    /// in a pong: `ping_id` (le u64) ‖ `send_unix_micros` (le u64). The
+    /// `ping_id` lets the client ignore a stale pong if it ever laps its
+    /// probe counter; the timestamp is what RTT is computed from.
+    pub const PING_LEN: usize = 16;
 
     /// Raw PCM audio frame, little-endian i16, mono, 48 kHz.
     pub const VERSION_AUDIO_PCM: u8 = 1;
@@ -120,6 +145,58 @@ pub mod wire {
         let mut nonce = [0u8; NONCE_LEN];
         nonce[4..].copy_from_slice(&seq.to_le_bytes());
         nonce
+    }
+
+    /// Encode an RTT probe — `ping_id` ‖ `send_unix_micros`, both
+    /// little-endian u64 — for the keepalive payload. The server echoes
+    /// these [`PING_LEN`] bytes verbatim in a [`VERSION_PONG`] packet.
+    pub fn encode_ping(ping_id: u64, send_unix_micros: u64) -> [u8; PING_LEN] {
+        let mut out = [0u8; PING_LEN];
+        out[..8].copy_from_slice(&ping_id.to_le_bytes());
+        out[8..].copy_from_slice(&send_unix_micros.to_le_bytes());
+        out
+    }
+
+    /// Decode an RTT probe produced by [`encode_ping`]. Returns
+    /// `(ping_id, send_unix_micros)`, or `None` if the slice isn't
+    /// exactly [`PING_LEN`] bytes (a malformed / empty keepalive — the
+    /// server then just doesn't pong).
+    pub fn decode_ping(payload: &[u8]) -> Option<(u64, u64)> {
+        if payload.len() != PING_LEN {
+            return None;
+        }
+        let ping_id = u64::from_le_bytes(payload[..8].try_into().ok()?);
+        let send = u64::from_le_bytes(payload[8..].try_into().ok()?);
+        Some((ping_id, send))
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::wire::*;
+
+    #[test]
+    fn ping_round_trips() {
+        let bytes = encode_ping(42, 1_700_000_000_000_000);
+        assert_eq!(bytes.len(), PING_LEN);
+        assert_eq!(decode_ping(&bytes), Some((42, 1_700_000_000_000_000)));
+    }
+
+    #[test]
+    fn decode_ping_rejects_wrong_length() {
+        assert_eq!(decode_ping(&[]), None);
+        assert_eq!(decode_ping(&[0u8; PING_LEN - 1]), None);
+        assert_eq!(decode_ping(&[0u8; PING_LEN + 1]), None);
+    }
+
+    #[test]
+    fn pong_is_not_audio() {
+        // The pong kind must never be mistaken for a forwardable codec,
+        // or the relay/decoder paths would try to handle it.
+        assert!(!is_audio(VERSION_PONG));
+        assert!(!is_audio(VERSION_KEEPALIVE));
+        assert!(is_audio(VERSION_AUDIO_PCM));
+        assert!(is_audio(VERSION_AUDIO_OPUS));
     }
 }
 

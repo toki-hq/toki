@@ -9,10 +9,10 @@ use uuid::Uuid;
 use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
-    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelMuteChanged, ChannelNameChanged, Event,
-    FrequencyChanged, IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest,
-    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent,
-    RegisterRequest, RegisterResponse,
+    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelMuteChanged, ChannelNameChanged,
+    ConnectionQualityAck, ConnectionQualityReport, Event, FrequencyChanged,
+    IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse,
+    MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent, RegisterRequest, RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
@@ -511,6 +511,8 @@ impl Signaling for SignalingSvc {
             // Fresh sessions start un-muted; an admin mute is
             // session-scoped and re-applied per reconnect.
             muted: false,
+            // No quality sample until the client's first report.
+            quality: None,
         };
 
         let mut registry = self.registry.lock().await;
@@ -568,6 +570,25 @@ impl Signaling for SignalingSvc {
         Ok(Response::new(IdentityChallengeResponse {
             nonce: crate::identity::issue(&self.challenge_key, crate::admin::db::now_unix() as u64),
         }))
+    }
+
+    async fn report_connection_quality(
+        &self,
+        request: Request<ConnectionQualityReport>,
+    ) -> Result<Response<ConnectionQualityAck>, Status> {
+        let r = request.into_inner();
+        // Best-effort denormalize onto the live session for the admin
+        // snapshot. An unknown client_id (disconnected mid-report) is a
+        // no-op success — quality reports are advisory, never a reason
+        // to surface an error to a client that's already gone.
+        if let Some(client) = self.registry.lock().await.clients.get_mut(&r.client_id) {
+            client.quality = Some(crate::state::ConnQuality {
+                rtt_ms: r.rtt_ms,
+                jitter_ms: r.jitter_ms,
+                loss_pct_centi: r.loss_pct_centi,
+            });
+        }
+        Ok(Response::new(ConnectionQualityAck {}))
     }
 
     async fn join(

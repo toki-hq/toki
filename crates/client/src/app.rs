@@ -1013,6 +1013,30 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
     ui.add_space(8.0);
 }
 
+/// A horizontal VU bar for the Settings AUDIO section. `level` is the
+/// smoothed peak in `[0.0, 1.0]` straight from [`AudioLevels`]. We draw
+/// a dim track and fill it left-to-right proportional to the level; the
+/// fill turns amber as it nears full-scale (>0.9) so "my mic is too hot
+/// / clipping" reads at a glance without a number. Sits inside a
+/// [`settings_row`] like any other control.
+fn paint_level_meter(ui: &mut egui::Ui, level: f32) {
+    let level = level.clamp(0.0, 1.0);
+    // Fixed footprint so the INPUT/OUTPUT meter rows line up under the
+    // device pickers above them.
+    let (rect, _resp) = ui.allocate_exact_size(Vec2::new(200.0, 10.0), egui::Sense::hover());
+    let painter = ui.painter();
+    // Track behind the fill.
+    painter.rect_filled(rect, 2.0, T::PRIMARY_INK);
+    if level > 0.0 {
+        let mut fill = rect;
+        fill.set_width(rect.width() * level);
+        // Amber once we're within ~1 dB of full-scale — the "back off"
+        // cue. Phosphor green otherwise.
+        let color = if level > 0.9 { T::WARN } else { T::PRIMARY };
+        painter.rect_filled(fill, 2.0, color);
+    }
+}
+
 /// One row in the settings window: fixed-width label + arbitrary
 /// control on the right. Free function (not a method) so the closure
 /// can also borrow `self` mutably without colliding on `&mut self`.
@@ -1425,6 +1449,13 @@ impl eframe::App for TokiApp {
                                 self.paint_settings_window(ui);
                             });
                     });
+                // Keep the AUDIO section's VU meters animating even when
+                // we're offline. While connected the parent repaints on a
+                // 33 ms cadence and this immediate child rides along, but
+                // offline the parent goes idle — without this the meters
+                // would freeze the instant the user stops interacting,
+                // exactly when they're trying to check their mic.
+                child_ctx.request_repaint_after(Duration::from_millis(33));
                 // Honor the OS close button (red dot / X / window menu).
                 if child_ctx.input(|i| i.viewport().close_requested()) {
                     self.show_settings = false;
@@ -3654,6 +3685,14 @@ impl TokiApp {
                 self.config.save();
             }
         });
+        // Live mic VU bar. The capture stream runs continuously
+        // (independent of PTT), so this moves whenever the user talks —
+        // even offline, even with PTT not held. Makes "is my mic working
+        // / which of these devices is the right one" obvious without
+        // having to key up and ask someone.
+        settings_row(ui, "INPUT LEVEL", |ui| {
+            paint_level_meter(ui, self.audio_levels.input());
+        });
         settings_row(ui, "OUTPUT", |ui| {
             let prev = self.config.audio.output_device.clone();
             let selected = self
@@ -3683,6 +3722,19 @@ impl TokiApp {
                 self.audio_control
                     .set_output(self.config.audio.output_device.clone());
                 self.config.save();
+            }
+        });
+        // Output VU bar + a test-tone button. The meter confirms audio
+        // is actually reaching the selected device (it moves while the
+        // test tone, a roger beep, or incoming voice plays); the chime
+        // is self-generated so it needs no session — press it offline to
+        // check the speaker/earpiece and balance before connecting.
+        settings_row(ui, "OUTPUT LEVEL", |ui| {
+            paint_level_meter(ui, self.audio_levels.output());
+        });
+        settings_row(ui, "OUTPUT TEST", |ui| {
+            if ui.button("TEST TONE").clicked() {
+                let _ = self.cmd_tx.send(Cmd::TestTone);
             }
         });
         // Mic / Speaker gain sliders used to live here. They moved to

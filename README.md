@@ -151,6 +151,7 @@ Grab the seeded `admin` password from the server's startup log. The panel offers
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio + beeps toward one ear for a mono-earpiece feel).
 - **Voice DSP** — capture-side **noise suppression** (RNNoise, pure Rust) + **automatic gain control**, applied to the mic signal before Opus encode so the cleanup reaches every listener. Speech-gated AGC (≈ −18 dBFS target, fast-down/slow-up, peak-limited) won't pump the noise floor during pauses. Both stages on by default and individually toggleable live in Settings → Voice DSP — both off is a bit-exact raw mic for the unprocessed CB character.
 - **Roger beeps** — selectable take-/clear-floor tone presets, with a fixed two-tone cue for priority traffic.
+- **Audio self-test** (Settings → Audio) — live **input/output level meters** beside the device pickers (the input bar moves whenever you talk, even offline — no need to key up to check your mic; it goes amber as you approach clipping) plus a **TEST TONE** button that plays a short rising chime through the selected output, so "which device is which / is sound coming out / is my balance right" is answerable without a second person on the channel.
 - **Update check** — on launch (and periodically), the client checks GitHub Releases for a newer version and shows an "Update available" pill that opens the download page. Notify-only — it never replaces itself. Toggle and current version live in Settings → Updates.
 - Output mute, device pickers, and a connection/event log.
 

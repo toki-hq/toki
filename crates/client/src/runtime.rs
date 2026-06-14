@@ -76,6 +76,12 @@ pub enum Cmd {
     /// buttons so the user can audition tone tweaks without having
     /// to actually press PTT.
     TestBeep(BeepKind),
+    /// Play a short test chime through the selected output device. Like
+    /// [`Cmd::TestBeep`] it needs no session — it synthesises a fixed
+    /// rising two-tone and pushes it onto the playback ring. Used by the
+    /// Settings → AUDIO "TEST TONE" button to confirm the right
+    /// speaker/earpiece (and balance) before connecting.
+    TestTone,
 }
 
 /// Discriminator for which beep variant a request applies to. The
@@ -320,6 +326,34 @@ async fn handle_cmd(
             };
             let tone = audio::beep_pattern(steps, beeps.volume());
             push_playback(playback, &tone);
+        }
+        Cmd::TestTone => {
+            // Self-generated output check — no session, no roger preset.
+            // A short rising two-tone (660 → 880 Hz) is unmistakably
+            // "sound is coming out of this device", and the rise is easy
+            // to localise across L/R so it doubles as a balance check.
+            //
+            // Synthesised at a fixed comfortable amplitude rather than
+            // `beeps.volume()` on purpose: this is an *output test*, so
+            // it must be audible even for a user who's turned roger beeps
+            // down to 0%. The SPK VOL knob still scales it at the output
+            // callback, so the user hears it at their normal listening
+            // level.
+            const TEST_TONE_AMPLITUDE: f32 = 0.5;
+            let chime = audio::beep_pattern(
+                &[
+                    audio::BeepStep::Tone {
+                        freq_hz: 659.25,
+                        duration_ms: 180,
+                    },
+                    audio::BeepStep::Tone {
+                        freq_hz: 880.0,
+                        duration_ms: 220,
+                    },
+                ],
+                TEST_TONE_AMPLITUDE,
+            );
+            push_playback(playback, &chime);
         }
     }
     // Default: every command except Shutdown leaves the runtime running.

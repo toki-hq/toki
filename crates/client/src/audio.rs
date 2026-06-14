@@ -458,17 +458,16 @@ impl AudioLevels {
         }
     }
 
-    /// Mic-side peak in `[0.0, 1.0]`. Currently unused at the UI
-    /// surface (the histogram reads the spectrum ring directly), but
-    /// kept around for future affordances like a Settings VU meter.
-    #[allow(dead_code)]
+    /// Mic-side peak in `[0.0, 1.0]`. Drives the INPUT LEVEL VU bar in
+    /// Settings → AUDIO. The capture stream runs continuously, so this
+    /// reflects live mic input regardless of PTT / connection state.
     pub fn input(&self) -> f32 {
         f32::from_bits(self.input.load(Ordering::Relaxed))
     }
 
-    /// Playback-side peak in `[0.0, 1.0]`. Same future-use story as
-    /// `input` above.
-    #[allow(dead_code)]
+    /// Playback-side peak in `[0.0, 1.0]`. Drives the OUTPUT LEVEL VU bar
+    /// in Settings → AUDIO — moves while the test tone, roger beeps, or
+    /// incoming voice play out the selected device.
     pub fn output(&self) -> f32 {
         f32::from_bits(self.output.load(Ordering::Relaxed))
     }

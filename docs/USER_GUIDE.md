@@ -377,8 +377,19 @@ The UI is a single landscape "strip" widget. The main controls:
   everyone who hears you. Both are on by default; each has its own toggle in
   Settings → Voice DSP, and turning both off gives a bit-exact raw mic for the
   unprocessed CB character. Toggles apply instantly (next 10 ms frame).
-- **Settings** — input/output devices, voice DSP toggles, PTT binding,
-  roger-beep preset, global hotkeys, and the update-check toggle.
+- **Audio self-test** — Settings → Audio shows a live **INPUT LEVEL** bar
+  under the input device picker and an **OUTPUT LEVEL** bar under the output
+  picker. The input bar moves whenever your mic hears something — *even before
+  you connect and without holding PTT* — so you can confirm the right
+  microphone is selected and that it's picking you up; it turns amber as the
+  signal nears clipping (back off the gain or move away from the mic). The
+  **TEST TONE** button plays a short rising chime out the selected output
+  device at your current speaker volume — use it to confirm the right
+  speaker/earpiece is selected and to check the balance knob (the tone leans
+  toward whichever ear you've panned to). The tone needs no connection.
+- **Settings** — input/output devices with level meters + test tone, voice DSP
+  toggles, PTT binding, roger-beep preset, global hotkeys, and the update-check
+  toggle.
 
 #### Binding any input device
 

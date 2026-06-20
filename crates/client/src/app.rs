@@ -479,6 +479,7 @@ impl TokiApp {
             holder,
             holder_name,
             is_transmitting,
+            broadcast_active: s.broadcast_active,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
             muted: s.locally_silenced(),
@@ -736,6 +737,10 @@ struct StateSnapshot {
     holder: Option<String>,
     holder_name: String,
     is_transmitting: bool,
+    /// `true` when the current floor activity is a global broadcast.
+    /// Drives the distinct light-blue talking indicator (and the
+    /// "BROADCAST" label) in the center display while it's live.
+    broadcast_active: bool,
     /// Our own live callsign. Mirrors `ClientState.display_name` and
     /// changes mid-session when the admin renames us — read by the
     /// topbar so the change is visible without a reconnect.
@@ -2708,32 +2713,67 @@ impl TokiApp {
                 } else {
                     snap.holder_name.to_uppercase()
                 };
+                // A global broadcast tints the talking indicator light
+                // blue (with the broadcast glow) and labels it BROADCAST,
+                // so a fleet-wide announcement is unmistakable at a glance.
+                let (label, fill, glow, right) = if snap.broadcast_active {
+                    (
+                        format!("📡 {peer_label}"),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        "BROADCAST",
+                    )
+                } else {
+                    (
+                        format!("◐ {peer_label}"),
+                        T::PRIMARY,
+                        T::PRIMARY_GLOW,
+                        "RECEIVING",
+                    )
+                };
                 glow_text(
                     painter,
                     Pos2::new(left_x, status_y),
                     Align2::LEFT_CENTER,
-                    &format!("◐ {peer_label}"),
+                    &label,
                     font_mono(10.0),
-                    T::PRIMARY,
-                    T::PRIMARY_GLOW,
+                    fill,
+                    glow,
                     0.6,
                 );
                 painter.text(
                     Pos2::new(right_x, status_y),
                     Align2::RIGHT_CENTER,
-                    "RECEIVING",
+                    right,
                     font_mono(10.0),
-                    T::INK_DIM,
+                    if snap.broadcast_active {
+                        T::BROADCAST
+                    } else {
+                        T::INK_DIM
+                    },
                 );
             }
             RadioState::Busy => {
-                painter.text(
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
-                    font_mono(10.0),
-                    T::WARN,
-                );
+                // While a broadcast is live, "busy" is informational, not a
+                // collision — show it as a broadcast (light blue), not the
+                // alarming red used for a normal floor clash.
+                if snap.broadcast_active {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 GLOBAL BROADCAST · ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
+                        font_mono(10.0),
+                        T::WARN,
+                    );
+                }
             }
         }
     }
@@ -3692,6 +3732,18 @@ impl TokiApp {
                     T::TX,
                     T::TX,
                     1.4,
+                ),
+                // A live global broadcast holds every floor — show it as a
+                // broadcast (calm light-blue label/dot over the idle shell)
+                // rather than the alarming red of a normal floor collision.
+                RadioState::Busy if snap.broadcast_active => (
+                    T::PTT_IDLE_TOP,
+                    T::PTT_IDLE_BOTTOM,
+                    "GLOBAL BROADCAST",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::SHELL_EDGE,
+                    0.0,
                 ),
                 RadioState::Busy => (
                     T::PTT_BUSY_TOP,

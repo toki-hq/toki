@@ -354,6 +354,7 @@ async fn handle_cmd(
                 st.connection = ConnState::Disconnected;
                 st.members.clear();
                 st.holder = None;
+                st.broadcast_active = false;
                 st.self_id = None;
                 st.frequency = None;
                 st.channel_name = None;
@@ -898,6 +899,7 @@ impl Session {
                             // braces in case events arrive out of order.
                             if st.holder.as_deref() == Some(l.client_id.as_str()) {
                                 st.holder = None;
+                                st.broadcast_active = false;
                             }
                             st.log(format!("← {name} left"));
                         }
@@ -922,6 +924,10 @@ impl Session {
                                     None
                                 };
                                 st.holder = new_holder.clone();
+                                // Track whether the active floor is a broadcast so
+                                // the UI can tint it distinctly. Set on a broadcast
+                                // press; always cleared when the floor frees.
+                                st.broadcast_active = new_holder.is_some() && p.broadcast;
                                 let acquired = !was_held && new_holder.is_some();
                                 let released = was_held && new_holder.is_none();
                                 // Takeover: a different member seized a floor

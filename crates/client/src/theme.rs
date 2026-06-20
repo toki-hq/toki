@@ -34,6 +34,15 @@ pub const WARN: Color32 = Color32::from_rgb(0xff, 0x5c, 0x5c);
 /// dark UI much more easily — at parity it reads as alarming.
 pub const WARN_GLOW: Color32 = Color32::from_rgba_premultiplied(0x39, 0x14, 0x14, 0x5a);
 
+/// `oklch(0.74 0.13 245)` — global-broadcast indicator (light blue).
+/// A deliberately cool, distinct hue: when a broadcast is live the
+/// talking indicator tints to this instead of the normal busy red, so
+/// "the whole net is being addressed" reads at a glance, paired with
+/// the distinct broadcast roger. Sibling of `TX` / `WARN`.
+pub const BROADCAST: Color32 = Color32::from_rgb(0x4d, 0xb8, 0xff);
+/// `broadcast` at 50% alpha — outer glow when a broadcast is active.
+pub const BROADCAST_GLOW: Color32 = Color32::from_rgba_premultiplied(0x27, 0x5c, 0x80, 0x80);
+
 // ── Hardware shell (theme-independent) ──────────────────────────────────
 pub const SHELL: Color32 = Color32::from_rgb(0x0a, 0x0b, 0x0a);
 pub const SHELL_TOP: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1e);

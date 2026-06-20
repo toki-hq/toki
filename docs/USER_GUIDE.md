@@ -287,12 +287,15 @@ unmutable by design.
 If the broadcaster disconnects mid-broadcast, the server clears the broadcast
 and frees all floors automatically.
 
-**Broadcast roger beep**
+**Broadcast roger beep + indicator**
 
 Listeners hear a distinct three-step falling tone (C6 → G5 → C5) at the start
 of a broadcast. This "broadcast roger" is separate from the normal take-floor
 beep and the priority roger, so listeners can immediately tell a server-wide
-broadcast from priority traffic on their own channel.
+broadcast from priority traffic on their own channel. The client's center
+display also tints **light blue** and reads **BROADCAST** (instead of the
+usual green "RECEIVING" or red "CHANNEL BUSY") for the duration, so the cue is
+both audible and visible.
 
 ### Client: per-user config
 

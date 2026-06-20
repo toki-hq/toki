@@ -28,6 +28,14 @@ pub struct ClientState {
     /// or `None` if the floor is free. Updated only from authoritative
     /// server broadcasts — the local press never sets this.
     pub holder: Option<String>,
+    /// `true` when the current floor activity is a *global broadcast*
+    /// (someone with the broadcast capability is keyed, reaching every
+    /// frequency at once). Set from the `broadcast` flag on the holder's
+    /// `PttEvent`; cleared when the floor frees. The UI reads this each
+    /// frame to tint the talking indicator a distinct broadcast colour
+    /// instead of the normal busy colour. Tracks `holder`: when `holder`
+    /// is `None` this is always `false`.
+    pub broadcast_active: bool,
     /// client_ids an operator has server-side muted, for the roster
     /// badge. Populated from `MuteChanged` events; pruned when a member
     /// leaves. Our own id appears here when *we're* muted (the runtime
@@ -140,6 +148,25 @@ mod tests {
         // Grant priority — priority unblocks us (not can_broadcast).
         s2.channel_priority = true;
         assert!(!s2.locally_silenced());
+    }
+
+    #[test]
+    fn broadcast_active_defaults_false_and_is_independent_of_speak_gate() {
+        let s = ClientState::default();
+        assert!(
+            !s.broadcast_active,
+            "no broadcast in flight on a fresh state"
+        );
+        // broadcast_active is a pure display flag — it must not feed the
+        // local speak gate (that's holder/mute/priority's job).
+        let s2 = ClientState {
+            broadcast_active: true,
+            ..Default::default()
+        };
+        assert!(
+            !s2.locally_silenced(),
+            "broadcast_active alone never silences us"
+        );
     }
 
     #[test]

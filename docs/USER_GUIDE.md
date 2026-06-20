@@ -188,7 +188,7 @@ session_ttl_hours = 12
 | `TOKI_DATA_DIR` | path | `.` | Runtime data root. Auto-generated TLS files land in `{TOKI_DATA_DIR}/tls/`; a relative `[admin] db_path` is resolved here. Absolute operator paths are honored verbatim. |
 | `TOKI_GRPC_ADDR` | `host:port` | `0.0.0.0:50051` | TCP bind for the gRPC signaling channel. |
 | `TOKI_AUDIO_ADDR` | `host:port` | `0.0.0.0:50051` | UDP bind for the audio relay. Shares the port with gRPC by default; kernel binds are keyed by `(protocol, port)`. |
-| `TOKI_AUDIO_PUBLIC` | `host:port` | value of `TOKI_AUDIO_ADDR` | UDP endpoint advertised to clients in `RegisterResponse`. Set this when behind NAT/port-forwarding (e.g. `203.0.113.5:50051`). |
+| `TOKI_AUDIO_PUBLIC` | `host:port` | value of `TOKI_AUDIO_ADDR` | UDP endpoint advertised to clients in `RegisterResponse`. Set this when behind NAT/port-forwarding (e.g. `203.0.113.5:50051`). **Only the host is used by the client** — it always connects UDP on the same port it reached gRPC on (audio and gRPC share a port number by design), so the advertised port here is informational. Run audio on the gRPC port; don't try to split them via this var. |
 | `TOKI_ADMIN_BIND` | string | from TOML (`127.0.0.1`) | Override the admin bind interface. |
 | `TOKI_ADMIN_PORT` | u16 | from TOML (`8000`) | Override the admin port. |
 | `TOKI_ADMIN_DB_PATH` | path | from TOML (`admin.db`) | Override the SQLite admin store path. |
@@ -698,7 +698,10 @@ target. Verify the URL and that the DB accepts TLS connections.
 - Confirm UDP `50051` (or your `TOKI_AUDIO_ADDR`) is reachable from the client.
   Firewalls + NAT often allow the TCP gRPC handshake but silently drop UDP.
 - When the server is behind NAT, set `TOKI_AUDIO_PUBLIC` to the externally
-  reachable `host:port`.
+  reachable host. Note the client connects UDP on the **same port it reached
+  gRPC on**, ignoring any different port in `TOKI_AUDIO_PUBLIC` — so make sure
+  audio is exposed on the gRPC port. If you moved gRPC to a non-default port
+  (e.g. `:50052`), audio must be reachable there too.
 - The server learns the client's UDP source from the version-`0` keepalive. If
   clients never send one (broken outbound UDP path), the server has nowhere to
   relay audio to.

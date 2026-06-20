@@ -243,6 +243,25 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// May a connection-quality report from `caller_ip` update a session
+/// whose registration IP is `expected_ip`? Honoured iff the caller's IP
+/// matches the session's pinned IP — the same source-IP binding the audio
+/// relay enforces (see `audio.rs`). A session bound to no IP (Unix-socket
+/// transport) or a caller with no observable IP can't be matched, so we
+/// allow it, matching the relay's "`expected_ip = None` skips the check"
+/// behaviour. Pulled out as a pure fn so the matching logic is unit-
+/// testable without an IP-bearing transport (the in-process test harness
+/// exposes no peer address).
+fn quality_report_ip_ok(
+    expected_ip: Option<std::net::IpAddr>,
+    caller_ip: Option<std::net::IpAddr>,
+) -> bool {
+    match expected_ip {
+        Some(bound) => caller_ip == Some(bound),
+        None => true,
+    }
+}
+
 type EventStream = Pin<Box<dyn Stream<Item = Result<Event, Status>> + Send>>;
 
 #[tonic::async_trait]
@@ -439,26 +458,17 @@ impl Signaling for SignalingSvc {
             }
         }
 
-        // Capacity gate: refuse new registrations once the registry
-        // has reached the operator-configured ceiling. Checked after
-        // the password + throttle gates so a flooder can't burn this
-        // capacity check at line rate, and so the rejection message
-        // doesn't leak ceiling information to unauthenticated callers.
-        // We read max_peers fresh each call — admin UI edits take
-        // effect on the very next register.
+        // Capacity gate: refuse new registrations once the registry has
+        // reached the operator-configured ceiling. Read the ceiling fresh
+        // here (after the password + throttle gates, so a flooder can't
+        // burn it at line rate and the rejection doesn't leak the ceiling
+        // to unauthenticated callers, and so an admin UI edit applies to
+        // the very next register), but enforce it *inside* the same
+        // registry lock that inserts below — otherwise N concurrent
+        // registers all read a sub-ceiling count, all pass, and all
+        // insert, overshooting the cap. Same check-and-insert-under-one-
+        // lock discipline as the unique-callsign gate.
         let max_peers = self.server_config.read().await.max_peers as usize;
-        {
-            let n = self.registry.lock().await.clients.len();
-            if n >= max_peers {
-                tracing::warn!(
-                    ?peer_ip,
-                    current = n,
-                    cap = max_peers,
-                    "register rejected: max_peers reached"
-                );
-                return Err(Status::resource_exhausted("server at peer capacity"));
-            }
-        }
 
         let id = Uuid::new_v4().to_string();
         // 16-byte token: handed to the client over gRPC (response
@@ -524,6 +534,20 @@ impl Signaling for SignalingSvc {
         let unique_callsigns = self.server_config.read().await.unique_callsigns;
 
         let mut registry = self.registry.lock().await;
+        // Enforce the capacity ceiling here, under the insert lock (see the
+        // max_peers note above). `>=` so the cap is the count of live
+        // sessions, not one past it.
+        let n = registry.clients.len();
+        if n >= max_peers {
+            drop(registry);
+            tracing::warn!(
+                ?peer_ip,
+                current = n,
+                cap = max_peers,
+                "register rejected: max_peers reached"
+            );
+            return Err(Status::resource_exhausted("server at peer capacity"));
+        }
         let own_pubkey = identity.as_ref().map(|i| i.pubkey_hex.as_str());
         if unique_callsigns && registry.callsign_taken(&display_name, None, own_pubkey) {
             drop(registry);
@@ -596,17 +620,38 @@ impl Signaling for SignalingSvc {
         &self,
         request: Request<ConnectionQualityReport>,
     ) -> Result<Response<ConnectionQualityAck>, Status> {
+        // Bind the report to the caller's IP before consuming the request.
+        // The body carries the `client_id` to update, but nothing proves
+        // the caller *is* that client — so we require the caller's IP to
+        // match the target session's `expected_ip` (the IP its gRPC
+        // Register came from, the same IP the audio relay already pins UDP
+        // to). Without this, any connected client — or, on an open-mode
+        // server, anyone on the network — could forge another peer's
+        // RTT/loss in the admin dashboard. A session bound to no IP
+        // (Unix-socket transport, where `expected_ip` is `None`) can't be
+        // matched, so we let those through, consistent with the relay
+        // accepting any UDP source for them.
+        let caller_ip = request.remote_addr().map(|a| a.ip());
         let r = request.into_inner();
         // Best-effort denormalize onto the live session for the admin
-        // snapshot. An unknown client_id (disconnected mid-report) is a
-        // no-op success — quality reports are advisory, never a reason
-        // to surface an error to a client that's already gone.
+        // snapshot. An unknown client_id (disconnected mid-report) or an
+        // IP mismatch is a no-op success — quality reports are advisory,
+        // and a silent no-op avoids both nagging a client that's already
+        // gone and leaking client-id existence to a prober.
         if let Some(client) = self.registry.lock().await.clients.get_mut(&r.client_id) {
-            client.quality = Some(crate::state::ConnQuality {
-                rtt_ms: r.rtt_ms,
-                jitter_ms: r.jitter_ms,
-                loss_pct_centi: r.loss_pct_centi,
-            });
+            if quality_report_ip_ok(client.expected_ip, caller_ip) {
+                client.quality = Some(crate::state::ConnQuality {
+                    rtt_ms: r.rtt_ms,
+                    jitter_ms: r.jitter_ms,
+                    loss_pct_centi: r.loss_pct_centi,
+                });
+            } else {
+                tracing::warn!(
+                    ?caller_ip,
+                    client_id = %r.client_id,
+                    "connection-quality report rejected: caller IP does not match session"
+                );
+            }
         }
         Ok(Response::new(ConnectionQualityAck {}))
     }
@@ -1315,7 +1360,39 @@ pub(crate) fn remove_from_room(
 
 #[cfg(test)]
 mod tests {
-    use super::{ptt_decision, speak_allowed, PttDecision};
+    use super::{ct_eq, ptt_decision, quality_report_ip_ok, speak_allowed, PttDecision};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+        IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+    }
+
+    #[test]
+    fn quality_report_ip_binding() {
+        let bound = ip(203, 0, 113, 5);
+        // Caller from the session's registration IP → accepted.
+        assert!(quality_report_ip_ok(Some(bound), Some(bound)));
+        // Caller from a different IP → rejected (the forge-another-peer
+        // case: only IP-spoofing on an already-pinned session gets through).
+        assert!(!quality_report_ip_ok(
+            Some(bound),
+            Some(ip(198, 51, 100, 9))
+        ));
+        // Caller with no observable IP can't match a bound session → reject.
+        assert!(!quality_report_ip_ok(Some(bound), None));
+        // Session bound to no IP (Unix-socket transport) → always allowed,
+        // matching the audio relay's `expected_ip = None` skip.
+        assert!(quality_report_ip_ok(None, Some(bound)));
+        assert!(quality_report_ip_ok(None, None));
+    }
+
+    #[test]
+    fn ct_eq_matches_only_equal_byte_strings() {
+        assert!(ct_eq(b"hunter2", b"hunter2"));
+        assert!(!ct_eq(b"hunter2", b"hunter3"));
+        assert!(!ct_eq(b"hunter2", b"hunter")); // length mismatch
+        assert!(ct_eq(b"", b""));
+    }
 
     fn grant(holder: &str, priority: bool) -> Option<PttDecision> {
         Some(PttDecision {

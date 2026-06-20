@@ -1486,9 +1486,16 @@ impl eframe::App for TokiApp {
                 }
             });
         } else if self.settings_fonts_ready {
-            // Window just closed — arm `register_fonts` to run again on
-            // the next open, since the child context will be re-created.
+            // Window just closed (catches both the OS close button and the
+            // gear toggle). Arm `register_fonts` to run again on the next
+            // open, since the child context will be re-created.
             self.settings_fonts_ready = false;
+            // Force the self-monitor off on close. It's a transient test
+            // aid and a mic→speaker loop the user can no longer see is a
+            // feedback risk — so it must never outlive the window it's
+            // toggled from. (The runtime reads this live; the checkbox,
+            // which reflects the same atom, shows unchecked on next open.)
+            self.monitor_params.set_enabled(false);
         }
 
         // Connect dialog (sibling viewport to Settings). Same

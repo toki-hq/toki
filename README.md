@@ -60,7 +60,7 @@ cargo run -p toki-client
 | `TOKI_DATA_DIR` | Root for TLS certs + `admin.db` (relative paths resolve here) | `.` |
 | `TOKI_GRPC_ADDR` | gRPC (TCP) bind address | `0.0.0.0:50051` |
 | `TOKI_AUDIO_ADDR` | Audio (UDP) bind address | `0.0.0.0:50051` |
-| `TOKI_AUDIO_PUBLIC` | Audio endpoint advertised to clients | the audio bind addr |
+| `TOKI_AUDIO_PUBLIC` | Audio endpoint advertised to clients (host only — client reuses the gRPC port) | the audio bind addr |
 | `TOKI_ADMIN_BIND` | Admin panel bind interface | `127.0.0.1` |
 | `TOKI_ADMIN_PORT` | Admin panel port | `8000` |
 | `TOKI_ADMIN_DB_PATH` | SQLite path for admin users/sessions/config | `admin.db` (under data dir) |

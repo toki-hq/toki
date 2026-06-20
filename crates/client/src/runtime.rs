@@ -1754,13 +1754,22 @@ fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) ->
 
 /// Resolve the server's advertised audio endpoint to a concrete `SocketAddr`.
 ///
+/// We take the **host** from what the server advertises but the **port**
+/// from the signaling (gRPC) URL we're already connected to — audio always
+/// rides the same port as gRPC. Toki's convention is one port number for
+/// both (TCP gRPC + UDP audio are distinct kernel binding tuples), so the
+/// advertised port is redundant with the gRPC port in every correct
+/// deployment; deriving it here means a server that advertises a stale or
+/// mismatched audio port (e.g. gRPC moved to `:50052` but `TOKI_AUDIO_PUBLIC`
+/// still says `:50051`) can't strand the client's UDP on a dead port. A
+/// mismatch is logged at warn so a deliberately-split deployment is visible.
+///
 /// The server may advertise:
-/// - a routable numeric address (`203.0.113.5:50051`) → used as-is;
+/// - a routable numeric address (`203.0.113.5:50051`) → host used, gRPC port;
 /// - an **unspecified** address (`0.0.0.0:port` / `[::]:port`), which isn't
-///   routable from a client → substitute the host of the signaling URL,
-///   keeping the advertised port;
+///   routable from a client → substitute the host of the signaling URL;
 /// - a **DNS name** (`toki.example.org:50051`), when the operator set
-///   `TOKI_AUDIO_PUBLIC` to a hostname → resolved directly.
+///   `TOKI_AUDIO_PUBLIC` to a hostname → host resolved, gRPC port.
 ///
 /// In every host-based branch the host can be a DNS name, so we resolve via
 /// [`lookup_host`] rather than `parse::<SocketAddr>()` — the latter only
@@ -1769,12 +1778,19 @@ fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) ->
 /// advertised IP family (don't reach a v4 relay over a v6 record, or vice
 /// versa) if the name resolves to both.
 async fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result<SocketAddr> {
-    let (host, port, want_ipv6): (String, u16, Option<bool>) =
+    // The port audio will actually use: the gRPC port, always.
+    let port = signaling_port(signaling_url)?;
+    // Pull the host out of the advertisement (plus its port, only to warn on
+    // a mismatch, and its family, to bias DNS when we substitute a host).
+    let (host, advertised_port, want_ipv6): (String, u16, Option<bool>) =
         match advertised.parse::<SocketAddr>() {
-            // Routable numeric address — nothing to resolve.
-            Ok(addr) if !addr.ip().is_unspecified() => return Ok(addr),
+            // Routable numeric address — use its host (resolved below skips
+            // DNS for an IP literal), advertised port noted for the warning.
+            Ok(addr) if !addr.ip().is_unspecified() => {
+                (addr.ip().to_string(), addr.port(), Some(addr.is_ipv6()))
+            }
             // Unspecified (0.0.0.0 / [::]) — substitute the signaling host,
-            // keep the advertised port + family.
+            // keep the advertised family.
             Ok(addr) => (
                 signaling_host(signaling_url)?.to_string(),
                 addr.port(),
@@ -1785,12 +1801,27 @@ async fn resolve_audio_endpoint(advertised: &str, signaling_url: &str) -> Result
                 let (h, p) = advertised
                     .rsplit_once(':')
                     .ok_or_else(|| anyhow!("audio endpoint missing port: {advertised:?}"))?;
-                let port: u16 = p
+                let advertised_port: u16 = p
                     .parse()
                     .with_context(|| format!("audio endpoint port {p:?}"))?;
-                (strip_brackets(h).to_string(), port, None)
+                (strip_brackets(h).to_string(), advertised_port, None)
             }
         };
+
+    if advertised_port != port {
+        warn!(
+            advertised = advertised,
+            advertised_port,
+            grpc_port = port,
+            "server advertised a different audio port than gRPC; using the gRPC port"
+        );
+    }
+
+    // A routable numeric host needs no DNS — build it directly with the gRPC
+    // port (parse can't fail: numeric host + valid u16).
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return Ok(SocketAddr::new(ip, port));
+    }
 
     let addrs: Vec<SocketAddr> = lookup_host((host.as_str(), port))
         .await
@@ -1820,6 +1851,25 @@ fn signaling_host(signaling_url: &str) -> Result<&str> {
         .rsplit_once(':')
         .map(|(host, _port)| strip_brackets(host))
         .ok_or_else(|| anyhow!("signaling url missing port"))
+}
+
+/// Extract the port from a signaling URL like `https://host:port/...`.
+/// Audio reuses this so its UDP endpoint always rides the gRPC port (see
+/// [`resolve_audio_endpoint`]). The URL always carries an explicit port
+/// here — the client builds it from the user's `host` + `port` config —
+/// so a missing one is a hard error rather than an http/https default.
+fn signaling_port(signaling_url: &str) -> Result<u16> {
+    let host_port = signaling_url
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .ok_or_else(|| anyhow!("empty signaling url"))?;
+    let (_host, port) = host_port
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow!("signaling url missing port: {signaling_url:?}"))?;
+    port.parse()
+        .with_context(|| format!("signaling url port {port:?}"))
 }
 
 /// Drop surrounding `[ ]` from an IPv6 literal host (`[::1]` → `::1`); a
@@ -1936,21 +1986,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_audio_endpoint_passes_through_routable_addr() {
+    async fn resolve_audio_endpoint_takes_host_from_advert_port_from_grpc() {
+        // Routable advertised address: keep its host, but the port comes
+        // from the gRPC URL (audio always rides the gRPC port).
         let resolved = resolve_audio_endpoint("203.0.113.5:50052", "https://server:50051")
             .await
             .unwrap();
-        assert_eq!(resolved.to_string(), "203.0.113.5:50052");
+        assert_eq!(resolved.to_string(), "203.0.113.5:50051");
+    }
+
+    #[tokio::test]
+    async fn resolve_audio_endpoint_overrides_stale_advertised_port() {
+        // The staging bug: gRPC moved to :50052 but the server still
+        // advertises audio on :50051 (stale TOKI_AUDIO_PUBLIC). Audio must
+        // follow gRPC to :50052, not strand UDP on the dead :50051.
+        let resolved = resolve_audio_endpoint("163.172.79.96:50051", "https://host:50052")
+            .await
+            .unwrap();
+        assert_eq!(resolved.to_string(), "163.172.79.96:50052");
     }
 
     #[tokio::test]
     async fn resolve_audio_endpoint_substitutes_signaling_host_for_unspecified() {
-        // Server commonly advertises 0.0.0.0:port; rewrite to the
-        // host portion of the gRPC URL (an IP literal here).
+        // Server commonly advertises 0.0.0.0:port; rewrite to the host
+        // portion of the gRPC URL (an IP literal here) on the gRPC port.
         let resolved = resolve_audio_endpoint("0.0.0.0:50052", "https://192.168.1.50:50051")
             .await
             .unwrap();
-        assert_eq!(resolved.to_string(), "192.168.1.50:50052");
+        assert_eq!(resolved.to_string(), "192.168.1.50:50051");
     }
 
     #[tokio::test]
@@ -1958,22 +2021,23 @@ mod tests {
         // The regression: a *named* signaling host must be DNS-resolved,
         // not bare-parsed (parse::<SocketAddr>() rejects names). `localhost`
         // resolves offline via the hosts file; assert we get a loopback addr
-        // on the advertised port.
+        // on the gRPC port.
         let resolved = resolve_audio_endpoint("0.0.0.0:50052", "https://localhost:50051")
             .await
             .unwrap();
         assert!(resolved.ip().is_loopback(), "got {resolved}");
-        assert_eq!(resolved.port(), 50052);
+        assert_eq!(resolved.port(), 50051);
     }
 
     #[tokio::test]
     async fn resolve_audio_endpoint_resolves_advertised_dns_name() {
-        // Operator set TOKI_AUDIO_PUBLIC to a hostname (not an IP).
+        // Operator set TOKI_AUDIO_PUBLIC to a hostname (not an IP); host is
+        // resolved, port is taken from the gRPC URL.
         let resolved = resolve_audio_endpoint("localhost:50052", "https://ignored:50051")
             .await
             .unwrap();
         assert!(resolved.ip().is_loopback(), "got {resolved}");
-        assert_eq!(resolved.port(), 50052);
+        assert_eq!(resolved.port(), 50051);
     }
 
     #[tokio::test]
@@ -1981,5 +2045,22 @@ mod tests {
         assert!(resolve_audio_endpoint("nope", "https://server:50051")
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn resolve_audio_endpoint_errors_when_signaling_url_has_no_port() {
+        // The gRPC port is now load-bearing for audio, so a portless
+        // signaling URL is a hard error rather than a silent default.
+        assert!(resolve_audio_endpoint("0.0.0.0:50051", "https://server")
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn signaling_port_parses_and_rejects() {
+        assert_eq!(signaling_port("https://host:50052").unwrap(), 50052);
+        assert_eq!(signaling_port("http://1.2.3.4:50051/x").unwrap(), 50051);
+        assert!(signaling_port("https://host").is_err());
+        assert!(signaling_port("https://host:notaport").is_err());
     }
 }

@@ -167,6 +167,10 @@ pub struct TokiApp {
     /// called once per viewport. Cleared when the window closes so a
     /// fresh open re-registers.
     settings_fonts_ready: bool,
+    /// Which Settings page the sidebar has selected. Persists across
+    /// open/close within a session (it's plain UI state, not saved to
+    /// config) so reopening lands on the last-viewed tab.
+    settings_tab: SettingsTab,
 
     /// Connect dialog open? Triggered by the strip's "NEW CONNECTION"
     /// button when offline. Hosts URL + Username inputs in their own
@@ -272,6 +276,33 @@ enum RecordTarget {
     FreqUp,
     /// Tune one channel down.
     FreqDown,
+}
+
+/// The four pages of the Settings window. Each renders full-height on the
+/// right while the sidebar lists them; the selected one is held in
+/// [`TokiApp::settings_tab`]. Grouped by theme rather than one-per-section
+/// so each page is a comfortable length:
+///   * **Controls** — PTT + memory + tuning key bindings.
+///   * **Audio** — input/output devices, level meters, test tone, the
+///     self-monitor.
+///   * **Voice** — capture DSP (noise/AGC), playback Radio FX, roger beeps.
+///   * **Updates** — version + the update checker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Controls,
+    Audio,
+    Voice,
+    Updates,
+}
+
+impl SettingsTab {
+    /// Tabs in sidebar order, each with the label shown on its button.
+    const ALL: &'static [(SettingsTab, &'static str)] = &[
+        (SettingsTab::Controls, "CONTROLS"),
+        (SettingsTab::Audio, "AUDIO"),
+        (SettingsTab::Voice, "VOICE"),
+        (SettingsTab::Updates, "UPDATES"),
+    ];
 }
 
 impl TokiApp {
@@ -401,6 +432,7 @@ impl TokiApp {
             tx_start: None,
             show_settings: false,
             settings_fonts_ready: false,
+            settings_tab: SettingsTab::Controls,
             show_connect: false,
             connect_fonts_ready: false,
             connect_form: ConnectForm::default(),
@@ -1015,6 +1047,39 @@ fn paint_refresh_icon(
     painter.line_segment([tip, back2], stroke);
 }
 
+/// Width of the Settings tab sidebar, in points. Wide enough for the
+/// longest label ("CONTROLS"/"UPDATES") at the 10 px mono face with a
+/// little breathing room.
+const SETTINGS_SIDEBAR_W: f32 = 92.0;
+
+/// One tab in the Settings sidebar: a full-width, left-aligned button
+/// that reads selected (phosphor text on a faint fill) or idle (dim
+/// text, transparent). Returns `true` on click. Styled by hand rather
+/// than `selectable_label` so the selected fill spans the whole sidebar
+/// width and the type matches the section-header phosphor.
+fn settings_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    if selected {
+        ui.painter().rect_filled(rect, 3.0, T::PRIMARY_INK);
+    } else if hovered {
+        // A barely-there wash on hover so tabs feel live without a hard
+        // background flash.
+        ui.painter()
+            .rect_filled(rect, 3.0, T::PRIMARY_INK.gamma_multiply(0.4));
+    }
+    let color = if selected { T::PRIMARY } else { T::INK_DIM };
+    ui.painter().text(
+        rect.left_center() + Vec2::new(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::monospace(10.0),
+        color,
+    );
+    resp.clicked()
+}
+
 /// Section header inside the settings window: a small upper-case label
 /// in the phosphor primary colour, followed by a thin divider. Used to
 /// group rows into "CUSTOMIZATION" and "AUDIO" buckets.
@@ -1444,10 +1509,15 @@ impl eframe::App for TokiApp {
         // is fine — it's a tiny form.
         if self.show_settings {
             let viewport_id = egui::ViewportId::from_hash_of("toki-settings");
+            // Sized for the tabbed layout: a touch wider so the sidebar
+            // plus the device-picker rows sit side-by-side without
+            // crowding, and a touch shorter since each tab is now a short
+            // page instead of one long scroll. Min width keeps the sidebar
+            // from squeezing the rows below usability.
             let builder = egui::ViewportBuilder::default()
                 .with_title("Toki — Settings")
-                .with_inner_size([460.0, 520.0])
-                .with_min_inner_size([380.0, 380.0]);
+                .with_inner_size([520.0, 480.0])
+                .with_min_inner_size([440.0, 320.0]);
             ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
                 // Each viewport carries its own font atlas — push the
                 // brand fonts on the first frame after open so the
@@ -3654,9 +3724,60 @@ impl TokiApp {
         });
     }
 
+    /// Settings window: a left sidebar of tabs and the selected tab's
+    /// full page on the right. Splitting the old single scroll into pages
+    /// keeps each one short; the per-tab bodies live in
+    /// `paint_settings_{controls,audio,voice,updates}`.
     fn paint_settings_window(&mut self, ui: &mut egui::Ui) {
         ui.style_mut().visuals.override_text_color = Some(T::INK);
 
+        ui.horizontal_top(|ui| {
+            // ── Sidebar ───────────────────────────────────────────────
+            // Fixed-width column of tab buttons down the left edge.
+            ui.allocate_ui_with_layout(
+                Vec2::new(SETTINGS_SIDEBAR_W, ui.available_height()),
+                egui::Layout::top_down_justified(egui::Align::LEFT),
+                |ui| {
+                    for &(tab, label) in SettingsTab::ALL {
+                        let selected = self.settings_tab == tab;
+                        if settings_tab_button(ui, label, selected) {
+                            self.settings_tab = tab;
+                        }
+                        ui.add_space(4.0);
+                    }
+                },
+            );
+
+            ui.add_space(10.0);
+            // Hairline divider between sidebar and page.
+            let x = ui.cursor().left();
+            ui.painter().line_segment(
+                [
+                    Pos2::new(x, ui.min_rect().top()),
+                    Pos2::new(x, ui.min_rect().bottom()),
+                ],
+                Stroke::new(1.0, T::PRIMARY_INK),
+            );
+            ui.add_space(10.0);
+
+            // ── Page ──────────────────────────────────────────────────
+            // The selected tab fills the rest of the width, scrolling if
+            // its content is taller than the window.
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| match self.settings_tab {
+                        SettingsTab::Controls => self.paint_settings_controls(ui),
+                        SettingsTab::Audio => self.paint_settings_audio(ui),
+                        SettingsTab::Voice => self.paint_settings_voice(ui),
+                        SettingsTab::Updates => self.paint_settings_updates(ui),
+                    });
+            });
+        });
+    }
+
+    /// CONTROLS tab — PTT, memory-recall, and tuning key bindings.
+    fn paint_settings_controls(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "CUSTOMIZATION");
 
         self.bind_row(ui, "PTT", RecordTarget::Ptt);
@@ -3681,8 +3802,11 @@ impl TokiApp {
         section_header(ui, "TUNING HOTKEYS");
         self.bind_row(ui, "FREQ UP", RecordTarget::FreqUp);
         self.bind_row(ui, "FREQ DOWN", RecordTarget::FreqDown);
+    }
 
-        ui.add_space(14.0);
+    /// AUDIO tab — input/output device pickers, live level meters, the
+    /// output test tone, and the self-monitor sidetone.
+    fn paint_settings_audio(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "AUDIO");
 
         settings_row(ui, "INPUT", |ui| {
@@ -3819,8 +3943,11 @@ impl TokiApp {
         // adjust the same `config.audio.{input,output}_gain` fields —
         // duplicating them in Settings just left two ways to change
         // the same value out of sync.
+    }
 
-        ui.add_space(14.0);
+    /// VOICE tab — capture DSP (noise suppression + AGC), the playback
+    /// Radio FX dirtier, and the roger-beep presets.
+    fn paint_settings_voice(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "VOICE DSP");
 
         // Capture-side processing toggles. Both write straight into
@@ -3963,8 +4090,10 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::TestBeep(runtime::BeepKind::Release));
             }
         });
+    }
 
-        ui.add_space(14.0);
+    /// UPDATES tab — current version and the notify-only update checker.
+    fn paint_settings_updates(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "UPDATES");
 
         settings_row(ui, "VERSION", |ui| {

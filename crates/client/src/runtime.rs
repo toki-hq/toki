@@ -105,6 +105,7 @@ pub fn spawn(
     state: SharedState,
     mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     beeps: BeepParams,
     dsp_params: DspParams,
     output_dsp_params: OutputDspParams,
@@ -132,6 +133,7 @@ pub fn spawn(
                 state,
                 mic_rx,
                 playback,
+                effects,
                 beeps,
                 dsp_params,
                 output_dsp_params,
@@ -148,6 +150,7 @@ async fn run(
     state: SharedState,
     mut mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     beeps: BeepParams,
     dsp_params: DspParams,
     output_dsp_params: OutputDspParams,
@@ -187,7 +190,7 @@ async fn run(
                 // (e.g. Cmd::Shutdown). We break out of the select loop
                 // then so the runtime thread can exit promptly rather
                 // than sit waiting on a dead UI.
-                if !handle_cmd(cmd, &mut session, &state, &playback, &beeps).await {
+                if !handle_cmd(cmd, &mut session, &state, &playback, &effects, &beeps).await {
                     break;
                 }
             }
@@ -274,6 +277,7 @@ async fn handle_cmd(
     session: &mut Option<Session>,
     state: &SharedState,
     playback: &PlaybackBuf,
+    effects: &PlaybackBuf,
     beeps: &BeepParams,
 ) -> bool {
     match cmd {
@@ -311,6 +315,7 @@ async fn handle_cmd(
                 &password,
                 state.clone(),
                 playback.clone(),
+                effects.clone(),
                 beeps.clone(),
             )
             .await
@@ -390,15 +395,16 @@ async fn handle_cmd(
         Cmd::TestBeep(kind) => {
             // Preview tones don't require an active session — they
             // just synthesise audio with the current BeepParams and
-            // push it onto the playback ring. The audio thread takes
-            // it from there.
+            // push it onto the effects ring (the dedicated beep/cue
+            // path, separate from voice). The audio thread takes it
+            // from there.
             let preset = beeps.current_preset();
             let steps = match kind {
                 BeepKind::Acquire => preset.acquire.steps,
                 BeepKind::Release => preset.release.steps,
             };
             let tone = audio::beep_pattern(steps, beeps.volume());
-            push_playback(playback, &tone);
+            push_playback(effects, &tone);
         }
         Cmd::TestTone => {
             // Self-generated output check — no session, no roger preset.
@@ -426,7 +432,7 @@ async fn handle_cmd(
                 ],
                 TEST_TONE_AMPLITUDE,
             );
-            push_playback(playback, &chime);
+            push_playback(effects, &chime);
         }
     }
     // Default: every command except Shutdown leaves the runtime running.
@@ -602,6 +608,7 @@ impl Session {
         password: &str,
         state: SharedState,
         playback: PlaybackBuf,
+        effects: PlaybackBuf,
         beeps: BeepParams,
     ) -> Result<Self> {
         // gRPC is always TLS. Any URL scheme other than https:// is
@@ -779,7 +786,9 @@ impl Session {
         // `MuteChanged` addressed to us; the mic loop reads it.
         let self_muted = Arc::new(AtomicBool::new(false));
         let self_muted_for_events = self_muted.clone();
-        let playback_for_events = playback.clone();
+        // The events task only emits roger beeps / cues, which go on the
+        // effects ring (so the voice path's catch-up can't drop them).
+        let effects_for_events = effects.clone();
         let beeps_for_events = beeps.clone();
         let events_task = tokio::spawn(async move {
             while let Some(evt) = events.next().await {
@@ -868,7 +877,7 @@ impl Session {
                                     audio::PREEMPTED_BUMP,
                                     beeps_for_events.volume(),
                                 );
-                                push_playback(&playback_for_events, &tone);
+                                push_playback(&effects_for_events, &tone);
                                 state_for_events
                                     .lock()
                                     .unwrap()
@@ -881,7 +890,7 @@ impl Session {
                                     audio::PRIORITY_ROGER,
                                     beeps_for_events.volume(),
                                 );
-                                push_playback(&playback_for_events, &tone);
+                                push_playback(&effects_for_events, &tone);
                                 state_for_events
                                     .lock()
                                     .unwrap()
@@ -896,7 +905,7 @@ impl Session {
                                     preset.acquire.steps,
                                     beeps_for_events.volume(),
                                 );
-                                push_playback(&playback_for_events, &tone);
+                                push_playback(&effects_for_events, &tone);
                                 state_for_events
                                     .lock()
                                     .unwrap()
@@ -907,7 +916,7 @@ impl Session {
                                     preset.release.steps,
                                     beeps_for_events.volume(),
                                 );
-                                push_playback(&playback_for_events, &tone);
+                                push_playback(&effects_for_events, &tone);
                                 state_for_events.lock().unwrap().log("🔓 floor cleared");
                             }
                         }

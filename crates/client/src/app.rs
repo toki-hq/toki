@@ -322,6 +322,7 @@ impl TokiApp {
         let audio::AudioHandle {
             mic_rx,
             playback,
+            effects,
             devices,
             control,
             gains,
@@ -360,6 +361,7 @@ impl TokiApp {
             state.clone(),
             mic_rx,
             playback,
+            effects,
             beep_params.clone(),
             dsp_params.clone(),
             output_dsp_params.clone(),

@@ -161,14 +161,16 @@ async fn run(
     // Toggles arrive live through `dsp_params`; with both stages off,
     // `process` is a bit-exact passthrough.
     let mut dsp = Dsp::new(dsp_params);
-    // A *second* radio-FX dirtier, private to the self-monitor path, so
-    // monitoring previews the full chain a peer hears — capture DSP *and*
-    // the playback Radio FX. It reads the same `OutputDspParams` atoms as
-    // the recv task's instance (one toggle drives both) but keeps its own
-    // filter / noise / envelope state: the two process different streams
-    // (your mic vs incoming voice) and must not share continuity. Off by
-    // default like the recv-side one, so it's a passthrough until the
-    // user turns Radio FX on.
+    // Radio FX (band-pass + saturation + static) is a *transmit-side*
+    // effect: the sender dirties their own outgoing voice so every peer
+    // hears their chosen walkie-talkie character baked in. `tx_fx` runs on
+    // the frame we send (after capture DSP, only while transmitting);
+    // `monitor_fx` is an independent instance over the self-monitor copy
+    // so the operator hears the same chain when auditioning. Both read the
+    // same `OutputDspParams` (one toggle/amount drives both) but keep
+    // separate filter/noise/envelope state — they process different
+    // streams and must not share continuity. Off by default → passthrough.
+    let mut tx_fx = OutputDsp::new(output_dsp_params.clone());
     let mut monitor_fx = OutputDsp::new(output_dsp_params.clone());
     // Tracks the confirmed-talking state across mic frames so we can
     // detect the talk→silent edge (PTT release) and flush the encoder's
@@ -185,16 +187,7 @@ async fn run(
                 // (e.g. Cmd::Shutdown). We break out of the select loop
                 // then so the runtime thread can exit promptly rather
                 // than sit waiting on a dead UI.
-                if !handle_cmd(
-                    cmd,
-                    &mut session,
-                    &state,
-                    &playback,
-                    &beeps,
-                    &output_dsp_params,
-                )
-                .await
-                {
+                if !handle_cmd(cmd, &mut session, &state, &playback, &beeps).await {
                     break;
                 }
             }
@@ -250,6 +243,12 @@ async fn run(
                     let talking = s.ptt.load(Ordering::Relaxed)
                         && !s.self_muted.load(Ordering::Relaxed);
                     if talking {
+                        // Bake Radio FX into the outgoing voice (no-op when
+                        // disabled). Applied only while transmitting — there's
+                        // no point dirtying frames we won't send; the filter
+                        // settles within a frame, so a cold start per-PTT is
+                        // inaudible. Peers therefore hear the sender's FX.
+                        tx_fx.process(&mut frame);
                         s.send_audio(&frame).await;
                     } else if was_talking {
                         // Just released: flush the encoder tail so the
@@ -276,7 +275,6 @@ async fn handle_cmd(
     state: &SharedState,
     playback: &PlaybackBuf,
     beeps: &BeepParams,
-    output_dsp_params: &OutputDspParams,
 ) -> bool {
     match cmd {
         Cmd::Connect {
@@ -314,7 +312,6 @@ async fn handle_cmd(
                 state.clone(),
                 playback.clone(),
                 beeps.clone(),
-                output_dsp_params.clone(),
             )
             .await
             {
@@ -606,7 +603,6 @@ impl Session {
         state: SharedState,
         playback: PlaybackBuf,
         beeps: BeepParams,
-        output_dsp_params: OutputDspParams,
     ) -> Result<Self> {
         // gRPC is always TLS. Any URL scheme other than https:// is
         // rewritten so plaintext can't sneak back in via a stale
@@ -1120,12 +1116,6 @@ impl Session {
         let (mut quality, quality_handle) = QualityTracker::new();
         let udp_for_recv = udp.clone();
         let key_for_recv = audio_mac_key;
-        // Playback "radio FX" dirtier, owned by this task so its filter /
-        // noise / envelope state runs continuously across voice chunks.
-        // Reads its toggle + amount live from the shared atoms, so a
-        // Settings change lands on the next decoded chunk. Off by default,
-        // in which case `process` is a passthrough.
-        let mut output_dsp = OutputDsp::new(output_dsp_params);
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_AUDIO_PACKET];
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_for_recv));
@@ -1194,8 +1184,11 @@ impl Session {
                             continue;
                         }
 
-                        // Decode per the codec the sender used.
-                        let mut samples = match version {
+                        // Decode per the codec the sender used. Radio FX is
+                        // *not* applied here — it's a transmit-side effect now,
+                        // baked into the audio by the sender, so incoming voice
+                        // already carries whatever FX the sender chose.
+                        let samples = match version {
                             VERSION_AUDIO_PCM => pcm_from_bytes(&plaintext),
                             VERSION_AUDIO_OPUS => decode_opus(&mut decoder, &plaintext),
                             other => {
@@ -1207,13 +1200,6 @@ impl Session {
                         // S2C counter (loss = gaps) and arrived now
                         // (jitter = spacing deviation).
                         quality.on_audio(seq, Instant::now());
-                        // Optionally dirty incoming voice into walkie-talkie
-                        // character (band-pass + saturation + static). A
-                        // passthrough when the effect is toggled off — which
-                        // it is by default. Applied here, on voice only, so
-                        // locally-generated roger beeps / the test tone
-                        // (which take the push_playback path) stay clean.
-                        output_dsp.process(&mut samples);
                         // Latency-managed: keeps the voice backlog tight
                         // so playback can't fall progressively behind.
                         push_voice(&playback, &samples);

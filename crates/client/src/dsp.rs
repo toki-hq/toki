@@ -25,16 +25,20 @@
 //! state and the AGC gain are already settled when a transmission
 //! starts, instead of converging audibly over its first half-second.
 //!
-//! ## Playback side — "radio FX" voice dirtying
+//! ## Transmit side — "radio FX" voice dirtying
 //!
-//! [`OutputDsp`] runs the opposite direction: it deliberately *degrades*
-//! incoming voice so a too-clean digital channel sounds like a cheap
-//! handheld radio or phone. Applied by the UDP recv task to each decoded
-//! voice chunk just before it lands in the playback ring — so it colours
-//! *voice* only; locally-generated roger beeps and the output test tone
-//! take a different path into the ring and stay clean. Off by default
-//! (an opt-in flavour effect, unlike the on-by-default capture stages);
-//! when off, [`OutputDsp::process`] is an early-return passthrough.
+//! [`OutputDsp`] deliberately *degrades* voice so a too-clean digital
+//! channel sounds like a cheap handheld radio or phone. It's a
+//! **transmit-side** effect: the runtime applies it to the operator's own
+//! outgoing mic frames (after the capture DSP, only while PTT is held),
+//! so the FX is baked into what gets encoded and every peer hears the
+//! sender's chosen walkie-talkie character — the sender owns how they
+//! sound on the air. (The self-monitor runs its own [`OutputDsp`] over the
+//! sidetone so the operator hears the same chain when auditioning.)
+//! Off by default (an opt-in flavour effect, unlike the on-by-default
+//! capture stages); when off, [`OutputDsp::process`] is an early-return
+//! passthrough — and since the frame is only dirtied while transmitting,
+//! audio that isn't sent is never touched.
 //!
 //! The chain, in signal order, is the classic "comms voice" recipe:
 //!
@@ -349,9 +353,10 @@ const NOISE_BANDPASS_MAKEUP: f32 = 3.0;
 /// that the static bed doesn't pump on every glottal pulse.
 const ENV_DECAY: f32 = 0.9993;
 
-/// Lock-free controls for the playback dirtying effect, shared between
-/// the UI thread (writes) and the UDP recv task (reads each voice chunk).
-/// Same `Arc`-of-atomics pattern as [`DspParams`] / `audio::AudioGains`.
+/// Lock-free controls for the radio-FX dirtying effect, shared between
+/// the UI thread (writes) and the runtime's mic loop (reads each outgoing
+/// frame; the self-monitor's instance reads them too). Same
+/// `Arc`-of-atomics pattern as [`DspParams`] / `audio::AudioGains`.
 #[derive(Clone)]
 pub struct OutputDspParams {
     enabled: Arc<AtomicBool>,
@@ -474,10 +479,11 @@ impl Biquad {
     }
 }
 
-/// Stateful playback dirtier, owned by the UDP recv task. Carries the
-/// band-pass filter state, the noise PRNG, and the speech-envelope
-/// follower across voice chunks so the effect is continuous rather than
-/// resetting at every packet boundary.
+/// Stateful radio-FX dirtier. The runtime owns one instance for the
+/// outgoing mic frames and another for the self-monitor's sidetone.
+/// Carries the band-pass filter state, the noise PRNG, and the
+/// speech-envelope follower across frames so the effect is continuous
+/// rather than resetting at every frame boundary.
 pub struct OutputDsp {
     params: OutputDspParams,
     hp: Biquad,

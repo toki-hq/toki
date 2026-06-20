@@ -601,11 +601,12 @@ pub struct AudioConfig {
     /// rationale (and same Settings toggle) as `noise_suppression`.
     #[serde(default = "default_true")]
     pub agc: bool,
-    /// Playback-side "radio FX" dirtying (band-pass + saturation +
-    /// static) applied to incoming voice — see `crate::dsp::OutputDsp`.
-    /// Default **off**: it's a deliberate flavour effect, not something
-    /// to impose on a fresh install (the bare `#[serde(default)]` gives
-    /// `false`, so every pre-existing config also stays clean).
+    /// Transmit-side "radio FX" dirtying (band-pass + saturation + static)
+    /// baked into the operator's *outgoing* voice so peers hear it — see
+    /// `crate::dsp::OutputDsp`. Default **off**: it's a deliberate flavour
+    /// effect, not something to impose on a fresh install (the bare
+    /// `#[serde(default)]` gives `false`, so every pre-existing config also
+    /// stays clean). The field name is kept for config back-compat.
     #[serde(default)]
     pub output_dirty: bool,
     /// How hard the radio FX dirties, `[0.0, 1.0]`. Only meaningful when

@@ -4158,8 +4158,8 @@ impl TokiApp {
         // the operator can hear themselves — a mic/device check, and an
         // audition of the outgoing chain. The SOURCE toggle A/Bs the
         // capture DSP (RAW = bare mic, PROCESSED = + noise suppression +
-        // AGC); whichever is picked, the playback Radio FX folds in too
-        // when it's enabled, so this previews the full chain a peer hears.
+        // AGC); whichever is picked, Radio FX folds in too when it's
+        // enabled, so this previews the full chain a peer hears.
         // Needs no session; writes straight into the shared `MonitorParams`,
         // so it engages on the next mic frame. Not persisted — always
         // starts off — because a mic→speaker loop over speakers howls; the
@@ -4252,12 +4252,12 @@ impl TokiApp {
             );
         });
 
-        // Playback-side "radio FX" — the only output-direction effect in
-        // this section (the two above process the *outgoing* mic). It
-        // dirties *incoming* voice into a cheap-handheld sound and writes
-        // straight into the shared `OutputDspParams`, so the change lands
-        // on the next decoded voice chunk — no reconnect. Off by default;
-        // the intensity slider is disabled until it's switched on.
+        // "Radio FX" — a transmit-side dirtier, like the two stages above:
+        // it bakes a cheap-handheld colour into your *outgoing* voice so
+        // every peer hears you that way. Writes straight into the shared
+        // `OutputDspParams`, so the change lands on the next transmitted
+        // frame — no reconnect. Off by default; the intensity slider is
+        // disabled until it's switched on.
         settings_row(ui, "RADIO FX", |ui| {
             let mut v = self.config.audio.output_dirty;
             if ui.checkbox(&mut v, "").changed() {
@@ -4266,7 +4266,7 @@ impl TokiApp {
                 self.config.save();
             }
             ui.label(
-                egui::RichText::new("dirties incoming voice: bandpass + drive + static")
+                egui::RichText::new("how you sound to others: bandpass + drive + static")
                     .color(T::INK_DIM)
                     .monospace()
                     .size(9.0),

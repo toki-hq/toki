@@ -45,24 +45,23 @@ enum RadioState {
     Busy,
 }
 
-/// Which audio direction a `paint_knob` call drives. Both knobs share
-/// the same visuals — only the underlying field, the apply path
-/// (input vs output gain), and the indicator colour-when-muted differ.
+/// Which audio control a sound-drawer fader drives. The faders share
+/// visuals — only the bound field, the apply path, the colour, and the
+/// readout format differ. The explicit discriminants double as a stable
+/// per-fader key for egui interaction ids.
 #[derive(Clone, Copy)]
-enum KnobKind {
-    /// Input (microphone) gain. Applied unconditionally; mute is an
-    /// output-only concept.
-    Mic,
-    /// Output (speaker) gain. While muted, the knob updates
-    /// `config.audio.output_gain` and `gain_before_mute` so the next
-    /// unmute reflects the user's chosen level — but does *not* call
-    /// `audio_gains.set_output`, which would defeat the mute.
-    Speaker,
-    /// Stereo playback balance in `[-1, 1]`, centred at 0. Routes
-    /// received audio toward the left or right ear — a mono-earpiece
-    /// effect for walkie-talkie listening. Unlike the gain knobs its
-    /// detent sits at 12 o'clock (centre), not full-left.
-    Balance,
+enum FaderKind {
+    /// Output (speaker) volume → `config.audio.output_gain`. The "VOL"
+    /// fader. Dragging it while muted un-mutes first (the design's mute
+    /// coupling); reads 0 and uses muted ink while muted.
+    Volume = 0,
+    /// Stereo playback balance → `config.audio.balance` in `[-1, 1]`,
+    /// centred at 0. Centre-origin fill; routes received audio toward one
+    /// ear for the mono-earpiece effect.
+    Balance = 1,
+    /// Input (microphone) gain → `config.audio.input_gain`. The "MIC"
+    /// fader; warm amber accent. Independent of mute (output-only).
+    Mic = 2,
 }
 
 impl RadioState {
@@ -188,6 +187,11 @@ pub struct TokiApp {
     muted: bool,
     /// Pre-mute output gain, so toggling mute round-trips cleanly.
     gain_before_mute: f32,
+    /// Sound drawer folded (`false`) or open (`true`). UI-local, not
+    /// persisted — resets folded on launch (a fold state is a transient
+    /// preference, and the window opens at its compact height). When this
+    /// flips, `update` drives the OS window to `theme::window_h`.
+    show_drawer: bool,
     /// Currently-selected channel index in the 446–448 MHz band. UI
     /// updates this instantly on chevron click; the actual server-
     /// side room join is debounced — see `freq_change_deadline`.
@@ -435,6 +439,7 @@ impl TokiApp {
             connect_form: ConnectForm::default(),
             muted: false,
             gain_before_mute: 1.0,
+            show_drawer: false,
             channel_idx,
             freq_change_deadline: None,
             spectrum_bars: vec![0.0; T::SPECTRUM_BARS],
@@ -753,6 +758,63 @@ struct StateSnapshot {
 
 fn font_mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
+}
+
+/// A gain value in `[0, 2]` formatted as an integer percentage where
+/// 100% = unity (passthrough). Shared by the drawer's VOL/MIC readouts
+/// and the folded summary line.
+fn gain_pct(gain: f32) -> u32 {
+    (gain.clamp(0.0, 2.0) * 100.0).round() as u32
+}
+
+/// Format the stereo balance (`[-1, 1]`, 0 = centre) as the design's
+/// compact pan label: `C` near centre, else `L`/`R` + 0..100. Mirrors the
+/// handoff's `balanceLabel`, adapted to Toki's `[-1, 1]` range (the
+/// prototype used `[0, 1]` with 0.5 centre).
+fn balance_label(b: f32) -> String {
+    let pct = (b.abs() * 100.0).round() as u32;
+    if pct <= 1 {
+        "C".to_string()
+    } else if b < 0.0 {
+        format!("L{pct}")
+    } else {
+        format!("R{pct}")
+    }
+}
+
+/// The drawer-handle "sliders" glyph: two horizontal lines, each with a
+/// filled dot at a different x (a fader icon). Drawn into `rect` in
+/// `color`. Replaces the design's `Icon.Sliders` SVG with painter
+/// primitives (egui has no SVG; this matches the icon set's hand-drawn
+/// style).
+fn paint_sliders_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.4, color);
+    let x0 = rect.left();
+    let x1 = rect.right();
+    // Top line, dot toward the right; bottom line, dot toward the left.
+    let y_top = rect.top() + rect.height() * 0.32;
+    let y_bot = rect.top() + rect.height() * 0.68;
+    painter.line_segment([Pos2::new(x0, y_top), Pos2::new(x1, y_top)], stroke);
+    painter.line_segment([Pos2::new(x0, y_bot), Pos2::new(x1, y_bot)], stroke);
+    let r = 1.7;
+    painter.circle_filled(Pos2::new(x0 + rect.width() * 0.68, y_top), r, color);
+    painter.circle_filled(Pos2::new(x0 + rect.width() * 0.32, y_bot), r, color);
+}
+
+/// A small chevron centred at `c`, pointing down when `up == false` and
+/// up when `up == true` (the design rotates a chevron-down 180°; an
+/// up/down pair reads identically and is simpler to paint). Used on the
+/// drawer handle to signal fold state.
+fn paint_chevron(painter: &egui::Painter, c: Pos2, color: Color32, up: bool) {
+    let w = 4.0; // half-width
+    let h = 2.5; // half-height
+    let stroke = Stroke::new(1.4, color);
+    let (tip_dy, arm_dy) = if up { (h, -h) } else { (-h, h) };
+    let tip = Pos2::new(c.x, c.y + tip_dy);
+    let left = Pos2::new(c.x - w, c.y + arm_dy);
+    let right = Pos2::new(c.x + w, c.y + arm_dy);
+    painter.line_segment([left, tip], stroke);
+    painter.line_segment([right, tip], stroke);
 }
 
 /// Best-effort truncation to fit inside `max_w` pixels at the given
@@ -1498,6 +1560,18 @@ impl eframe::App for TokiApp {
             self.paint_strip(ui, &snap, st);
         });
 
+        // Drive the OS window to match the drawer's fold state. `paint_strip`
+        // (above) processes this frame's handle click, so `show_drawer` is
+        // already current. Only command a resize when the height actually
+        // differs from what's on screen — otherwise we'd re-send it every
+        // frame and fight the window manager. Width is preserved (the user
+        // may have widened the strip within its allowed band).
+        let target_h = T::window_h(self.show_drawer);
+        let cur = ctx.input(|i| i.screen_rect().size());
+        if (cur.y - target_h).abs() > 0.5 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(cur.x, target_h)));
+        }
+
         // Settings live in a real OS-level child viewport (own titlebar,
         // resizable, can be moved off the strip). Using
         // `show_viewport_immediate` rather than `_deferred` keeps the
@@ -1629,8 +1703,18 @@ impl eframe::App for TokiApp {
 
 impl TokiApp {
     fn paint_strip(&mut self, ui: &mut egui::Ui, snap: &StateSnapshot, st: RadioState) {
-        let rect = ui.max_rect();
+        let full = ui.max_rect();
         let painter = ui.painter().clone();
+
+        // The window is now `radio body (WIDGET_H)` + gap + `sound drawer`.
+        // Carve the fixed-height body off the top; everything below the
+        // gap is the drawer. The body keeps the exact layout it had when
+        // it was the whole window.
+        let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), T::WIDGET_H));
+        let drawer_rect = Rect::from_min_max(
+            Pos2::new(full.left(), rect.bottom() + T::DRAWER_GAP),
+            full.max,
+        );
 
         // ── Chassis ────────────────────────────────────────────────
         // Three-stop vertical gradient per `design-tokens.md`:
@@ -1680,6 +1764,9 @@ impl TokiApp {
         self.paint_topbar(ui, &painter, topbar_rect, snap, st);
         self.paint_main(ui, &painter, main_rect, snap, st);
         self.paint_bottom(ui, &painter, bottom_rect, st);
+
+        // Sound drawer (VOL / BAL / MIC faders), mounted below the body.
+        self.paint_drawer(ui, drawer_rect);
     }
 
     // ── Top bar ─────────────────────────────────────────────────────
@@ -2853,7 +2940,7 @@ impl TokiApp {
         }
     }
 
-    // ── Bottom row: knob + PTT ─────────────────────────────────────
+    // ── Bottom row: full-width PTT ─────────────────────────────────
     fn paint_bottom(
         &mut self,
         ui: &mut egui::Ui,
@@ -2861,51 +2948,14 @@ impl TokiApp {
         rect: Rect,
         st: RadioState,
     ) {
-        // Two knobs on the left, vertically centred and laid out side
-        // by side: mic gain (capture) first, then speaker gain
-        // (playback). The output mute toggle still lives in the top
-        // bar — the SPK knob just sets the *level* that's restored on
-        // unmute (and applied immediately while unmuted).
-        let knob_y = rect.center().y - 4.0;
-        let knob_gap = T::GAP_BOTTOM;
-        let mic_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + T::KNOB_D / 2.0 + 4.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        let spk_rect = Rect::from_center_size(
-            Pos2::new(mic_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        // Third knob: stereo balance (L↔R) for the mono-earpiece effect.
-        let bal_rect = Rect::from_center_size(
-            Pos2::new(spk_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        self.paint_knob(ui, painter, mic_rect, KnobKind::Mic);
-        self.paint_knob(ui, painter, spk_rect, KnobKind::Speaker);
-        self.paint_knob(ui, painter, bal_rect, KnobKind::Balance);
-        // Captions — short labels so they fit cleanly under the
-        // 42 px knobs at 8 px mono.
-        for (r, label) in [
-            (mic_rect, "MIC VOL"),
-            (spk_rect, "SPK VOL"),
-            (bal_rect, "BALANCE"),
-        ] {
-            painter.text(
-                Pos2::new(r.center().x, r.bottom() + 8.0),
-                Align2::CENTER_CENTER,
-                label,
-                font_mono(8.0),
-                T::INK_MUTE,
-            );
-        }
-
-        // PTT button (or Reconnect button when transport is down) —
-        // fills the rest of the row.
-        let ptt_x = bal_rect.right() + T::GAP_BOTTOM;
+        // The mic / speaker / balance rotary knobs that used to sit on
+        // the left of this row moved into the foldable sound drawer below
+        // the body (as VOL / BAL / MIC faders). The PTT button (or the
+        // Reconnect / offline button when the transport is down) now spans
+        // the full row width.
         let ptt_rect = Rect::from_min_size(
-            Pos2::new(ptt_x, rect.center().y - T::PTT_H / 2.0),
-            Vec2::new(rect.right() - ptt_x, T::PTT_H),
+            Pos2::new(rect.left(), rect.center().y - T::PTT_H / 2.0),
+            Vec2::new(rect.width(), T::PTT_H),
         );
         if st.is_transport_down() {
             // Reconnecting keeps the single sweep button — a connect
@@ -2918,6 +2968,344 @@ impl TokiApp {
             }
         } else {
             self.paint_ptt(ui, painter, ptt_rect, st);
+        }
+    }
+
+    // ── Sound drawer ───────────────────────────────────────────────
+    /// The foldable sound panel below the radio body: an always-visible
+    /// handle (click to fold/unfold) over a collapsible body of three
+    /// faders — VOL, BAL, MIC. Replaces the old rotary knobs. `rect` is
+    /// the area below the body gap; its height already matches the fold
+    /// state (the window was resized in `update`).
+    fn paint_drawer(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let painter = ui.painter().clone();
+        let open = self.show_drawer;
+        let corners = CornerRadius::same(T::DRAWER_RADIUS as u8);
+
+        // Container: dark vertical-gradient panel with an inset rim and a
+        // 1 px top highlight (same hardware vocabulary as the chassis).
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            corners,
+            &[(0.0, T::DRAWER_TOP), (1.0, T::DRAWER_BOTTOM)],
+        );
+        painter.rect_stroke(
+            rect,
+            corners,
+            Stroke::new(1.0, T::SHELL_EDGE),
+            StrokeKind::Inside,
+        );
+
+        // ── Handle (always visible) ────────────────────────────────
+        let handle_rect =
+            Rect::from_min_size(rect.min, Vec2::new(rect.width(), T::DRAWER_HANDLE_H));
+        let handle_resp = ui.interact(handle_rect, ui.id().with("drawer-handle"), Sense::click());
+        if handle_resp.clicked() {
+            self.show_drawer = !self.show_drawer;
+        }
+        if handle_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        let pad = T::DRAWER_PAD_X;
+        let mid_y = handle_rect.center().y;
+        // Left cluster: sliders glyph + "SOUND" label. Accent when open,
+        // dim when folded.
+        let label_color = if open { T::PRIMARY } else { T::INK_DIM };
+        let icon_x = handle_rect.left() + pad;
+        paint_sliders_icon(
+            &painter,
+            Rect::from_center_size(Pos2::new(icon_x + 6.0, mid_y), Vec2::splat(12.0)),
+            label_color,
+        );
+        painter.text(
+            Pos2::new(icon_x + 18.0, mid_y),
+            Align2::LEFT_CENTER,
+            "SOUND",
+            font_mono(9.0),
+            label_color,
+        );
+
+        // Right cluster: chevron (always), and — only when folded — a
+        // live summary so the values read at a glance without opening.
+        let chev_cx = handle_rect.right() - pad - 5.0;
+        paint_chevron(&painter, Pos2::new(chev_cx, mid_y), T::INK_DIM, open);
+        if !open {
+            let summary = format!(
+                "VOL {} · {} · MIC {}",
+                gain_pct(if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                }),
+                balance_label(self.config.audio.balance),
+                gain_pct(self.config.audio.input_gain),
+            );
+            painter.text(
+                Pos2::new(chev_cx - 14.0, mid_y),
+                Align2::RIGHT_CENTER,
+                summary,
+                font_mono(9.0),
+                T::INK_MUTE,
+            );
+        }
+
+        // ── Collapsible body (faders) ──────────────────────────────
+        if open {
+            // Top border separating handle from body.
+            let by = handle_rect.bottom();
+            painter.line_segment(
+                [
+                    Pos2::new(rect.left() + 1.0, by),
+                    Pos2::new(rect.right() - 1.0, by),
+                ],
+                Stroke::new(1.0, T::HIGHLIGHT),
+            );
+
+            // Three rows laid out top-to-bottom inside the body padding.
+            let body_top = by + 8.0;
+            let row_gap = 12.0;
+            let rows: [(&str, FaderKind); 3] = [
+                ("VOL", FaderKind::Volume),
+                ("BAL", FaderKind::Balance),
+                ("MIC", FaderKind::Mic),
+            ];
+            for (i, (label, kind)) in rows.into_iter().enumerate() {
+                let row_y = body_top + i as f32 * (T::DRAWER_ROW_H + row_gap);
+                let row_rect = Rect::from_min_size(
+                    Pos2::new(rect.left() + pad, row_y),
+                    Vec2::new(rect.width() - 2.0 * pad, T::DRAWER_ROW_H),
+                );
+                self.paint_fader_row(ui, &painter, row_rect, label, kind);
+            }
+        }
+    }
+
+    /// One drawer row: fixed-width label, the fader (flex), and a
+    /// right-aligned value readout. `kind` selects the bound state, range,
+    /// colour, and readout format.
+    fn paint_fader_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        label: &str,
+        kind: FaderKind,
+    ) {
+        // Fader accent: VOL/BAL use the phosphor primary, MIC the warm TX
+        // amber; VOL dims to "muted" ink while output is muted.
+        let center_origin = matches!(kind, FaderKind::Balance);
+
+        // Fader cell first — it processes this frame's click/drag and
+        // paints the track/fill/thumb. Doing input before the label +
+        // readout below means those read the just-updated value (no
+        // one-frame lag on the percentage / pan text). The colour is
+        // resolved *after*, since a VOL drag can un-mute and change it.
+        let fader_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + T::DRAWER_LABEL_W + 12.0, rect.top()),
+            Pos2::new(rect.right() - T::DRAWER_VALUE_W - 12.0, rect.bottom()),
+        );
+        // The fader paints itself (track/fill/thumb) and returns its
+        // resolved accent so the value readout matches.
+        let color = self.paint_fader(ui, painter, fader_rect, kind, center_origin);
+
+        // Label cell.
+        let mid_y = rect.center().y;
+        painter.text(
+            Pos2::new(rect.left(), mid_y),
+            Align2::LEFT_CENTER,
+            label,
+            font_mono(9.0),
+            T::INK_DIM,
+        );
+
+        // Value readout cell (right-aligned, fixed width), coloured to
+        // match the fader.
+        let value_text = match kind {
+            FaderKind::Balance => balance_label(self.config.audio.balance),
+            FaderKind::Volume => format!(
+                "{}%",
+                gain_pct(if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                })
+            ),
+            FaderKind::Mic => format!("{}%", gain_pct(self.config.audio.input_gain)),
+        };
+        painter.text(
+            Pos2::new(rect.right(), mid_y),
+            Align2::RIGHT_CENTER,
+            value_text,
+            font_mono(11.0),
+            color,
+        );
+    }
+
+    /// A custom horizontal fader (the design's `HSlider`): track, 11 tick
+    /// marks, a fill (left-origin, or centre-origin for balance), and a
+    /// knurled thumb. Click or drag anywhere on the row sets the value
+    /// from the pointer X — no step quantization. Returns the resolved
+    /// accent colour (which a VOL drag may have changed by un-muting) so
+    /// the caller can colour the matching value readout.
+    fn paint_fader(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        kind: FaderKind,
+        center_origin: bool,
+    ) -> Color32 {
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("fader", kind as u8)),
+            Sense::click_and_drag(),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // Click or drag → value from pointer X over the track width.
+        if resp.dragged() || resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let new_unit = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                self.apply_fader(kind, new_unit);
+            }
+        }
+        if resp.drag_stopped() || resp.clicked() {
+            self.config.save();
+        }
+
+        // Read the (possibly just-updated) value as a [0,1] unit. Gains
+        // span 0..2 → /2; balance -1..1 → centre 0.5.
+        let unit = match kind {
+            FaderKind::Volume => {
+                (if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                }) / 2.0
+            }
+            FaderKind::Mic => self.config.audio.input_gain / 2.0,
+            FaderKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
+        }
+        .clamp(0.0, 1.0);
+
+        // Accent: VOL/BAL phosphor primary, MIC warm amber; VOL dims to
+        // muted ink while output is muted (resolved post-input).
+        let (color, glow) = match kind {
+            FaderKind::Mic => (T::TX, T::TX_GLOW),
+            FaderKind::Volume if self.muted => (T::INK_MUTE, T::PRIMARY_GLOW),
+            _ => (T::PRIMARY, T::PRIMARY_GLOW),
+        };
+
+        let track_y = rect.center().y;
+        let track = Rect::from_center_size(
+            Pos2::new(rect.center().x, track_y),
+            Vec2::new(rect.width(), T::FADER_TRACK_H),
+        );
+        painter.rect_filled(track, CornerRadius::same(2), T::FADER_TRACK);
+
+        // 11 tick marks at every 10%. Taller at 0/50/100; the centre tick
+        // is brighter on a centre-origin (balance) fader.
+        for i in 0..11 {
+            let tx = rect.left() + (i as f32 / 10.0) * rect.width();
+            let tall = i % 5 == 0 || (center_origin && i == 5);
+            let h = if tall { 9.0 } else { 5.0 };
+            let tcol = if center_origin && i == 5 {
+                T::FADER_TICK_CENTER
+            } else {
+                T::FADER_TICK
+            };
+            painter.line_segment(
+                [
+                    Pos2::new(tx, track_y - h / 2.0),
+                    Pos2::new(tx, track_y + h / 2.0),
+                ],
+                Stroke::new(1.0, tcol),
+            );
+        }
+
+        // Fill: left→value normally, or centre→value for balance.
+        let x_at = |u: f32| rect.left() + u * rect.width();
+        let (fill_l, fill_r) = if center_origin {
+            let c = x_at(0.5);
+            let v = x_at(unit);
+            (c.min(v), c.max(v))
+        } else {
+            (rect.left(), x_at(unit))
+        };
+        if (fill_r - fill_l).abs() > 0.5 {
+            let fill = Rect::from_min_max(
+                Pos2::new(fill_l, track_y - T::FADER_TRACK_H / 2.0),
+                Pos2::new(fill_r, track_y + T::FADER_TRACK_H / 2.0),
+            );
+            // Soft glow under the fill, then the solid fill on top.
+            painter.rect_filled(fill.expand(1.5), CornerRadius::same(2), glow);
+            painter.rect_filled(fill, CornerRadius::same(2), color);
+        }
+
+        // Thumb: rounded slug with a coloured rim and two knurl lines.
+        let thumb_cx = x_at(unit);
+        let thumb = Rect::from_center_size(
+            Pos2::new(thumb_cx, track_y),
+            Vec2::new(T::FADER_THUMB_W, T::FADER_THUMB_H),
+        );
+        paint_vertical_gradient(
+            painter,
+            thumb,
+            CornerRadius::same(3),
+            &[(0.0, T::FADER_THUMB_TOP), (1.0, T::FADER_THUMB_BOTTOM)],
+        );
+        painter.rect_stroke(
+            thumb,
+            CornerRadius::same(3),
+            Stroke::new(1.0, color),
+            StrokeKind::Inside,
+        );
+        for dx in [-1.5_f32, 1.5] {
+            painter.line_segment(
+                [
+                    Pos2::new(thumb_cx + dx, track_y - 4.0),
+                    Pos2::new(thumb_cx + dx, track_y + 4.0),
+                ],
+                Stroke::new(1.0, T::FADER_KNURL),
+            );
+        }
+
+        color
+    }
+
+    /// Apply a fader's new `[0,1]` unit to the bound audio state + the
+    /// live gain atomics. Mirrors the old knob wiring: gains map unit→
+    /// `[0,2]`; balance maps unit→`[-1,1]` with a centre snap; the VOL
+    /// fader un-mutes on first move (per the design's mute coupling).
+    fn apply_fader(&mut self, kind: FaderKind, unit: f32) {
+        match kind {
+            FaderKind::Volume => {
+                // First drag while muted un-mutes, then applies the value
+                // (toggle_mute restores gain_before_mute, which we then
+                // overwrite via set_output below).
+                if self.muted {
+                    self.toggle_mute();
+                }
+                let gain = unit * 2.0;
+                self.config.audio.output_gain = gain;
+                self.audio_gains.set_output(gain);
+            }
+            FaderKind::Mic => {
+                let gain = unit * 2.0;
+                self.config.audio.input_gain = gain;
+                self.audio_gains.set_input(gain);
+            }
+            FaderKind::Balance => {
+                let mut balance = unit * 2.0 - 1.0;
+                if balance.abs() < 0.03 {
+                    balance = 0.0;
+                }
+                self.config.audio.balance = balance;
+                self.audio_gains.set_balance(balance);
+            }
         }
     }
 
@@ -3208,130 +3596,6 @@ impl TokiApp {
             font_ui(11.0, true),
             T::INK,
         );
-    }
-
-    fn paint_knob(
-        &mut self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        kind: KnobKind,
-    ) {
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-
-        // Click-drag adjusts the bound gain by the *horizontal* pixel
-        // delta of the pointer. Right increases, left decreases —
-        // matches the universal "slider" mental model and avoids the
-        // "which way around the knob am I rotating?" ambiguity of
-        // angle-based interaction. We previously rotated around the
-        // knob center; users found that twitchy near the rim and
-        // unintuitive near the dead-center.
-        //
-        // Sensitivity history (per-frame divisor in pixels):
-        //   8 px/unit  ≈ snappy software slider
-        //   250 px/unit ≈ current — a full 0→2.0 sweep takes ~500 px
-        //   of horizontal drag (about half a monitor-width), which feels
-        //   like a real, heavily-detented hardware pot: large gestures
-        //   for coarse moves, deliberate small motions for the 1–2%
-        //   nudges users actually want.
-        if resp.dragged() {
-            let dx = ui.input(|i| i.pointer.delta().x);
-            if dx != 0.0 {
-                let increment = dx / 250.0;
-                // All three knobs operate on a normalized [0..1] unit.
-                // Gains map unit→[0,2]; balance maps unit→[-1,1] so its
-                // detent is the 12 o'clock centre.
-                let current_unit = match kind {
-                    KnobKind::Mic => self.config.audio.input_gain / 2.0,
-                    KnobKind::Speaker => self.config.audio.output_gain / 2.0,
-                    KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
-                };
-                let new_unit = (current_unit + increment).clamp(0.0, 1.0);
-                match kind {
-                    KnobKind::Mic => {
-                        let gain = new_unit * 2.0;
-                        self.config.audio.input_gain = gain;
-                        // Mic gain is independent of mute (which
-                        // gates the *output* side) — apply
-                        // unconditionally.
-                        self.audio_gains.set_input(gain);
-                    }
-                    KnobKind::Speaker => {
-                        let gain = new_unit * 2.0;
-                        self.config.audio.output_gain = gain;
-                        if self.muted {
-                            // Stage the post-mute target — applying
-                            // now would punch through the mute.
-                            self.gain_before_mute = gain;
-                        } else {
-                            self.audio_gains.set_output(gain);
-                        }
-                    }
-                    KnobKind::Balance => {
-                        // Snap to dead-centre when within ~3% so the
-                        // user can reliably re-centre by dragging back.
-                        let mut balance = new_unit * 2.0 - 1.0;
-                        if balance.abs() < 0.03 {
-                            balance = 0.0;
-                        }
-                        self.config.audio.balance = balance;
-                        self.audio_gains.set_balance(balance);
-                    }
-                }
-            }
-        }
-        if resp.drag_stopped() {
-            self.config.save();
-        }
-
-        // Map the bound value → display unit [0..1]. Gains are [0,2];
-        // balance is [-1,1] (centre 0 → unit 0.5, so the indicator
-        // points straight up at dead-centre).
-        let v = match kind {
-            KnobKind::Mic => self.config.audio.input_gain / 2.0,
-            KnobKind::Speaker => self.config.audio.output_gain / 2.0,
-            KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
-        }
-        .clamp(0.0, 1.0);
-        let angle_deg = -135.0 + v * 270.0;
-        let angle = angle_deg.to_radians();
-
-        // Outer disc.
-        painter.circle_filled(rect.center(), T::KNOB_D / 2.0, T::SHELL_EDGE);
-        painter.circle_stroke(
-            rect.center(),
-            T::KNOB_D / 2.0,
-            Stroke::new(1.0, T::SHELL_BOTTOM),
-        );
-        // Inner disc.
-        painter.circle_filled(rect.center(), T::KNOB_D / 2.0 - 4.0, T::SHELL_TOP);
-
-        // Indicator line at top of inner disc, rotated to angle. The
-        // Speaker knob dims its indicator while muted — visual cue
-        // that the knob's value is staged but not currently audible.
-        let r_outer = T::KNOB_D / 2.0 - 6.0;
-        let r_inner = T::KNOB_D / 2.0 - 13.0;
-        let ind_color = match kind {
-            KnobKind::Speaker if self.muted => T::INK_MUTE,
-            _ => T::PRIMARY,
-        };
-        let cx = rect.center().x;
-        let cy = rect.center().y;
-        // The "top" before rotation is -π/2; angle is rotation from that.
-        let theta = angle - std::f32::consts::FRAC_PI_2;
-        let p_out = Pos2::new(cx + theta.cos() * r_outer, cy + theta.sin() * r_outer);
-        let p_in = Pos2::new(cx + theta.cos() * r_inner, cy + theta.sin() * r_inner);
-        // Soft halo behind the indicator + the indicator itself.
-        painter.line_segment(
-            [p_out, p_in],
-            Stroke::new(
-                3.5,
-                Color32::from_rgba_unmultiplied(ind_color.r(), ind_color.g(), ind_color.b(), 70),
-            ),
-        );
-        painter.line_segment([p_out, p_in], Stroke::new(2.0, ind_color));
-        // No tick marks around the rim — the indicator alone reads
-        // cleanly and avoids the "what do these dots mean?" question.
     }
 
     fn paint_ptt(
@@ -4158,5 +4422,34 @@ impl TokiApp {
             self.muted = true;
             self.audio_gains.set_output(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{balance_label, gain_pct};
+
+    #[test]
+    fn gain_pct_maps_unity_to_100() {
+        assert_eq!(gain_pct(0.0), 0);
+        assert_eq!(gain_pct(1.0), 100); // unity / passthrough
+        assert_eq!(gain_pct(2.0), 200); // max boost
+        assert_eq!(gain_pct(0.655), 66); // rounds
+                                         // Clamped to the 0..2 gain band.
+        assert_eq!(gain_pct(-0.5), 0);
+        assert_eq!(gain_pct(3.0), 200);
+    }
+
+    #[test]
+    fn balance_label_reads_centre_and_sides() {
+        assert_eq!(balance_label(0.0), "C");
+        // Within ~1% of centre still reads centred (the snap zone).
+        assert_eq!(balance_label(0.005), "C");
+        assert_eq!(balance_label(-0.005), "C");
+        // Off-centre → L/R + percent of full deflection.
+        assert_eq!(balance_label(-0.40), "L40");
+        assert_eq!(balance_label(0.30), "R30");
+        assert_eq!(balance_label(-1.0), "L100");
+        assert_eq!(balance_label(1.0), "R100");
     }
 }

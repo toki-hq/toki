@@ -464,18 +464,25 @@ enum AudioEncoder {
         /// Empty in steady state — the mic delivers exactly 480-sample
         /// frames — but tolerates odd-sized inputs without losing audio.
         buf: Vec<i16>,
+        /// DTX is on. When set, a frame the encoder collapses to a ≤2-byte
+        /// "no transmission" DTX indicator is **dropped** rather than sent
+        /// — that drop is what actually removes the packet (and its IP/UDP
+        /// overhead) during silence; the receiver fills the gap with PLC /
+        /// comfort noise, which the playback path already tolerates as loss.
+        dtx: bool,
     },
 }
 
 impl AudioEncoder {
-    fn new(opus_enabled: bool, bitrate: u32) -> Self {
+    fn new(opus_enabled: bool, bitrate: u32, dtx: bool) -> Self {
         if !opus_enabled {
             return Self::Pcm;
         }
-        match Self::make_opus(bitrate) {
+        match Self::make_opus(bitrate, dtx) {
             Ok(enc) => Self::Opus {
                 enc,
                 buf: Vec::with_capacity(OPUS_FRAME_SAMPLES * 2),
+                dtx,
             },
             Err(e) => {
                 warn!(error = %e, "Opus encoder init failed; falling back to raw PCM");
@@ -484,10 +491,30 @@ impl AudioEncoder {
         }
     }
 
-    fn make_opus(bitrate: u32) -> Result<audiopus::coder::Encoder, audiopus::Error> {
+    fn make_opus(bitrate: u32, dtx: bool) -> Result<audiopus::coder::Encoder, audiopus::Error> {
         use audiopus::{coder::Encoder, Application, Bitrate, Channels, SampleRate};
         let mut enc = Encoder::new(SampleRate::Hz48000, Channels::Mono, Application::Voip)?;
         enc.set_bitrate(Bitrate::BitsPerSecond(bitrate as i32))?;
+        if dtx {
+            // Enable Opus DTX. Two settings are required and order matters:
+            //
+            //  1. **VBR on.** DTX only drops/shrinks frames in variable-
+            //     bitrate mode — in the default CBR the encoder must hit
+            //     the target bitrate every frame, so silence still costs a
+            //     full ~24-byte frame and DTX is silently a no-op. (This is
+            //     the trap: setting DTX alone does nothing — measured.)
+            //  2. **DTX on**, via the raw CTL passthrough — `audiopus` 0.2
+            //     has no typed setter — with libopus's stable request code
+            //     OPUS_SET_DTX_REQUEST (4016).
+            //
+            // With both, silence collapses to a tiny comfort-noise frame
+            // every ~400 ms instead of 100 full frames/sec, cutting the
+            // talker's outbound — and the whole per-listener fan-out — for
+            // the silent fraction of a transmission.
+            enc.set_vbr(true)?;
+            const OPUS_SET_DTX_REQUEST: i32 = 4016;
+            enc.set_encoder_ctl_request(OPUS_SET_DTX_REQUEST, 1)?;
+        }
         Ok(enc)
     }
 
@@ -502,13 +529,20 @@ impl AudioEncoder {
                 }
                 vec![(VERSION_AUDIO_PCM, payload)]
             }
-            Self::Opus { enc, buf } => {
+            Self::Opus { enc, buf, dtx } => {
                 buf.extend_from_slice(samples);
                 let mut out = Vec::new();
                 while buf.len() >= OPUS_FRAME_SAMPLES {
                     let frame: Vec<i16> = buf.drain(..OPUS_FRAME_SAMPLES).collect();
                     let mut encoded = [0u8; MAX_OPUS_PAYLOAD];
                     match enc.encode(&frame, &mut encoded) {
+                        // With DTX, Opus signals "don't transmit" for a
+                        // silent frame by returning a ≤2-byte frame. Drop
+                        // it — not sending the packet is the whole point
+                        // (the receiver's decoder fills the gap). Without
+                        // DTX, frames are never this small, so the guard
+                        // only ever fires on real DTX indicators.
+                        Ok(n) if *dtx && n <= 2 => {}
                         Ok(n) => out.push((VERSION_AUDIO_OPUS, encoded[..n].to_vec())),
                         Err(e) => warn!(error = %e, "Opus encode failed, dropping frame"),
                     }
@@ -531,7 +565,9 @@ impl AudioEncoder {
     fn flush(&mut self) -> Vec<(u8, Vec<u8>)> {
         match self {
             Self::Pcm => Vec::new(),
-            Self::Opus { enc, buf } => {
+            // The flush frame carries the trailing speech tail, so it's
+            // always sent — DTX dropping doesn't apply here (`dtx` ignored).
+            Self::Opus { enc, buf, .. } => {
                 if buf.is_empty() {
                     return Vec::new();
                 }
@@ -724,6 +760,10 @@ impl Session {
         // per-packet regardless). Built into the encoder below.
         let opus_enabled = reg.opus_enabled;
         let opus_bitrate = reg.opus_bitrate;
+        // Whether to enable Opus DTX (silence → tiny comfort-noise frames,
+        // cutting outbound + the fan-out during gaps). Server-advertised;
+        // only meaningful with Opus on.
+        let opus_dtx = reg.opus_dtx;
         // Server must return exactly MAC_KEY_LEN bytes; treat any
         // other length as a protocol violation rather than silently
         // truncating / padding and producing useless MACs.
@@ -1294,7 +1334,7 @@ impl Session {
             cooldown_until: StdMutex::new(None),
             udp,
             signaling,
-            encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate)),
+            encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate, opus_dtx)),
             alive,
             self_muted,
             tasks: vec![
@@ -1881,7 +1921,7 @@ mod tests {
 
     #[test]
     fn pcm_encoder_emits_one_packet_per_frame() {
-        let mut enc = AudioEncoder::new(false, 0);
+        let mut enc = AudioEncoder::new(false, 0, false);
         let pkts = enc.push(&vec![0i16; 480]);
         assert_eq!(pkts.len(), 1);
         assert_eq!(pkts[0].0, VERSION_AUDIO_PCM);
@@ -1890,7 +1930,7 @@ mod tests {
 
     #[test]
     fn opus_emits_one_packet_per_10ms_frame_and_decodes() {
-        let mut enc = AudioEncoder::new(true, 24_000);
+        let mut enc = AudioEncoder::new(true, 24_000, false);
         // Each 10 ms (480-sample) mic frame yields exactly one Opus
         // packet — same cadence as the mic, no buffering.
         let pkts = enc.push(&vec![1000i16; 480]);
@@ -1910,9 +1950,118 @@ mod tests {
         assert_eq!(out.len(), OPUS_FRAME_SAMPLES);
     }
 
+    /// Egress benchmark: encode a realistic speech-with-silence stream
+    /// through the *real* Opus encoder with DTX off vs on, and report the
+    /// before/after bytes + the per-listener egress projection. Run with
+    /// `cargo test -p toki-client opus_dtx_egress -- --nocapture` to see
+    /// the numbers. The assertion is a regression guard (DTX must save a
+    /// meaningful fraction); the printout is the actual measurement.
+    #[test]
+    fn opus_dtx_egress_before_after() {
+        // Model one PTT transmission as a sequence of 10 ms frames:
+        // alternating ~600 ms voiced bursts and ~500 ms silent gaps —
+        // ~55% active, typical of push-to-talk speech with inter-sentence
+        // pauses. Voiced frames are a 300 Hz-band tone + light noise (Opus
+        // treats them as active); silent frames are digital zeros (which
+        // Opus's VAD reliably routes to DTX comfort-noise).
+        const VOICED_FRAMES: usize = 60; // 600 ms
+        const SILENT_FRAMES: usize = 50; // 500 ms
+        const CYCLES: usize = 10; // ~11 s of "talk"
+        let voiced = |phase: &mut f32| -> Vec<i16> {
+            let step = 2.0 * std::f32::consts::PI * 300.0 / 48_000.0;
+            (0..480)
+                .map(|i| {
+                    let s = (*phase).sin() * 6000.0;
+                    *phase += step;
+                    // a little deterministic noise so it isn't a pure tone
+                    let n = ((i as u32).wrapping_mul(2_654_435_761) >> 24) % 400;
+                    (s + n as f32) as i16
+                })
+                .collect()
+        };
+        let silent = vec![0i16; 480];
+
+        // Encode the same stream twice; sum the Opus payload bytes.
+        let run = |dtx: bool| -> (usize, usize) {
+            let mut enc = AudioEncoder::new(true, 24_000, dtx);
+            let mut phase = 0.0f32;
+            let (mut bytes, mut packets) = (0usize, 0usize);
+            for _ in 0..CYCLES {
+                for _ in 0..VOICED_FRAMES {
+                    for (_v, p) in enc.push(&voiced(&mut phase)) {
+                        bytes += p.len();
+                        packets += 1;
+                    }
+                }
+                for _ in 0..SILENT_FRAMES {
+                    for (_v, p) in enc.push(&silent) {
+                        bytes += p.len();
+                        packets += 1;
+                    }
+                }
+            }
+            (bytes, packets)
+        };
+
+        let (off_bytes, off_pkts) = run(false);
+        let (on_bytes, on_pkts) = run(true);
+
+        // On-wire size adds the S2C app header (HEADER_LEN_S2C = 25) plus
+        // ~28 bytes of IPv4+UDP overhead per packet. With DTX, packets the
+        // encoder *skips* during silence cost zero on the wire too.
+        const PER_PKT_OVERHEAD: usize = toki_proto::wire::HEADER_LEN_S2C + 28;
+        let on_wire = |bytes: usize, pkts: usize| bytes + pkts * PER_PKT_OVERHEAD;
+        let off_wire = on_wire(off_bytes, off_pkts);
+        let on_wire_b = on_wire(on_bytes, on_pkts);
+
+        let total_frames = CYCLES * (VOICED_FRAMES + SILENT_FRAMES);
+        let secs = total_frames as f64 / 100.0;
+        // Per-listener egress = on-wire bytes / stream duration.
+        let kbps = |w: usize| (w as f64 * 8.0) / secs / 1000.0;
+        let saving = 1.0 - (on_wire_b as f64 / off_wire as f64);
+
+        eprintln!("\n=== Opus DTX egress: before/after ===");
+        eprintln!(
+            "stream: {total_frames} frames ({secs:.1}s), {}% active",
+            (VOICED_FRAMES * 100) / (VOICED_FRAMES + SILENT_FRAMES)
+        );
+        eprintln!(
+            "DTX off: {off_pkts} pkts, {off_bytes} payload B, {off_wire} on-wire B  → {:.0} kbps/listener",
+            kbps(off_wire)
+        );
+        eprintln!(
+            "DTX on : {on_pkts} pkts, {on_bytes} payload B, {on_wire_b} on-wire B  → {:.0} kbps/listener",
+            kbps(on_wire_b)
+        );
+        eprintln!("egress reduction: {:.0}%", saving * 100.0);
+        eprintln!("per-room egress projection (1 talker, on-wire ×(N−1)):");
+        for n in [10usize, 50, 100] {
+            eprintln!(
+                "  N={n:3}: off {:6.0} kbps → on {:6.0} kbps",
+                kbps(off_wire) * (n - 1) as f64,
+                kbps(on_wire_b) * (n - 1) as f64
+            );
+        }
+        eprintln!();
+
+        // Regression guard: DTX must cut a clear chunk of egress on a
+        // half-silent stream. (Conservative bound — the measured figure is
+        // higher; real-mic silence saves somewhat less than digital zeros.)
+        assert!(
+            saving > 0.20,
+            "DTX saved only {:.0}% — expected >20% on a ~45%-silent stream",
+            saving * 100.0
+        );
+        // And DTX must skip packets during silence (the mechanism).
+        assert!(
+            on_pkts < off_pkts,
+            "DTX on emitted {on_pkts} pkts vs off {off_pkts} — DTX not engaging"
+        );
+    }
+
     #[test]
     fn opus_flush_emits_partial_tail_then_clears() {
-        let mut enc = AudioEncoder::new(true, 24_000);
+        let mut enc = AudioEncoder::new(true, 24_000, false);
         // A short, odd-sized frame leaves a partial remainder buffered.
         assert!(
             enc.push(&vec![1000i16; 200]).is_empty(),
@@ -1933,7 +2082,7 @@ mod tests {
 
     #[test]
     fn pcm_flush_is_a_noop() {
-        let mut enc = AudioEncoder::new(false, 0);
+        let mut enc = AudioEncoder::new(false, 0, false);
         assert!(enc.flush().is_empty(), "PCM carries no buffer to flush");
     }
 

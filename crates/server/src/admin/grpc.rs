@@ -216,6 +216,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         audio_quality: cfg.audio_quality,
         require_identity: cfg.require_identity,
         unique_callsigns: cfg.unique_callsigns,
+        opus_dtx: cfg.opus_dtx,
     }
 }
 
@@ -300,6 +301,7 @@ impl Admin for AdminApi {
                 audio_quality: body.audio_quality,
                 require_identity: body.require_identity,
                 unique_callsigns: body.unique_callsigns,
+                opus_dtx: body.opus_dtx,
             }
         };
         self.state
@@ -1824,6 +1826,7 @@ mod tests {
                     audio_quality: 2,
                     require_identity: false,
                     unique_callsigns: true,
+                    opus_dtx: true,
                 },
                 &token,
             ))

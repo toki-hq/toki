@@ -199,6 +199,11 @@ message ServerConfig {
   // refused. Case-insensitive. Off restores the legacy behaviour where
   // duplicate callsigns are allowed.
   bool unique_callsigns = 9;
+  // When on (the default), clients using Opus enable DTX (discontinuous
+  // transmission): silence is sent as tiny comfort-noise frames, cutting
+  // the talker's outbound and the whole fan-out during gaps. No effect on
+  // the raw-PCM path. Off only for debugging — DTX has no audible cost.
+  bool opus_dtx = 10;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -217,6 +222,8 @@ message UpdateServerConfigRequest {
   bool require_identity = 6;
   // Enforce unique callsigns (see ServerConfig.unique_callsigns).
   bool unique_callsigns = 7;
+  // Enable Opus DTX (see ServerConfig.opus_dtx).
+  bool opus_dtx = 8;
 }
 
 message SetServerPasswordRequest {

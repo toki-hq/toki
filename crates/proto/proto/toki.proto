@@ -147,6 +147,14 @@ message RegisterResponse {
   // lets the operator trade bandwidth for quality server-wide.
   bool opus_enabled = 5;
   uint32 opus_bitrate = 6;
+  // When true (and opus_enabled), the client turns on Opus DTX
+  // (discontinuous transmission): during silence the encoder emits tiny
+  // comfort-noise frames instead of full ~30-byte frames, which cuts the
+  // talker's outbound — and therefore the whole per-listener fan-out —
+  // for the silent fraction of a transmission. Decodes transparently on
+  // the existing path; no effect on the raw-PCM path. Advisory like the
+  // other codec fields.
+  bool opus_dtx = 7;
 }
 
 message JoinRequest {

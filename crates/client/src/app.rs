@@ -1506,15 +1506,14 @@ impl eframe::App for TokiApp {
         // is fine — it's a tiny form.
         if self.show_settings {
             let viewport_id = egui::ViewportId::from_hash_of("toki-settings");
-            // Sized for the tabbed layout: a touch wider so the sidebar
-            // plus the device-picker rows sit side-by-side without
-            // crowding, and a touch shorter since each tab is now a short
-            // page instead of one long scroll. Min width keeps the sidebar
-            // from squeezing the rows below usability.
+            // Fixed 640×640 for the tabbed layout: square gives the
+            // sidebar + device-picker rows room side-by-side and leaves
+            // each tab's page comfortable headroom. Min == initial so the
+            // window can't be shrunk into the sidebar crowding the rows.
             let builder = egui::ViewportBuilder::default()
                 .with_title("Toki — Settings")
-                .with_inner_size([520.0, 480.0])
-                .with_min_inner_size([440.0, 320.0]);
+                .with_inner_size([640.0, 640.0])
+                .with_min_inner_size([640.0, 640.0]);
             ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
                 // Each viewport carries its own font atlas — push the
                 // brand fonts on the first frame after open so the

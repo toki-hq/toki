@@ -23,7 +23,7 @@ use crate::audio::{
     BeepPreset,
 };
 use crate::config::{self, HotkeyBinding};
-use crate::dsp::DspParams;
+use crate::dsp::{DspParams, OutputDspParams};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -129,6 +129,10 @@ pub struct TokiApp {
     /// the runtime's mic loop reads them every frame, so flipping a
     /// Settings checkbox takes effect on the next 10 ms frame.
     dsp_params: DspParams,
+    /// Live atomics behind the playback "radio FX" dirtier. Read by the
+    /// runtime's UDP recv task per voice chunk, so the Settings toggle /
+    /// intensity slider take effect on the next chunk. Off by default.
+    output_dsp_params: OutputDspParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -304,12 +308,18 @@ impl TokiApp {
         // live with the runtime's mic loop (same arrangement as the
         // beep params above).
         let dsp_params = DspParams::new(config.audio.noise_suppression, config.audio.agc);
+        // Playback radio-FX atomics — seeded from the saved toggle +
+        // amount (off by default), shared live with the runtime's recv
+        // task (same arrangement as the capture DSP above).
+        let output_dsp_params =
+            OutputDspParams::new(config.audio.output_dirty, config.audio.output_dirty_amount);
         let cmd_tx = runtime::spawn(
             state.clone(),
             mic_rx,
             playback,
             beep_params.clone(),
             dsp_params.clone(),
+            output_dsp_params.clone(),
         );
 
         let initial = config.hotkey.to_input().or_else(|| {
@@ -371,6 +381,7 @@ impl TokiApp {
             audio_gains: gains,
             beep_params,
             dsp_params,
+            output_dsp_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
@@ -3778,6 +3789,40 @@ impl TokiApp {
                     .monospace()
                     .size(9.0),
             );
+        });
+
+        // Playback-side "radio FX" — the only output-direction effect in
+        // this section (the two above process the *outgoing* mic). It
+        // dirties *incoming* voice into a cheap-handheld sound and writes
+        // straight into the shared `OutputDspParams`, so the change lands
+        // on the next decoded voice chunk — no reconnect. Off by default;
+        // the intensity slider is disabled until it's switched on.
+        settings_row(ui, "RADIO FX", |ui| {
+            let mut v = self.config.audio.output_dirty;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.output_dirty = v;
+                self.output_dsp_params.set_enabled(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("dirties incoming voice: bandpass + drive + static")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "FX AMOUNT", |ui| {
+            let on = self.config.audio.output_dirty;
+            let mut v = self.config.audio.output_dirty_amount;
+            let resp = ui.add_enabled(on, egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+            ui.monospace(format!("{:>3.0}%", v * 100.0));
+            if resp.changed() {
+                self.config.audio.output_dirty_amount = v;
+                self.output_dsp_params.set_amount(v);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                self.config.save();
+            }
         });
 
         ui.add_space(14.0);

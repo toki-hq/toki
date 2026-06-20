@@ -382,6 +382,24 @@ mod tests {
     }
 
     #[test]
+    fn output_dirty_defaults_off_and_round_trips() {
+        // Absent keys (every pre-FX config) resolve to off, with a
+        // moderate amount waiting behind the toggle.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.audio.output_dirty);
+        assert_eq!(cfg.audio.output_dirty_amount, default_dirty_amount());
+        // An explicit on + amount survives a save/load round trip.
+        let raw = "[audio]\noutput_dirty = true\noutput_dirty_amount = 0.85\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.audio.output_dirty);
+        assert_eq!(cfg.audio.output_dirty_amount, 0.85);
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(back.audio.output_dirty);
+        assert_eq!(back.audio.output_dirty_amount, 0.85);
+    }
+
+    #[test]
     fn freq_hotkeys_round_trip() {
         use crate::hotkey::Input;
         let mut hk = HotkeyConfig::default();
@@ -583,6 +601,19 @@ pub struct AudioConfig {
     /// rationale (and same Settings toggle) as `noise_suppression`.
     #[serde(default = "default_true")]
     pub agc: bool,
+    /// Playback-side "radio FX" dirtying (band-pass + saturation +
+    /// static) applied to incoming voice — see `crate::dsp::OutputDsp`.
+    /// Default **off**: it's a deliberate flavour effect, not something
+    /// to impose on a fresh install (the bare `#[serde(default)]` gives
+    /// `false`, so every pre-existing config also stays clean).
+    #[serde(default)]
+    pub output_dirty: bool,
+    /// How hard the radio FX dirties, `[0.0, 1.0]`. Only meaningful when
+    /// `output_dirty` is on. Defaults to a moderate setting so flipping
+    /// the toggle with no prior value is audibly "a radio" rather than
+    /// either subtle or extreme.
+    #[serde(default = "default_dirty_amount")]
+    pub output_dirty_amount: f32,
 }
 
 fn default_gain() -> f32 {
@@ -591,6 +622,10 @@ fn default_gain() -> f32 {
 
 fn default_balance() -> f32 {
     0.0
+}
+
+fn default_dirty_amount() -> f32 {
+    0.6
 }
 
 impl Default for AudioConfig {
@@ -603,6 +638,8 @@ impl Default for AudioConfig {
             balance: 0.0,
             noise_suppression: true,
             agc: true,
+            output_dirty: false,
+            output_dirty_amount: default_dirty_amount(),
         }
     }
 }

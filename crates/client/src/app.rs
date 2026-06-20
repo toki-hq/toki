@@ -1557,7 +1557,12 @@ impl eframe::App for TokiApp {
         }
 
         // ── TX timer ────────────────────────────────────────────────
-        if matches!(st, RadioState::Tx) {
+        // The 30 s cap applies to a normal transmission only. A global
+        // broadcast is governed by the operator holding the dedicated
+        // broadcast key (released via the broadcast path, not Cmd::PttUp),
+        // and an all-hands announcement shouldn't be force-cut at the
+        // per-transmission cap — so skip the timer while broadcasting.
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             if self.tx_start.is_none() {
                 self.tx_start = Some(Instant::now());
             }
@@ -2684,28 +2689,51 @@ impl TokiApp {
                 );
             }
             RadioState::Tx => {
-                glow_text(
-                    painter,
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "● TRANSMITTING",
-                    font_mono(10.0),
-                    T::TX,
-                    T::TX_GLOW,
-                    0.6,
-                );
-                let remaining = self
-                    .tx_start
-                    .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
-                    .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
-                    .max(0.0);
-                painter.text(
-                    Pos2::new(right_x, status_y),
-                    Align2::RIGHT_CENTER,
-                    format!("{:.1}s LEFT", remaining),
-                    font_mono(10.0),
-                    T::TX,
-                );
+                // When *we* are the global broadcaster, show the broadcast
+                // identity (light blue "BROADCASTING TO ALL") instead of the
+                // normal amber transmit label, matching what listeners see.
+                if snap.broadcast_active {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 BROADCASTING",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        0.6,
+                    );
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        "ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "● TRANSMITTING",
+                        font_mono(10.0),
+                        T::TX,
+                        T::TX_GLOW,
+                        0.6,
+                    );
+                    let remaining = self
+                        .tx_start
+                        .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
+                        .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
+                        .max(0.0);
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.1}s LEFT", remaining),
+                        font_mono(10.0),
+                        T::TX,
+                    );
+                }
             }
             RadioState::Rx => {
                 let peer_label = if snap.holder_name.is_empty() {
@@ -3724,6 +3752,18 @@ impl TokiApp {
             )
         } else {
             match st {
+                // We are the global broadcaster: light-blue "BROADCASTING"
+                // with the broadcast glow, so our own button matches the
+                // fleet-wide cue listeners see instead of the amber TX look.
+                RadioState::Tx if snap.broadcast_active => (
+                    T::PTT_TX_TOP,
+                    T::PTT_TX_BOTTOM,
+                    "BROADCASTING",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    1.4,
+                ),
                 RadioState::Tx => (
                     T::PTT_TX_TOP,
                     T::PTT_TX_BOTTOM,

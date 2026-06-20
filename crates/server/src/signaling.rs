@@ -1349,12 +1349,16 @@ impl Signaling for SignalingSvc {
                                 cut_holders.push((holder_id, room_txs));
                             }
 
-                            // Collect ALL clients' event senders except the
-                            // broadcaster (they receive the broadcast-start PTT).
+                            // Collect ALL clients' event senders INCLUDING the
+                            // broadcaster. The broadcaster must receive their own
+                            // broadcast-start PttEvent so their client opens the
+                            // mic gate (the gate keys on receiving a PttEvent for
+                            // self — same as normal PTT) and shows the broadcast
+                            // indicator. Without this the broadcaster transmits
+                            // nothing and sees nothing.
                             let all_txs: Vec<mpsc::Sender<Event>> = registry
                                 .clients
                                 .iter()
-                                .filter(|(id, _)| *id != &evt.client_id)
                                 .filter_map(|(_, c)| c.events_tx.clone())
                                 .collect();
 
@@ -1368,10 +1372,13 @@ impl Signaling for SignalingSvc {
                         // Release: only the active broadcaster can release.
                         if registry.broadcast_active.as_deref() == Some(evt.client_id.as_str()) {
                             registry.broadcast_active = None;
+                            // Include the broadcaster: they need their own
+                            // broadcast-end PttEvent to close the mic gate and
+                            // clear their broadcast indicator (symmetric with the
+                            // Begin arm above).
                             let all_txs: Vec<mpsc::Sender<Event>> = registry
                                 .clients
                                 .iter()
-                                .filter(|(id, _)| *id != &evt.client_id)
                                 .filter_map(|(_, c)| c.events_tx.clone())
                                 .collect();
                             BroadcastWork::End {

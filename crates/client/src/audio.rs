@@ -53,6 +53,14 @@ pub type PlaybackBuf = Arc<Mutex<VecDeque<i16>>>;
 pub struct AudioHandle {
     pub mic_rx: UnboundedReceiver<Vec<i16>>,
     pub playback: PlaybackBuf,
+    /// A *second* playback ring for locally-generated effect audio —
+    /// roger beeps, priority/preempt cues, the output test tone. Mixed
+    /// into the output alongside `playback`, but kept separate so the
+    /// voice path's latency catch-up (`push_voice`, which trims the voice
+    /// ring to bound mouth-to-ear delay) can never discard a beep that's
+    /// mid-playback. Fed via [`push_playback`]; voice uses [`push_voice`]
+    /// on `playback`.
+    pub effects: PlaybackBuf,
     /// Device names visible to cpal at startup. We don't auto-refresh —
     /// the user can restart the app if they hot-plug new hardware.
     pub devices: AudioDevices,
@@ -617,6 +625,12 @@ pub fn spawn(
     let playback: PlaybackBuf = Arc::new(Mutex::new(VecDeque::with_capacity(
         SAMPLE_RATE_HZ as usize / 2,
     )));
+    // Effects ring (beeps / cues / test tone). Same ~500 ms pre-size as
+    // the voice ring; mixed into the output but never touched by the
+    // voice latency catch-up.
+    let effects: PlaybackBuf = Arc::new(Mutex::new(VecDeque::with_capacity(
+        SAMPLE_RATE_HZ as usize / 2,
+    )));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AudioCmd>();
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
@@ -627,6 +641,7 @@ pub fn spawn(
 
     let mic_tx_for_thread = mic_tx;
     let playback_for_thread = playback.clone();
+    let effects_for_thread = effects.clone();
     let in_gain_for_thread = gains.input_atomic();
     let out_gain_for_thread = gains.output_atomic();
     let out_balance_for_thread = gains.balance_atomic();
@@ -653,6 +668,7 @@ pub fn spawn(
                 &host,
                 initial_output.as_deref(),
                 &playback_for_thread,
+                &effects_for_thread,
                 &out_gain_for_thread,
                 &out_balance_for_thread,
                 &out_level_for_thread,
@@ -685,6 +701,7 @@ pub fn spawn(
                             &host,
                             name.as_deref(),
                             &playback_for_thread,
+                            &effects_for_thread,
                             &out_gain_for_thread,
                             &out_balance_for_thread,
                             &out_level_for_thread,
@@ -705,6 +722,7 @@ pub fn spawn(
     Ok(AudioHandle {
         mic_rx,
         playback,
+        effects,
         devices,
         control: AudioControl { tx: cmd_tx },
         gains,
@@ -794,6 +812,7 @@ fn open_output_for(
     host: &cpal::Host,
     name: Option<&str>,
     playback: &PlaybackBuf,
+    effects: &PlaybackBuf,
     gain: &Arc<AtomicU32>,
     balance: &Arc<AtomicU32>,
     level: &Arc<AtomicU32>,
@@ -804,6 +823,7 @@ fn open_output_for(
     let stream = match open_output(
         &device,
         playback.clone(),
+        effects.clone(),
         gain.clone(),
         balance.clone(),
         level.clone(),
@@ -914,9 +934,11 @@ fn open_input(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_output(
     dev: &cpal::Device,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     gain: Arc<AtomicU32>,
     balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
@@ -927,6 +949,7 @@ fn open_output(
         &PREFERRED_OUTPUT,
         2,
         playback.clone(),
+        effects.clone(),
         gain.clone(),
         balance.clone(),
         level.clone(),
@@ -954,13 +977,13 @@ fn open_output(
 
     match format {
         cpal::SampleFormat::F32 => build_output_stream::<f32>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         cpal::SampleFormat::I16 => build_output_stream::<i16>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         cpal::SampleFormat::U16 => build_output_stream::<u16>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
     }
@@ -1113,12 +1136,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn build_output_stream<T>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,
     channels: u16,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     gain: Arc<AtomicU32>,
     balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
@@ -1132,11 +1155,18 @@ where
     // The playback ring stores wire-rate (48 kHz) samples; we resample
     // to the device's native rate as we drain. Mirror of the input
     // path — keeps the ring's 10-ms-per-480-samples timing intact and
-    // device-rate concerns isolated to the callback.
+    // device-rate concerns isolated to the callback. The effects ring
+    // (beeps / cues / test tone) is drained + resampled the same way by a
+    // parallel set of buffers, then summed into the voice stream so the
+    // two mix at the output. Each ring carries its own resampler state
+    // since they fill independently.
     let mut resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
+    let mut fx_resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
     let mut wire_chunk: Vec<i16> = Vec::with_capacity(512);
     let mut resampled: Vec<i16> = Vec::with_capacity(1024);
     let mut ready: std::collections::VecDeque<i16> =
+        std::collections::VecDeque::with_capacity(4096);
+    let mut fx_ready: std::collections::VecDeque<i16> =
         std::collections::VecDeque::with_capacity(4096);
     // Hoisted so we don't reallocate inside the audio-thread callback
     // every ~10 ms. Same trick the input builder uses.
@@ -1157,39 +1187,50 @@ where
             let stereo = ch == 2;
             let frames_needed = data.len() / ch;
 
-            // Refill `ready` from the wire-rate playback ring, resampling
-            // as we go. We pull chunks rather than one sample at a time
-            // so the resampler's per-call fixed costs amortize well.
-            while ready.len() < frames_needed {
-                wire_chunk.clear();
-                {
-                    let mut buf = playback.lock().unwrap();
-                    for _ in 0..256 {
-                        if let Some(s) = buf.pop_front() {
-                            wire_chunk.push(s);
-                        } else {
-                            break;
+            // Refill `ready` (voice) and `fx_ready` (effects) from their
+            // wire-rate rings, resampling as we go. We pull chunks rather
+            // than one sample at a time so the resampler's per-call fixed
+            // costs amortize well. `refill_from` drains one ring through
+            // one resampler into one ready-queue.
+            let mut refill_from =
+                |ring: &PlaybackBuf,
+                 rs: &mut LinearResampler,
+                 out: &mut std::collections::VecDeque<i16>| {
+                    while out.len() < frames_needed {
+                        wire_chunk.clear();
+                        {
+                            let mut buf = ring.lock().unwrap();
+                            for _ in 0..256 {
+                                if let Some(s) = buf.pop_front() {
+                                    wire_chunk.push(s);
+                                } else {
+                                    break;
+                                }
+                            }
                         }
+                        if wire_chunk.is_empty() {
+                            break; // ring is dry; the mix pads with silence
+                        }
+                        resampled.clear();
+                        rs.process(&wire_chunk, &mut resampled);
+                        out.extend(resampled.iter().copied());
                     }
-                }
-                if wire_chunk.is_empty() {
-                    break; // ring is dry, callback will pad with silence
-                }
-                resampled.clear();
-                resampler.process(&wire_chunk, &mut resampled);
-                ready.extend(resampled.iter().copied());
-            }
+                };
+            refill_from(&playback, &mut resampler, &mut ready);
+            refill_from(&effects, &mut fx_resampler, &mut fx_ready);
 
-            // Pop one mono sample, replicate it across N output channels.
-            // Track the |max| f32 amplitude we wrote so the UI can
-            // render a real waveform during RX. Empty pops contribute
-            // 0 to the peak, so silence decays naturally via
-            // `blend_level`. Same loop also fills the spectrum ring
-            // with the post-gain mono `f32`s.
+            // Pop one voice + one effect sample, sum them (a beep mixed
+            // over incoming voice), replicate across N output channels.
+            // Track the |max| f32 amplitude we wrote so the UI can render
+            // a real waveform during RX. Empty pops contribute 0, so
+            // silence decays naturally via `blend_level`. Same loop also
+            // fills the spectrum ring with the post-gain mono `f32`s.
             let mut peak: f32 = 0.0;
             spec_samples.clear();
             for frame in data.chunks_mut(ch) {
-                let mono = ready.pop_front().unwrap_or(0);
+                let voice = ready.pop_front().unwrap_or(0) as i32;
+                let fx = fx_ready.pop_front().unwrap_or(0) as i32;
+                let mono = (voice + fx).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 let f = ((mono as f32 / i16::MAX as f32) * g).clamp(-1.0, 1.0);
                 let abs = f.abs();
                 if abs > peak {
@@ -1438,6 +1479,29 @@ mod beep_tests {
         let guard = buf.lock().unwrap();
         assert_eq!(guard.len(), VOICE_TARGET_SAMPLES);
         assert_eq!(*guard.back().unwrap(), 2, "freshest sample retained");
+    }
+
+    #[test]
+    fn effects_ring_survives_voice_catch_up() {
+        // The roger-beep bug: a 500 ms beep lives ~10× longer than the
+        // voice ring's 120 ms catch-up cap, so when voice flowed right
+        // after a take/clear event, `push_voice`'s trim wiped the beep
+        // before it played. The fix routes beeps to a *separate* ring;
+        // this pins the guarantee that voice trimming never touches it.
+        let effects: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        let voice: PlaybackBuf = Arc::new(Mutex::new(VecDeque::new()));
+        // A full 500 ms beep on the effects ring.
+        let beep_len = (SAMPLE_RATE_HZ / 2) as usize;
+        push_playback(&effects, &vec![9i16; beep_len]);
+        // Now slam voice past its hard ceiling, which trims the *voice*
+        // ring hard.
+        push_voice(&voice, &vec![3i16; VOICE_MAX_SAMPLES + 8000]);
+        // The voice ring snapped back to its target; the beep is fully
+        // intact and unchanged on its own ring.
+        assert_eq!(voice.lock().unwrap().len(), VOICE_TARGET_SAMPLES);
+        let fx = effects.lock().unwrap();
+        assert_eq!(fx.len(), beep_len, "beep must not be trimmed by voice");
+        assert!(fx.iter().all(|&s| s == 9), "beep samples unchanged");
     }
 
     #[test]

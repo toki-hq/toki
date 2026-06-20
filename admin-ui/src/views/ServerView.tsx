@@ -97,6 +97,7 @@ function RuntimeConfig() {
   const [requireIdentity, setRequireIdentity] = useState(false);
   const [uniqueCallsigns, setUniqueCallsigns] = useState(true);
   const [audioQuality, setAudioQuality] = useState(2);
+  const [opusDtx, setOpusDtx] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -111,6 +112,7 @@ function RuntimeConfig() {
         setRequireIdentity(c.requireIdentity);
         setUniqueCallsigns(c.uniqueCallsigns);
         setAudioQuality(c.audioQuality);
+        setOpusDtx(c.opusDtx);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
   }, []);
@@ -123,7 +125,8 @@ function RuntimeConfig() {
       namedChannels !== cfg.namedChannelsEnabled ||
       requireIdentity !== cfg.requireIdentity ||
       uniqueCallsigns !== cfg.uniqueCallsigns ||
-      audioQuality !== cfg.audioQuality);
+      audioQuality !== cfg.audioQuality ||
+      opusDtx !== cfg.opusDtx);
 
   async function save() {
     setBusy(true);
@@ -136,6 +139,7 @@ function RuntimeConfig() {
         requireIdentity,
         uniqueCallsigns,
         audioQuality,
+        opusDtx,
       });
       setCfg(updated);
       toast.success("Server config saved");
@@ -242,6 +246,21 @@ function RuntimeConfig() {
               ? "Raw PCM — no compression (~768 kbps/stream)."
               : `Opus ~${audioQuality === 1 ? 16 : audioQuality === 3 ? 32 : 24} kbps — applied to clients on their next connect.`}
           </span>
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Opus DTX (silence suppression)</span>
+            <span className="text-xs text-muted-foreground">
+              Stop sending during silence — cuts relay egress, which scales with listeners per
+              frequency. No effect on Raw PCM. Leave on unless debugging.
+            </span>
+          </div>
+          <Switch
+            checked={opusDtx}
+            onCheckedChange={setOpusDtx}
+            disabled={audioQuality === 0}
+            aria-label="Toggle Opus DTX"
+          />
         </div>
         <Button className="mt-1 self-start" disabled={!dirty || busy} onClick={() => void save()}>
           {busy ? "Saving…" : "Save"}

@@ -112,6 +112,16 @@ pub struct ServerConfig {
     /// connected* sessions — a name frees up the moment its holder
     /// disconnects.
     pub unique_callsigns: bool,
+
+    /// When `true` (the default), clients that use Opus enable **DTX**
+    /// (discontinuous transmission): during silence the encoder sends
+    /// tiny comfort-noise frames instead of full ~30-byte frames, which
+    /// cuts the talker's outbound — and therefore the entire per-listener
+    /// fan-out (egress scales with room size) — for the silent fraction
+    /// of a transmission. Advertised to the client in `RegisterResponse`;
+    /// no effect on the raw-PCM path. `false` only for debugging — DTX
+    /// has no audible cost on a half-duplex PTT channel.
+    pub opus_dtx: bool,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -148,6 +158,10 @@ impl Default for ServerConfig {
             // behaviour ("there's only one ECHO-1"). Operators who want
             // duplicates can turn it off.
             unique_callsigns: true,
+            // On by default: DTX is a pure bandwidth win on a PTT channel
+            // (only affects silence, decodes transparently), so a fresh
+            // deployment gets the reduced fan-out for free.
+            opus_dtx: true,
         }
     }
 }
@@ -215,6 +229,7 @@ mod tests {
             audio_quality: 3,
             require_identity: true,
             unique_callsigns: false,
+            opus_dtx: false,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));

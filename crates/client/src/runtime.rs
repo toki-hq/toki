@@ -34,7 +34,7 @@ use toki_proto::wire::{
 };
 
 use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
-use crate::dsp::{Dsp, DspParams};
+use crate::dsp::{Dsp, DspParams, MonitorParams, OutputDsp, OutputDspParams};
 use crate::state::{ConnState, SharedState};
 use crate::telemetry::QualityTracker;
 
@@ -100,12 +100,15 @@ pub enum BeepKind {
 /// Spawn the runtime thread and return the command channel. The caller
 /// has already spawned the audio thread; we just receive the mic frames
 /// and write into the playback ring as voice arrives.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn(
     state: SharedState,
     mic_rx: UnboundedReceiver<Vec<i16>>,
     playback: PlaybackBuf,
     beeps: BeepParams,
     dsp_params: DspParams,
+    output_dsp_params: OutputDspParams,
+    monitor_params: MonitorParams,
 ) -> UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
@@ -124,12 +127,22 @@ pub fn spawn(
                     return;
                 }
             };
-            rt.block_on(run(cmd_rx, state, mic_rx, playback, beeps, dsp_params));
+            rt.block_on(run(
+                cmd_rx,
+                state,
+                mic_rx,
+                playback,
+                beeps,
+                dsp_params,
+                output_dsp_params,
+                monitor_params,
+            ));
         })
         .expect("spawn runtime thread");
     cmd_tx
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run(
     mut cmd_rx: UnboundedReceiver<Cmd>,
     state: SharedState,
@@ -137,6 +150,8 @@ async fn run(
     playback: PlaybackBuf,
     beeps: BeepParams,
     dsp_params: DspParams,
+    output_dsp_params: OutputDspParams,
+    monitor_params: MonitorParams,
 ) {
     let mut session: Option<Session> = None;
     // Capture-side DSP (noise suppression + AGC), applied to every mic
@@ -146,6 +161,15 @@ async fn run(
     // Toggles arrive live through `dsp_params`; with both stages off,
     // `process` is a bit-exact passthrough.
     let mut dsp = Dsp::new(dsp_params);
+    // A *second* radio-FX dirtier, private to the self-monitor path, so
+    // monitoring previews the full chain a peer hears — capture DSP *and*
+    // the playback Radio FX. It reads the same `OutputDspParams` atoms as
+    // the recv task's instance (one toggle drives both) but keeps its own
+    // filter / noise / envelope state: the two process different streams
+    // (your mic vs incoming voice) and must not share continuity. Off by
+    // default like the recv-side one, so it's a passthrough until the
+    // user turns Radio FX on.
+    let mut monitor_fx = OutputDsp::new(output_dsp_params.clone());
     // Tracks the confirmed-talking state across mic frames so we can
     // detect the talk→silent edge (PTT release) and flush the encoder's
     // trailing partial frame exactly once. The mic stream runs
@@ -161,14 +185,64 @@ async fn run(
                 // (e.g. Cmd::Shutdown). We break out of the select loop
                 // then so the runtime thread can exit promptly rather
                 // than sit waiting on a dead UI.
-                if !handle_cmd(cmd, &mut session, &state, &playback, &beeps).await {
+                if !handle_cmd(
+                    cmd,
+                    &mut session,
+                    &state,
+                    &playback,
+                    &beeps,
+                    &output_dsp_params,
+                )
+                .await
+                {
                     break;
                 }
             }
             frame = mic_rx.recv() => {
                 let Some(mut frame) = frame else { break; };
-                if let Some(s) = &session {
+                let monitoring = monitor_params.enabled();
+                // Run the capture DSP whenever a session is live *or* the
+                // self-monitor is on. Keeping it running while monitoring
+                // — even in raw mode — keeps the denoiser RNN / AGC gain
+                // warm, so flipping the monitor's RAW↔PROCESSED toggle is
+                // an instant A/B instead of a half-second of the AGC
+                // re-settling. With both stages off, `process` is a
+                // bit-exact passthrough, so this costs nothing then.
+                let want_dsp = session.is_some() || monitoring;
+                // Snapshot the raw mic *before* DSP only when the monitor
+                // is in RAW mode — that's the buffer it'll loop back. The
+                // common connected-not-monitoring path skips the clone and
+                // keeps its zero-copy in-place processing.
+                let monitor_raw = if monitoring && !monitor_params.processed() {
+                    Some(frame.clone())
+                } else {
+                    None
+                };
+                if want_dsp {
                     dsp.process(&mut frame);
+                }
+
+                // Self-monitor (sidetone): loop our own mic to the
+                // speakers so the operator can hear themselves and audibly
+                // confirm the chain. Works with no session — a local test
+                // path. We preview the *full* outgoing-to-peer chain:
+                //   RAW       → mic → (Radio FX)
+                //   PROCESSED → mic → capture DSP → (Radio FX)
+                // so Radio FX is heard here too when it's on (its recv-task
+                // instance only colours *incoming* network voice). We dirty
+                // an owned copy, never `frame` itself — `frame` still goes
+                // to peers untouched, and applying our local Radio FX to it
+                // would wrongly pre-dirty their audio. push_voice keeps the
+                // sidetone backlog tight like incoming voice.
+                if monitoring {
+                    // RAW reuses the pre-DSP snapshot; PROCESSED copies the
+                    // post-DSP frame so the peer-bound `frame` stays clean.
+                    let mut monitor_buf = monitor_raw.unwrap_or_else(|| frame.clone());
+                    monitor_fx.process(&mut monitor_buf);
+                    push_voice(&playback, &monitor_buf);
+                }
+
+                if let Some(s) = &session {
                     // Server-side mute is a hard local gate: even if a PTT
                     // grant is somehow still set, a muted session uploads
                     // nothing (the relay would drop it anyway). The
@@ -202,6 +276,7 @@ async fn handle_cmd(
     state: &SharedState,
     playback: &PlaybackBuf,
     beeps: &BeepParams,
+    output_dsp_params: &OutputDspParams,
 ) -> bool {
     match cmd {
         Cmd::Connect {
@@ -239,6 +314,7 @@ async fn handle_cmd(
                 state.clone(),
                 playback.clone(),
                 beeps.clone(),
+                output_dsp_params.clone(),
             )
             .await
             {
@@ -521,6 +597,7 @@ struct Session {
 }
 
 impl Session {
+    #[allow(clippy::too_many_arguments)]
     async fn open(
         server: &str,
         display_name: &str,
@@ -529,6 +606,7 @@ impl Session {
         state: SharedState,
         playback: PlaybackBuf,
         beeps: BeepParams,
+        output_dsp_params: OutputDspParams,
     ) -> Result<Self> {
         // gRPC is always TLS. Any URL scheme other than https:// is
         // rewritten so plaintext can't sneak back in via a stale
@@ -1042,6 +1120,12 @@ impl Session {
         let (mut quality, quality_handle) = QualityTracker::new();
         let udp_for_recv = udp.clone();
         let key_for_recv = audio_mac_key;
+        // Playback "radio FX" dirtier, owned by this task so its filter /
+        // noise / envelope state runs continuously across voice chunks.
+        // Reads its toggle + amount live from the shared atoms, so a
+        // Settings change lands on the next decoded chunk. Off by default,
+        // in which case `process` is a passthrough.
+        let mut output_dsp = OutputDsp::new(output_dsp_params);
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_AUDIO_PACKET];
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_for_recv));
@@ -1111,7 +1195,7 @@ impl Session {
                         }
 
                         // Decode per the codec the sender used.
-                        let samples = match version {
+                        let mut samples = match version {
                             VERSION_AUDIO_PCM => pcm_from_bytes(&plaintext),
                             VERSION_AUDIO_OPUS => decode_opus(&mut decoder, &plaintext),
                             other => {
@@ -1123,6 +1207,13 @@ impl Session {
                         // S2C counter (loss = gaps) and arrived now
                         // (jitter = spacing deviation).
                         quality.on_audio(seq, Instant::now());
+                        // Optionally dirty incoming voice into walkie-talkie
+                        // character (band-pass + saturation + static). A
+                        // passthrough when the effect is toggled off — which
+                        // it is by default. Applied here, on voice only, so
+                        // locally-generated roger beeps / the test tone
+                        // (which take the push_playback path) stay clean.
+                        output_dsp.process(&mut samples);
                         // Latency-managed: keeps the voice backlog tight
                         // so playback can't fall progressively behind.
                         push_voice(&playback, &samples);

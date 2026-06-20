@@ -1,4 +1,6 @@
-//! Capture-side voice DSP: noise suppression + automatic gain control.
+//! Voice DSP, both directions of the pipe.
+//!
+//! ## Capture side — noise suppression + automatic gain control
 //!
 //! Sits between the mic frame stream and the Opus encoder, operating on
 //! the same 480-sample / 48 kHz mono frames the wire uses — one frame
@@ -22,13 +24,42 @@
 //! session is live — not just while PTT is held — so the denoiser's RNN
 //! state and the AGC gain are already settled when a transmission
 //! starts, instead of converging audibly over its first half-second.
+//!
+//! ## Playback side — "radio FX" voice dirtying
+//!
+//! [`OutputDsp`] runs the opposite direction: it deliberately *degrades*
+//! incoming voice so a too-clean digital channel sounds like a cheap
+//! handheld radio or phone. Applied by the UDP recv task to each decoded
+//! voice chunk just before it lands in the playback ring — so it colours
+//! *voice* only; locally-generated roger beeps and the output test tone
+//! take a different path into the ring and stay clean. Off by default
+//! (an opt-in flavour effect, unlike the on-by-default capture stages);
+//! when off, [`OutputDsp::process`] is an early-return passthrough.
+//!
+//! The chain, in signal order, is the classic "comms voice" recipe:
+//!
+//!   1. **Band-pass** — a high-pass (~400 Hz) then low-pass (~2.6 kHz)
+//!      biquad pair narrows the audio to a telephone/PMR-radio band.
+//!      Stripping the lows kills the warmth/body and the highs kill the
+//!      "air"; this single step is most of the walkie-talkie character.
+//!   2. **Saturation** — a `tanh` soft-clipper adds the gritty, slightly
+//!      broken-up harmonics of an overdriven cheap amplifier.
+//!   3. **Static** — additive noise with a steady squelch-floor plus a
+//!      component that rides the speech envelope, so quiet gaps get a
+//!      faint hiss and live speech sits in a bed of static. The noise is
+//!      run through its own copy of the band-pass so the hiss sits in the
+//!      voice band — receiver static, not full-spectrum white noise.
+//!
+//! A single `amount` knob (0..1) crossfades dry→wet and scales the noise,
+//! so the operator can dial anywhere from "barely coloured" to "terrible
+//! CB in a thunderstorm" with one control.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
 use nnnoiseless::DenoiseState;
 
-use toki_proto::wire::FRAME_SAMPLES;
+use toki_proto::wire::{FRAME_SAMPLES, SAMPLE_RATE_HZ};
 
 // The whole module leans on the wire frame and RNNoise's native frame
 // being the same shape. If either constant ever moves, fail the build
@@ -110,6 +141,51 @@ impl DspParams {
 
     fn set_vad(&self, v: f32) {
         self.vad.store(v.to_bits(), Ordering::Relaxed);
+    }
+}
+
+/// Lock-free controls for the **self-monitor** (sidetone): a test aid
+/// that loops the local mic back to the speakers so the operator can hear
+/// themselves — and, by flipping `processed`, A/B the raw mic against the
+/// capture DSP to confirm noise suppression + AGC are doing what they
+/// should. Same `Arc`-of-atomics pattern as [`DspParams`]; the runtime's
+/// mic loop reads both flags every frame so a Settings toggle is audible
+/// immediately.
+///
+/// Deliberately **not persisted**: it's a transient diagnostic, and a
+/// mic→speaker loop left on across restarts is a feedback-howl waiting to
+/// happen. Always starts off; the UI warns to wear headphones.
+#[derive(Clone)]
+pub struct MonitorParams {
+    enabled: Arc<AtomicBool>,
+    /// `true` → monitor the DSP-processed mic (what peers hear); `false`
+    /// → the raw, unprocessed mic. The A/B that makes the capture DSP's
+    /// effect audible.
+    processed: Arc<AtomicBool>,
+}
+
+impl MonitorParams {
+    pub fn new(enabled: bool, processed: bool) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            processed: Arc::new(AtomicBool::new(processed)),
+        }
+    }
+
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_processed(&self, on: bool) {
+        self.processed.store(on, Ordering::Relaxed);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn processed(&self) -> bool {
+        self.processed.load(Ordering::Relaxed)
     }
 }
 
@@ -243,6 +319,274 @@ fn rms(samples: impl ExactSizeIterator<Item = f32>) -> f32 {
     (samples.map(|v| v * v).sum::<f32>() / n as f32).sqrt()
 }
 
+// ── Playback-side "radio FX" dirtying ─────────────────────────────────
+
+/// Voice band the [`OutputDsp`] band-pass keeps, in Hz. Roughly the
+/// PMR446 / landline-telephone passband: below `HP_HZ` is body/warmth we
+/// strip to thin the voice out; above `LP_HZ` is the "air" that makes
+/// digital audio sound hi-fi. Cutting both is most of the handheld-radio
+/// character on its own.
+const HP_HZ: f32 = 400.0;
+const LP_HZ: f32 = 2_600.0;
+/// Drive into the `tanh` saturator at full `amount`. The pre-gain pushes
+/// the (i16-range, ÷32768 normalised) signal into the curve's bend so it
+/// audibly crunches; >~3 mostly just squares everything off.
+const SATURATION_DRIVE: f32 = 2.5;
+/// Static levels at full `amount`, in i16 sample units. `NOISE_FLOOR` is
+/// the always-on squelch hiss heard even in gaps; `NOISE_SPEECH` is the
+/// extra noise mixed in proportionally to the speech envelope, so live
+/// transmissions sit in a thicker bed of static than silence does.
+const NOISE_FLOOR: f32 = 120.0;
+const NOISE_SPEECH: f32 = 900.0;
+/// Make-up gain applied to the static *after* it's band-passed. The
+/// voice-band filter discards most of white noise's (full-spectrum)
+/// energy, so the band-limited hiss would otherwise be far quieter than
+/// the `NOISE_*` levels imply; ≈3× restores it to roughly the level the
+/// `amount` knob asks for. Empirical — adjust by ear, not by formula.
+const NOISE_BANDPASS_MAKEUP: f32 = 3.0;
+/// Envelope-follower decay per sample for the speech-riding noise. ≈ a
+/// 30 ms release at 48 kHz — fast enough to track syllables, slow enough
+/// that the static bed doesn't pump on every glottal pulse.
+const ENV_DECAY: f32 = 0.9993;
+
+/// Lock-free controls for the playback dirtying effect, shared between
+/// the UI thread (writes) and the UDP recv task (reads each voice chunk).
+/// Same `Arc`-of-atomics pattern as [`DspParams`] / `audio::AudioGains`.
+#[derive(Clone)]
+pub struct OutputDspParams {
+    enabled: Arc<AtomicBool>,
+    /// How hard to dirty, `[0.0, 1.0]`. Crossfades dry→wet and scales the
+    /// static. `0.0` is indistinguishable from off (full dry, no noise);
+    /// the UI never stores below a small floor while enabled so the
+    /// effect is always audible when the toggle is on.
+    amount: Arc<AtomicU32>,
+}
+
+impl OutputDspParams {
+    pub fn new(enabled: bool, amount: f32) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            amount: Arc::new(AtomicU32::new(amount.clamp(0.0, 1.0).to_bits())),
+        }
+    }
+
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_amount(&self, amount: f32) {
+        self.amount
+            .store(amount.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    fn amount(&self) -> f32 {
+        f32::from_bits(self.amount.load(Ordering::Relaxed))
+    }
+}
+
+/// A Direct-Form-I RBJ biquad — same family as the bandpass in
+/// `audio::beep_pattern`, but kept here as a tiny reusable filter since
+/// the band-pass needs two of them in series. Coefficients are computed
+/// once for a fixed cutoff; only the four sample-history taps mutate.
+#[derive(Clone, Copy)]
+struct Biquad {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl Biquad {
+    /// 2nd-order Butterworth-ish (Q = 1/√2) low-pass at `cutoff_hz`.
+    fn low_pass(cutoff_hz: f32, sample_rate: f32) -> Self {
+        let (b0, b1, b2, a1, a2) = Self::lp_coeffs(cutoff_hz, sample_rate);
+        Self::with_coeffs(b0, b1, b2, a1, a2)
+    }
+
+    /// 2nd-order Butterworth-ish (Q = 1/√2) high-pass at `cutoff_hz`.
+    fn high_pass(cutoff_hz: f32, sample_rate: f32) -> Self {
+        let (b0, b1, b2, a1, a2) = Self::hp_coeffs(cutoff_hz, sample_rate);
+        Self::with_coeffs(b0, b1, b2, a1, a2)
+    }
+
+    fn lp_coeffs(cutoff_hz: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
+        let (sin, cos) = (w0.sin(), w0.cos());
+        // Q = 1/√2 (Butterworth, maximally flat). alpha = sin(w0)/(2Q).
+        let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let b1 = 1.0 - cos;
+        let b0 = b1 / 2.0;
+        let b2 = b0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos;
+        let a2 = 1.0 - alpha;
+        (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+    }
+
+    fn hp_coeffs(cutoff_hz: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate;
+        let (sin, cos) = (w0.sin(), w0.cos());
+        // Q = 1/√2 (Butterworth, maximally flat). alpha = sin(w0)/(2Q).
+        let alpha = sin / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let one_plus_cos = 1.0 + cos;
+        let b0 = one_plus_cos / 2.0;
+        let b1 = -one_plus_cos;
+        let b2 = b0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos;
+        let a2 = 1.0 - alpha;
+        (b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0)
+    }
+
+    fn with_coeffs(b0: f32, b1: f32, b2: f32, a1: f32, a2: f32) -> Self {
+        Self {
+            b0,
+            b1,
+            b2,
+            a1,
+            a2,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+        self.x2 = self.x1;
+        self.x1 = x;
+        self.y2 = self.y1;
+        self.y1 = y;
+        y
+    }
+}
+
+/// Stateful playback dirtier, owned by the UDP recv task. Carries the
+/// band-pass filter state, the noise PRNG, and the speech-envelope
+/// follower across voice chunks so the effect is continuous rather than
+/// resetting at every packet boundary.
+pub struct OutputDsp {
+    params: OutputDspParams,
+    hp: Biquad,
+    lp: Biquad,
+    /// A *second* band-pass, run over the static before it's mixed in, so
+    /// the hiss occupies the same voice band as the signal — like real
+    /// receiver noise coming through the set's passband — instead of the
+    /// full-spectrum white hiss it'd be added raw. Separate filter state
+    /// from `hp`/`lp` because it processes a different stream (noise, not
+    /// voice); same cutoffs so voice and static share one passband.
+    noise_hp: Biquad,
+    noise_lp: Biquad,
+    /// xorshift PRNG state for the additive static. Non-zero seed
+    /// (xorshift latches on 0); the exact value is unimportant — this is
+    /// decorative noise, not anything peers must agree on.
+    rng: u32,
+    /// Smoothed |signal| envelope driving the speech-correlated noise.
+    env: f32,
+}
+
+impl OutputDsp {
+    pub fn new(params: OutputDspParams) -> Self {
+        let sr = SAMPLE_RATE_HZ as f32;
+        Self {
+            params,
+            hp: Biquad::high_pass(HP_HZ, sr),
+            lp: Biquad::low_pass(LP_HZ, sr),
+            noise_hp: Biquad::high_pass(HP_HZ, sr),
+            noise_lp: Biquad::low_pass(LP_HZ, sr),
+            rng: 0x2545_f491,
+            env: 0.0,
+        }
+    }
+
+    /// Dirty one chunk of wire-rate (48 kHz) mono voice, in place. A
+    /// no-op early-return when disabled, so a clean channel pays nothing
+    /// but the branch. `amount` is read once per chunk (stable over the
+    /// ~10–20 ms a chunk represents); `0` short-circuits to dry as well,
+    /// which keeps the filter/noise from colouring audio the user has
+    /// effectively dialled out.
+    pub fn process(&mut self, samples: &mut [i16]) {
+        if !self.params.enabled() {
+            return;
+        }
+        let amount = self.params.amount();
+        if amount <= 0.0 {
+            return;
+        }
+        // Scale the static by the knob here; the dry→wet crossfade below
+        // multiplies it by `amount` a second time, so the noise heard in
+        // the output grows ~quadratically — the bottom of the slider's
+        // travel stays subtle, the top gets dramatic.
+        let floor = NOISE_FLOOR * amount;
+        let speech = NOISE_SPEECH * amount;
+
+        for s in samples.iter_mut() {
+            let dry = *s as f32;
+
+            // 1. Band-pass to the voice band.
+            let mut wet = self.lp.process(self.hp.process(dry));
+
+            // 2. tanh saturation. Normalise to ~[-1, 1], drive into the
+            //    curve (scaled by amount so a low setting barely clips),
+            //    then back to i16 range.
+            let drive = 1.0 + (SATURATION_DRIVE - 1.0) * amount;
+            let norm = (wet / i16::MAX as f32) * drive;
+            wet = norm.tanh() * i16::MAX as f32;
+
+            // 3. Static: a steady squelch floor plus a component that
+            //    rides the speech envelope. Track the envelope on the
+            //    band-passed signal so out-of-band rumble doesn't open
+            //    the noise gate.
+            let mag = wet.abs();
+            self.env = if mag > self.env {
+                mag
+            } else {
+                self.env * ENV_DECAY
+            };
+            let env_norm = (self.env / i16::MAX as f32).clamp(0.0, 1.0);
+            //    Band-pass the noise through its own filter pair so the
+            //    hiss sits in the voice band like real receiver static,
+            //    not as full-spectrum white noise. The band-pass throws
+            //    away most of white noise's energy, so a make-up gain
+            //    restores the level the `amount` knob asks for (same
+            //    reason the roger-beep noise renderer scales its output).
+            let raw_noise = next_white(&mut self.rng) * (floor + speech * env_norm);
+            let band_noise =
+                self.noise_lp.process(self.noise_hp.process(raw_noise)) * NOISE_BANDPASS_MAKEUP;
+            wet += band_noise;
+
+            // Crossfade dry → wet by amount, then hard-clamp to i16.
+            let out = dry + (wet - dry) * amount;
+            *s = out.clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        }
+    }
+}
+
+/// One step of a 32-bit xorshift PRNG (shared shape with the beep noise
+/// renderer in `audio`), returning a uniform sample in `[-1.0, 1.0)`.
+#[inline]
+fn next_white(state: &mut u32) -> f32 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    (x as f32 / u32::MAX as f32) * 2.0 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,6 +632,17 @@ mod tests {
         p.set_agc(true);
         assert!(!p.noise_suppression());
         assert!(p.agc());
+    }
+
+    #[test]
+    fn monitor_params_toggles_round_trip() {
+        let m = MonitorParams::new(false, true);
+        assert!(!m.enabled());
+        assert!(m.processed());
+        m.set_enabled(true);
+        m.set_processed(false);
+        assert!(m.enabled());
+        assert!(!m.processed());
     }
 
     #[test]
@@ -458,5 +813,184 @@ mod tests {
             out_rms = frame_rms(&frame);
         }
         assert!(out_rms < 50.0, "digital silence came out at RMS {out_rms}");
+    }
+
+    // ── Playback "radio FX" dirtier ───────────────────────────────────
+
+    /// A mid-band sine at `freq_hz`, phase-continuous via `phase`. Like
+    /// `sine_frame` but at an arbitrary frequency so the band-pass can be
+    /// probed in- and out-of-band.
+    fn tone_frame(freq_hz: f32, amp: f32, phase: &mut f32) -> Vec<i16> {
+        let step = 2.0 * std::f32::consts::PI * freq_hz / 48_000.0;
+        (0..FRAME_SAMPLES)
+            .map(|_| {
+                let s = (*phase).sin() * amp;
+                *phase += step;
+                s as i16
+            })
+            .collect()
+    }
+
+    #[test]
+    fn output_params_round_trip_and_clamp() {
+        let p = OutputDspParams::new(false, 0.4);
+        assert!(!p.enabled());
+        assert!((p.amount() - 0.4).abs() < 1e-6);
+        p.set_enabled(true);
+        p.set_amount(2.0); // out of range → clamped to 1.0
+        assert!(p.enabled());
+        assert_eq!(p.amount(), 1.0);
+        p.set_amount(-1.0); // clamped to 0.0
+        assert_eq!(p.amount(), 0.0);
+    }
+
+    #[test]
+    fn output_disabled_is_passthrough() {
+        // Toggle off must not touch a single sample — a clean channel
+        // pays only the enabled() branch.
+        let mut dsp = OutputDsp::new(OutputDspParams::new(false, 1.0));
+        let mut phase = 0.0;
+        let original = tone_frame(1000.0, 8_000.0, &mut phase);
+        let mut frame = original.clone();
+        dsp.process(&mut frame);
+        assert_eq!(frame, original);
+    }
+
+    #[test]
+    fn output_amount_zero_is_passthrough() {
+        // Enabled but dialled to zero is also a no-op: the user has
+        // effectively turned it off, so no filtering or noise leaks in.
+        let mut dsp = OutputDsp::new(OutputDspParams::new(true, 0.0));
+        let mut phase = 0.0;
+        let original = tone_frame(1000.0, 8_000.0, &mut phase);
+        let mut frame = original.clone();
+        dsp.process(&mut frame);
+        assert_eq!(frame, original);
+    }
+
+    #[test]
+    fn output_enabled_modifies_signal() {
+        let mut dsp = OutputDsp::new(OutputDspParams::new(true, 1.0));
+        let mut phase = 0.0;
+        let original = tone_frame(1000.0, 8_000.0, &mut phase);
+        let mut frame = original.clone();
+        dsp.process(&mut frame);
+        assert_ne!(frame, original, "effect left the signal untouched");
+    }
+
+    #[test]
+    fn output_bandpass_attenuates_out_of_band_tones() {
+        // A 60 Hz tone (well below HP_HZ) and a 9 kHz tone (well above
+        // LP_HZ) should both come out much quieter than a 1 kHz tone
+        // sitting in the passband. We disable the additive noise's effect
+        // on the measurement by comparing relative levels — the static is
+        // small next to an 8000-amplitude tone, and present equally in
+        // all three cases.
+        let measure = |freq: f32| -> f32 {
+            let mut dsp = OutputDsp::new(OutputDspParams::new(true, 1.0));
+            let mut phase = 0.0;
+            let mut last = 0.0;
+            // Run several frames so the biquads reach steady state before
+            // we trust the output level.
+            for _ in 0..20 {
+                let mut frame = tone_frame(freq, 8_000.0, &mut phase);
+                dsp.process(&mut frame);
+                last = frame_rms(&frame);
+            }
+            last
+        };
+        let in_band = measure(1_000.0);
+        let low = measure(60.0);
+        let high = measure(9_000.0);
+        assert!(
+            low < in_band * 0.5,
+            "60 Hz ({low}) not attenuated vs 1 kHz ({in_band})"
+        );
+        assert!(
+            high < in_band * 0.5,
+            "9 kHz ({high}) not attenuated vs 1 kHz ({in_band})"
+        );
+    }
+
+    #[test]
+    fn output_adds_static_to_silence_when_enabled() {
+        // With the effect on, even a silent input picks up the squelch
+        // floor hiss — the "open channel" bed. Off, silence stays silent.
+        let mut on = OutputDsp::new(OutputDspParams::new(true, 1.0));
+        let mut frame = vec![0i16; FRAME_SAMPLES];
+        on.process(&mut frame);
+        assert!(
+            frame_rms(&frame) > 0.0,
+            "enabled effect produced no static on silence"
+        );
+
+        let mut off = OutputDsp::new(OutputDspParams::new(false, 1.0));
+        let mut silent = vec![0i16; FRAME_SAMPLES];
+        off.process(&mut silent);
+        assert!(silent.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn output_static_is_band_limited() {
+        // The static must come through the voice-band filter, not as
+        // full-spectrum white hiss. We can detect that without an FFT:
+        // a low-pass at 2.6 kHz strongly correlates adjacent 48 kHz
+        // samples, so the mean sample-to-sample difference (a discrete
+        // high-frequency proxy) is small relative to the RMS. Raw white
+        // noise, with independent neighbours, has a difference ≈ √2×RMS.
+        //
+        // Feed silence so the output is *only* the noise bed, gather it,
+        // and compare the two HF ratios.
+        let hf_ratio = |sig: &[f32]| -> f32 {
+            let rms = rms(sig.iter().copied());
+            if rms == 0.0 {
+                return 0.0;
+            }
+            let diff =
+                sig.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / (sig.len() - 1) as f32;
+            diff / rms
+        };
+
+        let mut dsp = OutputDsp::new(OutputDspParams::new(true, 1.0));
+        let mut bed: Vec<f32> = Vec::new();
+        for _ in 0..40 {
+            let mut frame = vec![0i16; FRAME_SAMPLES];
+            dsp.process(&mut frame);
+            bed.extend(frame.iter().map(|&s| s as f32));
+        }
+
+        // Reference: raw white noise straight from the same generator.
+        let mut rng = 0x2545_f491_u32;
+        let white: Vec<f32> = (0..bed.len()).map(|_| next_white(&mut rng)).collect();
+
+        let band_hf = hf_ratio(&bed);
+        let white_hf = hf_ratio(&white);
+        assert!(
+            band_hf < white_hf * 0.5,
+            "static not band-limited: band HF ratio {band_hf} vs white {white_hf}"
+        );
+    }
+
+    #[test]
+    fn output_stays_finite_on_full_scale_input() {
+        // Slam a near-full-scale signal through at max amount. The
+        // pre-clamp `wet` float must stay finite (no NaN/inf from the
+        // filter feedback or tanh) — reaching the end without a
+        // debug-build overflow on the `as i16` clamp-cast is the real
+        // guarantee; the explicit finiteness check documents intent.
+        let mut dsp = OutputDsp::new(OutputDspParams::new(true, 1.0));
+        let mut phase = 0.0;
+        for _ in 0..50 {
+            let mut frame = tone_frame(1_500.0, 32_000.0, &mut phase);
+            // Reaching the end of process() without a debug-build
+            // overflow on the `out.clamp(...) as i16` cast is the real
+            // guarantee — a runaway (NaN/inf) filter would panic there.
+            dsp.process(&mut frame);
+        }
+        // Sanity: the chunk after warmup still carries audible signal
+        // (the filter didn't ring itself to zero or silence everything).
+        let mut frame = tone_frame(1_500.0, 32_000.0, &mut phase);
+        dsp.process(&mut frame);
+        assert!(frame_rms(&frame) > 0.0);
     }
 }

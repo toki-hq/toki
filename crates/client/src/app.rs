@@ -23,7 +23,7 @@ use crate::audio::{
     BeepPreset,
 };
 use crate::config::{self, HotkeyBinding};
-use crate::dsp::DspParams;
+use crate::dsp::{DspParams, MonitorParams, OutputDspParams};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -129,6 +129,16 @@ pub struct TokiApp {
     /// the runtime's mic loop reads them every frame, so flipping a
     /// Settings checkbox takes effect on the next 10 ms frame.
     dsp_params: DspParams,
+    /// Live atomics behind the playback "radio FX" dirtier. Read by the
+    /// runtime's UDP recv task per voice chunk, so the Settings toggle /
+    /// intensity slider take effect on the next chunk. Off by default.
+    output_dsp_params: OutputDspParams,
+    /// Live atomics behind the self-monitor (sidetone) test aid. Read by
+    /// the runtime's mic loop every frame: when enabled it loops the mic
+    /// (raw or DSP-processed, per `processed`) back to the speakers so the
+    /// operator can hear themselves and A/B the capture DSP. Always starts
+    /// off — not persisted — since a mic→speaker loop is a feedback risk.
+    monitor_params: MonitorParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -304,12 +314,24 @@ impl TokiApp {
         // live with the runtime's mic loop (same arrangement as the
         // beep params above).
         let dsp_params = DspParams::new(config.audio.noise_suppression, config.audio.agc);
+        // Playback radio-FX atomics — seeded from the saved toggle +
+        // amount (off by default), shared live with the runtime's recv
+        // task (same arrangement as the capture DSP above).
+        let output_dsp_params =
+            OutputDspParams::new(config.audio.output_dirty, config.audio.output_dirty_amount);
+        // Self-monitor atomics — always start off (not persisted; a
+        // mic→speaker loop left on across launches would howl) and default
+        // to monitoring the processed mic so the first listen shows the
+        // DSP at work. Shared live with the runtime's mic loop.
+        let monitor_params = MonitorParams::new(false, true);
         let cmd_tx = runtime::spawn(
             state.clone(),
             mic_rx,
             playback,
             beep_params.clone(),
             dsp_params.clone(),
+            output_dsp_params.clone(),
+            monitor_params.clone(),
         );
 
         let initial = config.hotkey.to_input().or_else(|| {
@@ -371,6 +393,8 @@ impl TokiApp {
             audio_gains: gains,
             beep_params,
             dsp_params,
+            output_dsp_params,
+            monitor_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
@@ -1462,9 +1486,16 @@ impl eframe::App for TokiApp {
                 }
             });
         } else if self.settings_fonts_ready {
-            // Window just closed — arm `register_fonts` to run again on
-            // the next open, since the child context will be re-created.
+            // Window just closed (catches both the OS close button and the
+            // gear toggle). Arm `register_fonts` to run again on the next
+            // open, since the child context will be re-created.
             self.settings_fonts_ready = false;
+            // Force the self-monitor off on close. It's a transient test
+            // aid and a mic→speaker loop the user can no longer see is a
+            // feedback risk — so it must never outlive the window it's
+            // toggled from. (The runtime reads this live; the checkbox,
+            // which reflects the same atom, shows unchecked on next open.)
+            self.monitor_params.set_enabled(false);
         }
 
         // Connect dialog (sibling viewport to Settings). Same
@@ -3737,6 +3768,52 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::TestTone);
             }
         });
+
+        // Self-monitor (sidetone): loop the mic back to the speakers so
+        // the operator can hear themselves — a mic/device check, and an
+        // audition of the outgoing chain. The SOURCE toggle A/Bs the
+        // capture DSP (RAW = bare mic, PROCESSED = + noise suppression +
+        // AGC); whichever is picked, the playback Radio FX folds in too
+        // when it's enabled, so this previews the full chain a peer hears.
+        // Needs no session; writes straight into the shared `MonitorParams`,
+        // so it engages on the next mic frame. Not persisted — always
+        // starts off — because a mic→speaker loop over speakers howls; the
+        // caption nudges toward headphones.
+        settings_row(ui, "SELF MONITOR", |ui| {
+            let mut v = self.monitor_params.enabled();
+            if ui.checkbox(&mut v, "").changed() {
+                self.monitor_params.set_enabled(v);
+            }
+            ui.label(
+                egui::RichText::new("hear your own mic — use headphones (speakers feed back)")
+                    .color(T::WARN)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "SOURCE", |ui| {
+            // RAW vs PROCESSED A/B. Disabled until the monitor is on so
+            // it's clear the choice only matters while monitoring.
+            let on = self.monitor_params.enabled();
+            let mut processed = self.monitor_params.processed();
+            ui.add_enabled_ui(on, |ui| {
+                if ui.selectable_label(!processed, "RAW").clicked() {
+                    processed = false;
+                    self.monitor_params.set_processed(false);
+                }
+                if ui.selectable_label(processed, "PROCESSED").clicked() {
+                    processed = true;
+                    self.monitor_params.set_processed(true);
+                }
+            });
+            ui.label(
+                egui::RichText::new("PROCESSED adds NS + AGC; Radio FX folds in if on")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+
         // Mic / Speaker gain sliders used to live here. They moved to
         // the bottom-row knobs (MIC VOL / SPK VOL) on the strip, which
         // adjust the same `config.audio.{input,output}_gain` fields —
@@ -3778,6 +3855,40 @@ impl TokiApp {
                     .monospace()
                     .size(9.0),
             );
+        });
+
+        // Playback-side "radio FX" — the only output-direction effect in
+        // this section (the two above process the *outgoing* mic). It
+        // dirties *incoming* voice into a cheap-handheld sound and writes
+        // straight into the shared `OutputDspParams`, so the change lands
+        // on the next decoded voice chunk — no reconnect. Off by default;
+        // the intensity slider is disabled until it's switched on.
+        settings_row(ui, "RADIO FX", |ui| {
+            let mut v = self.config.audio.output_dirty;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.output_dirty = v;
+                self.output_dsp_params.set_enabled(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("dirties incoming voice: bandpass + drive + static")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "FX AMOUNT", |ui| {
+            let on = self.config.audio.output_dirty;
+            let mut v = self.config.audio.output_dirty_amount;
+            let resp = ui.add_enabled(on, egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+            ui.monospace(format!("{:>3.0}%", v * 100.0));
+            if resp.changed() {
+                self.config.audio.output_dirty_amount = v;
+                self.output_dsp_params.set_amount(v);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                self.config.save();
+            }
         });
 
         ui.add_space(14.0);

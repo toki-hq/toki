@@ -274,6 +274,10 @@ enum RecordTarget {
     /// The secondary/fallback push-to-talk trigger. PTT fires while
     /// either the primary or this is held.
     PttSecondary,
+    /// The dedicated global-broadcast trigger. Inert until an admin
+    /// grants the capability; when held (and granted) it transmits to
+    /// every frequency at once. Separate from the normal PTT.
+    BroadcastPtt,
     /// Memory-recall hotkey for preset slot `0..4`.
     Memory(usize),
     /// Tune one channel up.
@@ -1499,6 +1503,14 @@ impl eframe::App for TokiApp {
                             tracing::warn!(error = %e, "secondary PTT rebind failed");
                         } else {
                             self.config.hotkey.set_ptt_secondary(Some(input));
+                            self.config.save();
+                        }
+                    }
+                    RecordTarget::BroadcastPtt => {
+                        if let Err(e) = self.hotkey.rebind_broadcast_ptt(Some(input)) {
+                            tracing::warn!(error = %e, "broadcast PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_broadcast_ptt(Some(input));
                             self.config.save();
                         }
                     }
@@ -3922,6 +3934,7 @@ impl TokiApp {
         let current = match target {
             RecordTarget::Ptt => self.config.hotkey.to_input(),
             RecordTarget::PttSecondary => self.config.hotkey.to_input_secondary(),
+            RecordTarget::BroadcastPtt => self.config.hotkey.broadcast_ptt_input(),
             RecordTarget::Memory(i) => self.config.hotkey.memory(i).to_input(),
             RecordTarget::FreqUp => self.config.hotkey.freq_up.to_input(),
             RecordTarget::FreqDown => self.config.hotkey.freq_down.to_input(),
@@ -3966,6 +3979,10 @@ impl TokiApp {
                         RecordTarget::PttSecondary => {
                             let _ = self.hotkey.rebind_secondary(None);
                             self.config.hotkey.set_ptt_secondary(None);
+                        }
+                        RecordTarget::BroadcastPtt => {
+                            let _ = self.hotkey.rebind_broadcast_ptt(None);
+                            self.config.hotkey.set_broadcast_ptt(None);
                         }
                         RecordTarget::Memory(i) => {
                             self.hotkey.rebind_memory(i, None);
@@ -4047,6 +4064,10 @@ impl TokiApp {
         // keyboard key backing up a gamepad button). PTT fires while
         // either is held.
         self.bind_row(ui, "PTT (2ND)", RecordTarget::PttSecondary);
+        // Dedicated global-broadcast trigger. Inert until an admin grants
+        // the capability; when held it transmits to every frequency at
+        // once (separate from the normal PTT above).
+        self.bind_row(ui, "BROADCAST PTT", RecordTarget::BroadcastPtt);
 
         ui.add_space(14.0);
         section_header(ui, "MEMORY HOTKEYS");

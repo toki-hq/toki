@@ -730,12 +730,15 @@ impl InstalledHotkey {
     /// Set (or clear, with `None`) the dedicated global-broadcast PTT
     /// binding. When held, backends emit `Cmd::BroadcastPttDown/Up`
     /// on the down/up edges, independent of the normal PTT slot.
-    // Called from the Settings panel when the user rebinds; not yet
-    // wired in the initial feature PR (the capability gating ships first).
-    #[allow(dead_code)]
-    pub fn rebind_broadcast_ptt(&mut self, input: Option<Input>) {
+    /// Mirrors [`Self::rebind_secondary`]: errors if the input poller
+    /// is unavailable so the Settings panel can surface the failure.
+    pub fn rebind_broadcast_ptt(&mut self, input: Option<Input>) -> Result<(), &'static str> {
+        if !self.available {
+            return Err("input poller unavailable");
+        }
         *self.shared.broadcast.lock().unwrap() = input;
         info!(?input, "broadcast PTT rebound");
+        Ok(())
     }
 
     /// Begin recording the next press. The recorded press is captured

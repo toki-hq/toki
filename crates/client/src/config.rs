@@ -905,10 +905,8 @@ impl HotkeyConfig {
         crate::hotkey::Input::from_token(self.broadcast_ptt.as_deref()?)
     }
 
-    /// Set (or clear, with `None`) the broadcast PTT binding.
-    // Called from the Settings panel when the user rebinds; not yet
-    // wired in the initial feature PR (the capability gating ships first).
-    #[allow(dead_code)]
+    /// Set (or clear, with `None`) the broadcast PTT binding. Called
+    /// from the Settings panel's BROADCAST PTT bind row.
     pub fn set_broadcast_ptt(&mut self, input: Option<crate::hotkey::Input>) {
         self.broadcast_ptt = input.map(|i| i.to_token());
     }

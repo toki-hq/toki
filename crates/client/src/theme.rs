@@ -40,6 +40,21 @@ pub const SHELL_TOP: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1e);
 pub const SHELL_BOTTOM: Color32 = Color32::from_rgb(0x05, 0x05, 0x05);
 pub const SHELL_EDGE: Color32 = Color32::from_rgb(0x2a, 0x2d, 0x30);
 
+// ── Sound-drawer surfaces (from the design handoff) ──────────────────────
+/// Drawer panel gradient (top → bottom): `#15171a` → `#0a0b0a`.
+pub const DRAWER_TOP: Color32 = Color32::from_rgb(0x15, 0x17, 0x1a);
+pub const DRAWER_BOTTOM: Color32 = Color32::from_rgb(0x0a, 0x0b, 0x0a);
+/// Fader track + ticks (white at low alpha, premultiplied).
+pub const FADER_TRACK: Color32 = Color32::from_rgba_premultiplied(0x0d, 0x0d, 0x0d, 0x0d);
+pub const FADER_TICK: Color32 = Color32::from_rgba_premultiplied(0x1a, 0x1a, 0x1a, 0x1a);
+/// The centre tick of a centre-origin (balance) fader — brighter so the
+/// detent reads. `rgba(255,255,255,0.28)`.
+pub const FADER_TICK_CENTER: Color32 = Color32::from_rgba_premultiplied(0x47, 0x47, 0x47, 0x47);
+/// Fader thumb slug gradient + its knurl lines.
+pub const FADER_THUMB_TOP: Color32 = Color32::from_rgb(0x34, 0x38, 0x3c);
+pub const FADER_THUMB_BOTTOM: Color32 = Color32::from_rgb(0x0c, 0x0d, 0x0e);
+pub const FADER_KNURL: Color32 = Color32::from_rgba_premultiplied(0x38, 0x38, 0x38, 0x38);
+
 pub const OLED: Color32 = Color32::from_rgb(0x04, 0x06, 0x04);
 pub const OLED_RIM: Color32 = Color32::from_rgb(0x0e, 0x12, 0x0e);
 
@@ -74,7 +89,6 @@ pub const PTT_MUTED_BOTTOM: Color32 = Color32::from_rgb(0x0e, 0x0a, 0x0b);
 // ── Spacing scale (px) ──────────────────────────────────────────────────
 pub const PAD_OUTER: f32 = 12.0;
 pub const GAP_ROW: f32 = 8.0;
-pub const GAP_BOTTOM: f32 = 12.0; // between knob and PTT
 pub const OLED_PAD_X: f32 = 12.0;
 pub const OLED_PAD_Y: f32 = 10.0;
 
@@ -87,13 +101,54 @@ pub const RADIUS_CHEVRON: f32 = 4.0;
 
 // ── Dimensions ──────────────────────────────────────────────────────────
 pub const WIDGET_W: f32 = 640.0;
+/// Height of the radio *body* (the chassis with topbar/main/bottom rows).
+/// The sound drawer is a sibling mounted below it; the full window height
+/// is `WIDGET_H + DRAWER_GAP + DRAWER_HANDLE_H` when the drawer is folded
+/// and additionally `+ DRAWER_BODY_H` when it's open (see [`window_h`]).
 pub const WIDGET_H: f32 = 260.0;
 pub const TOPBAR_H: f32 = 26.0;
 pub const BOTTOM_H: f32 = 60.0;
 pub const PTT_H: f32 = 56.0;
-pub const KNOB_D: f32 = 42.0;
 pub const OLED_LEFT_W: f32 = 200.0;
 pub const ICON_BTN_D: f32 = 28.0;
+
+// ── Sound drawer ────────────────────────────────────────────────────────
+// A foldable panel below the radio body holding the VOL / BAL / MIC
+// faders (replaces the old rotary knobs). Mirrors the design handoff:
+// always-visible handle, collapsible body of three slider rows.
+/// Vertical gap between the radio body and the drawer (the "unit" gap).
+pub const DRAWER_GAP: f32 = 6.0;
+/// Height of the always-visible handle (the fold/unfold button).
+pub const DRAWER_HANDLE_H: f32 = 34.0;
+/// Height of the collapsible body when open: three 20 px slider rows with
+/// 12 px gaps plus the top border and inner padding (≈ the handoff's
+/// measured 103 px open body, rounded up for the border + breathing room).
+pub const DRAWER_BODY_H: f32 = 112.0;
+/// Drawer corner radius: `max(6, widget_radius − 6)` per the handoff.
+pub const DRAWER_RADIUS: f32 = RADIUS_WIDGET - 6.0;
+/// One slider row: label (30) + fader (flex) + value readout (44).
+pub const DRAWER_ROW_H: f32 = 20.0;
+pub const DRAWER_LABEL_W: f32 = 30.0;
+pub const DRAWER_VALUE_W: f32 = 44.0;
+pub const DRAWER_PAD_X: f32 = 14.0;
+/// Fader (HSlider) geometry: thin track + knurled thumb. The hit-area
+/// height is the row height (`DRAWER_ROW_H`).
+pub const FADER_TRACK_H: f32 = 4.0;
+pub const FADER_THUMB_W: f32 = 12.0;
+pub const FADER_THUMB_H: f32 = 18.0;
+
+/// Total window height for the current drawer fold state. Folded shows
+/// just the handle below the body; open adds the slider body. eframe is
+/// driven to this size via `ViewportCommand::InnerSize` when the state
+/// flips (see `TokiApp::update`).
+pub fn window_h(drawer_open: bool) -> f32 {
+    let base = WIDGET_H + DRAWER_GAP + DRAWER_HANDLE_H;
+    if drawer_open {
+        base + DRAWER_BODY_H
+    } else {
+        base
+    }
+}
 
 // ── Constants from the spec ─────────────────────────────────────────────
 pub const TX_LIMIT_MS: u32 = 30_000;

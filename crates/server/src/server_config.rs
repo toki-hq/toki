@@ -122,6 +122,15 @@ pub struct ServerConfig {
     /// no effect on the raw-PCM path. `false` only for debugging — DTX
     /// has no audible cost on a half-duplex PTT channel.
     pub opus_dtx: bool,
+
+    /// Opus frame duration advertised to clients: 10, 20, or 40 ms.
+    /// Maps to 480 / 960 / 1920 samples passed to the encoder. Default
+    /// 10 ms preserves the existing low-latency posture. 20 ms saves
+    /// roughly half the per-packet UDP overhead on the relay fan-out;
+    /// 40 ms saves ~3/4 of it at the cost of +30 ms mouth-to-ear latency.
+    /// Advisory — the relay forwards opaque encrypted payloads; only the
+    /// client encoder and decoder are affected.
+    pub opus_frame_ms: u32,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -162,6 +171,10 @@ impl Default for ServerConfig {
             // (only affects silence, decodes transparently), so a fresh
             // deployment gets the reduced fan-out for free.
             opus_dtx: true,
+            // 10 ms: preserves the existing low-latency posture on a
+            // fresh deployment; operators can bump to 20 or 40 ms to
+            // trade latency for reduced relay fan-out overhead.
+            opus_frame_ms: 10,
         }
     }
 }
@@ -205,6 +218,7 @@ mod tests {
             d.unique_callsigns,
             "unique callsigns on by default (radio behaviour)"
         );
+        assert_eq!(d.opus_frame_ms, 10, "10 ms low-latency default");
     }
 
     #[test]
@@ -230,6 +244,7 @@ mod tests {
             require_identity: true,
             unique_callsigns: false,
             opus_dtx: false,
+            opus_frame_ms: 20,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -240,6 +255,7 @@ mod tests {
         assert!(json.contains("\"audioQuality\":3"));
         assert!(json.contains("\"requireIdentity\":true"));
         assert!(json.contains("\"uniqueCallsigns\":false"));
+        assert!(json.contains("\"opusFrameMs\":20"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);
@@ -252,5 +268,6 @@ mod tests {
         assert_eq!(parsed.audio_quality, original.audio_quality);
         assert_eq!(parsed.require_identity, original.require_identity);
         assert_eq!(parsed.unique_callsigns, original.unique_callsigns);
+        assert_eq!(parsed.opus_frame_ms, 20, "opus_frame_ms round-trips");
     }
 }

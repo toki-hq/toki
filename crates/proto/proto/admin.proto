@@ -204,6 +204,9 @@ message ServerConfig {
   // the talker's outbound and the whole fan-out during gaps. No effect on
   // the raw-PCM path. Off only for debugging — DTX has no audible cost.
   bool opus_dtx = 10;
+  // Opus frame duration the server advertises to clients: 10, 20, or 40 ms.
+  // Default 10 ms (absent = legacy). See RegisterResponse.opus_frame_ms.
+  uint32 opus_frame_ms = 11;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -224,6 +227,8 @@ message UpdateServerConfigRequest {
   bool unique_callsigns = 7;
   // Enable Opus DTX (see ServerConfig.opus_dtx).
   bool opus_dtx = 8;
+  // Opus frame size (see ServerConfig.opus_frame_ms).
+  uint32 opus_frame_ms = 9;
 }
 
 message SetServerPasswordRequest {

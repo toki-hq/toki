@@ -587,14 +587,15 @@ impl Signaling for SignalingSvc {
         );
 
         // Advertise the operator's chosen voice codec/quality so the
-        // client knows whether to Opus-encode, at what bitrate, and
-        // whether to enable DTX. One config snapshot for all three, read
-        // fresh so an admin change applies to the next connection. DTX is
-        // only meaningful with Opus on (no effect on the raw-PCM path).
-        let (opus_enabled, opus_bitrate, opus_dtx) = {
+        // client knows whether to Opus-encode, at what bitrate, whether
+        // to enable DTX, and the frame duration. One config snapshot for
+        // all four, read fresh so an admin change applies to the next
+        // connection. DTX and frame_ms are only meaningful with Opus on
+        // (no effect on the raw-PCM path).
+        let (opus_enabled, opus_bitrate, opus_dtx, opus_frame_ms) = {
             let cfg = self.server_config.read().await;
             let (enabled, bitrate) = crate::server_config::opus_settings(cfg.audio_quality);
-            (enabled, bitrate, enabled && cfg.opus_dtx)
+            (enabled, bitrate, enabled && cfg.opus_dtx, cfg.opus_frame_ms)
         };
 
         Ok(Response::new(RegisterResponse {
@@ -605,6 +606,7 @@ impl Signaling for SignalingSvc {
             opus_enabled,
             opus_bitrate,
             opus_dtx,
+            opus_frame_ms,
         }))
     }
 

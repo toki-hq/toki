@@ -230,6 +230,14 @@ impl AdminDb {
                 "BIGINT NOT NULL DEFAULT 1",
                 "BIGINT NOT NULL DEFAULT 1",
             ),
+            // DEFAULT 10: 10 ms preserves the existing low-latency posture
+            // on an in-place upgrade, matching `ServerConfig::default`.
+            (
+                "opus_frame_ms",
+                "INTEGER NOT NULL DEFAULT 10",
+                "BIGINT NOT NULL DEFAULT 10",
+                "BIGINT NOT NULL DEFAULT 10",
+            ),
         ];
         // Columns that existed in pre-release dev builds and were later
         // removed from the schema. A `NOT NULL` stray blocks inserts
@@ -302,7 +310,7 @@ impl AdminDb {
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
                    named_channels_enabled, audio_quality, require_identity, unique_callsigns, \
-                   opus_dtx \
+                   opus_dtx, opus_frame_ms \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -317,6 +325,7 @@ impl AdminDb {
                     require_identity: r.try_get::<i64, _>(6)? != 0,
                     unique_callsigns: r.try_get::<i64, _>(7)? != 0,
                     opus_dtx: r.try_get::<i64, _>(8)? != 0,
+                    opus_frame_ms: r.try_get::<i64, _>(9)? as u32,
                 },
                 None => ServerConfig::default(),
             })
@@ -329,7 +338,7 @@ impl AdminDb {
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
                  named_channels_enabled = ?, audio_quality = ?, require_identity = ?, \
-                 unique_callsigns = ?, opus_dtx = ?, updated_at = ? \
+                 unique_callsigns = ?, opus_dtx = ?, opus_frame_ms = ?, updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
             sqlx::query(&sql)
@@ -342,6 +351,7 @@ impl AdminDb {
                 .bind(cfg.require_identity as i64)
                 .bind(cfg.unique_callsigns as i64)
                 .bind(cfg.opus_dtx as i64)
+                .bind(cfg.opus_frame_ms as i64)
                 .bind(now)
                 .execute(p)
                 .await?;
@@ -1299,6 +1309,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     require_identity INTEGER NOT NULL DEFAULT 0,
     unique_callsigns INTEGER NOT NULL DEFAULT 1,
     opus_dtx        INTEGER NOT NULL DEFAULT 1,
+    opus_frame_ms   INTEGER NOT NULL DEFAULT 10,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
 INSERT OR IGNORE INTO server_config (id) VALUES (1);
@@ -1372,6 +1383,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     require_identity BIGINT NOT NULL DEFAULT 0,
     unique_callsigns BIGINT NOT NULL DEFAULT 1,
     opus_dtx        BIGINT NOT NULL DEFAULT 1,
+    opus_frame_ms   BIGINT NOT NULL DEFAULT 10,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
 INSERT IGNORE INTO server_config (id) VALUES (1);
@@ -1443,6 +1455,7 @@ CREATE TABLE IF NOT EXISTS server_config (
     require_identity BIGINT NOT NULL DEFAULT 0,
     unique_callsigns BIGINT NOT NULL DEFAULT 1,
     opus_dtx        BIGINT NOT NULL DEFAULT 1,
+    opus_frame_ms   BIGINT NOT NULL DEFAULT 10,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
 INSERT INTO server_config (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
@@ -1636,6 +1649,7 @@ mod tests {
             unique_callsigns: false,
             audio_quality: 1,
             opus_dtx: false,
+            opus_frame_ms: 40,
         };
         db.save_server_config(&new).await.unwrap();
         let loaded = db.load_server_config().await.unwrap();
@@ -1645,6 +1659,10 @@ mod tests {
         assert_eq!(loaded.grpc_password, "hunter2");
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
+        assert_eq!(
+            loaded.opus_frame_ms, 40,
+            "opus_frame_ms round-trips through DB"
+        );
     }
 
     #[tokio::test]
@@ -1675,8 +1693,9 @@ mod tests {
             audio_quality: 1,
             require_identity: true,
             unique_callsigns: false,
-            // Non-default so the save/load of the new column is exercised.
+            // Non-default so the save/load of the new columns is exercised.
             opus_dtx: false,
+            opus_frame_ms: 20,
         })
         .await
         .unwrap();
@@ -1685,6 +1704,10 @@ mod tests {
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
         assert!(!loaded.opus_dtx, "opus_dtx must round-trip through the DB");
+        assert_eq!(
+            loaded.opus_frame_ms, 20,
+            "opus_frame_ms must round-trip through the DB"
+        );
         db.migrate().await.unwrap(); // still idempotent
     }
 

@@ -97,6 +97,7 @@ function RuntimeConfig() {
   const [requireIdentity, setRequireIdentity] = useState(false);
   const [uniqueCallsigns, setUniqueCallsigns] = useState(true);
   const [audioQuality, setAudioQuality] = useState(2);
+  const [opusFrameMs, setOpusFrameMs] = useState(10);
   const [opusDtx, setOpusDtx] = useState(true);
   const [busy, setBusy] = useState(false);
 
@@ -112,6 +113,7 @@ function RuntimeConfig() {
         setRequireIdentity(c.requireIdentity);
         setUniqueCallsigns(c.uniqueCallsigns);
         setAudioQuality(c.audioQuality);
+        setOpusFrameMs(c.opusFrameMs);
         setOpusDtx(c.opusDtx);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
@@ -126,6 +128,7 @@ function RuntimeConfig() {
       requireIdentity !== cfg.requireIdentity ||
       uniqueCallsigns !== cfg.uniqueCallsigns ||
       audioQuality !== cfg.audioQuality ||
+      opusFrameMs !== cfg.opusFrameMs ||
       opusDtx !== cfg.opusDtx);
 
   async function save() {
@@ -139,6 +142,7 @@ function RuntimeConfig() {
         requireIdentity,
         uniqueCallsigns,
         audioQuality,
+        opusFrameMs,
         opusDtx,
       });
       setCfg(updated);
@@ -245,6 +249,36 @@ function RuntimeConfig() {
             {audioQuality === 0
               ? "Raw PCM — no compression (~768 kbps/stream)."
               : `Opus ~${audioQuality === 1 ? 16 : audioQuality === 3 ? 32 : 24} kbps — applied to clients on their next connect.`}
+          </span>
+        </div>
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+          <Label>Opus frame size</Label>
+          <div className="flex gap-1 rounded-md border border-border p-0.5">
+            {[
+              { v: 10, label: "10 ms" },
+              { v: 20, label: "20 ms" },
+              { v: 40, label: "40 ms" },
+            ].map((q) => (
+              <button
+                key={q.v}
+                onClick={() => setOpusFrameMs(q.v)}
+                disabled={audioQuality === 0}
+                className={`flex-1 rounded px-2 py-1 font-mono text-[11px] tracking-wider transition-colors ${
+                  audioQuality === 0
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : opusFrameMs === q.v
+                      ? "bg-primary/15 text-primary"
+                      : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-xs text-muted-foreground">
+            Opus frame size — larger frames cut relay egress during speech, at +10/+30 ms latency.
+            Clients older than this release can't decode 20/40 ms frames correctly — update all
+            clients first.
           </span>
         </div>
         <div className="flex items-center justify-between border-t border-border pt-3">

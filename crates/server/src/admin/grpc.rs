@@ -217,6 +217,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         require_identity: cfg.require_identity,
         unique_callsigns: cfg.unique_callsigns,
         opus_dtx: cfg.opus_dtx,
+        opus_frame_ms: cfg.opus_frame_ms,
     }
 }
 
@@ -288,6 +289,11 @@ impl Admin for AdminApi {
                 "audio_quality must be 0 (raw), 1 (low), 2 (standard) or 3 (high)",
             ));
         }
+        if !matches!(body.opus_frame_ms, 10 | 20 | 40) {
+            return Err(Status::invalid_argument(
+                "opus_frame_ms must be 10, 20, or 40",
+            ));
+        }
 
         // Merge with the live config so we don't clobber grpc_password.
         let merged = {
@@ -302,6 +308,7 @@ impl Admin for AdminApi {
                 require_identity: body.require_identity,
                 unique_callsigns: body.unique_callsigns,
                 opus_dtx: body.opus_dtx,
+                opus_frame_ms: body.opus_frame_ms,
             }
         };
         self.state
@@ -325,12 +332,13 @@ impl Admin for AdminApi {
             &admin.0,
             "",
             &format!(
-                "name='{}' max_peers={} idle_kick={}s named_channels={} audio_quality={}",
+                "name='{}' max_peers={} idle_kick={}s named_channels={} audio_quality={} opus_frame_ms={}",
                 merged.server_name,
                 merged.max_peers,
                 merged.idle_kick_secs,
                 merged.named_channels_enabled,
-                merged.audio_quality
+                merged.audio_quality,
+                merged.opus_frame_ms
             ),
         );
         Ok(Response::new(config_to_wire(&merged)))
@@ -1827,6 +1835,7 @@ mod tests {
                     require_identity: false,
                     unique_callsigns: true,
                     opus_dtx: true,
+                    opus_frame_ms: 10,
                 },
                 &token,
             ))

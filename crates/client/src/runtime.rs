@@ -451,18 +451,19 @@ async fn handle_cmd(
 const PTT_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Outbound voice encoder. `Pcm` passes each 10 ms mic frame straight
-/// through (raw i16 LE, the legacy path). `Opus` encodes each 10 ms
-/// (480-sample) mic frame into one small variable-length packet — same
-/// cadence as the mic, so there's no buffering and no added framing
-/// latency, just ~20× less bandwidth. Codec is chosen at connect time
-/// from the server's `RegisterResponse` advertisement.
+/// through (raw i16 LE, the legacy path). `Opus` encodes samples into
+/// one variable-length packet per `frame_samples` window — 480 (10 ms),
+/// 960 (20 ms), or 1920 (40 ms) as advertised by the server — just
+/// ~20× less bandwidth than PCM. Codec and frame size are chosen at
+/// connect time from the server's `RegisterResponse` advertisement.
 enum AudioEncoder {
     Pcm,
     Opus {
         enc: audiopus::coder::Encoder,
-        /// Carries any samples short of a full 10 ms (480-sample) frame.
-        /// Empty in steady state — the mic delivers exactly 480-sample
-        /// frames — but tolerates odd-sized inputs without losing audio.
+        /// Carries any samples short of a full frame.
+        /// Empty in steady state when the mic delivers frames that are
+        /// an exact multiple of `frame_samples`, but tolerates odd-sized
+        /// inputs without losing audio.
         buf: Vec<i16>,
         /// DTX is on. When set, a frame the encoder collapses to a ≤2-byte
         /// "no transmission" DTX indicator is **dropped** rather than sent
@@ -470,19 +471,28 @@ enum AudioEncoder {
         /// overhead) during silence; the receiver fills the gap with PLC /
         /// comfort noise, which the playback path already tolerates as loss.
         dtx: bool,
+        /// Number of samples per encoded Opus frame: 480 = 10 ms,
+        /// 960 = 20 ms, 1920 = 40 ms at 48 kHz.
+        frame_samples: usize,
     },
 }
 
 impl AudioEncoder {
-    fn new(opus_enabled: bool, bitrate: u32, dtx: bool) -> Self {
+    fn new(opus_enabled: bool, bitrate: u32, dtx: bool, opus_frame_ms: u32) -> Self {
         if !opus_enabled {
             return Self::Pcm;
         }
+        // Compute the per-frame sample count from the server-advertised
+        // frame duration: 480 × (ms / 10), clamped to at least 10 ms.
+        // Valid values are 10, 20, or 40 ms; anything else falls back to
+        // 10 ms (480 samples) so a mis-configured server can't panic us.
+        let frame_samples = (480 * (opus_frame_ms / 10).max(1)) as usize;
         match Self::make_opus(bitrate, dtx) {
             Ok(enc) => Self::Opus {
                 enc,
-                buf: Vec::with_capacity(OPUS_FRAME_SAMPLES * 2),
+                buf: Vec::with_capacity(frame_samples * 2),
                 dtx,
+                frame_samples,
             },
             Err(e) => {
                 warn!(error = %e, "Opus encoder init failed; falling back to raw PCM");
@@ -518,8 +528,9 @@ impl AudioEncoder {
         Ok(enc)
     }
 
-    /// Consume one 10 ms (480-sample) mic frame; return the
-    /// `(version, payload)` packets ready to seal + send (0, 1, or more).
+    /// Consume a mic frame; return the `(version, payload)` packets ready
+    /// to seal + send (0, 1, or more). Buffers samples until a full
+    /// `frame_samples` window is available, then encodes and emits.
     fn push(&mut self, samples: &[i16]) -> Vec<(u8, Vec<u8>)> {
         match self {
             Self::Pcm => {
@@ -529,11 +540,16 @@ impl AudioEncoder {
                 }
                 vec![(VERSION_AUDIO_PCM, payload)]
             }
-            Self::Opus { enc, buf, dtx } => {
+            Self::Opus {
+                enc,
+                buf,
+                dtx,
+                frame_samples,
+            } => {
                 buf.extend_from_slice(samples);
                 let mut out = Vec::new();
-                while buf.len() >= OPUS_FRAME_SAMPLES {
-                    let frame: Vec<i16> = buf.drain(..OPUS_FRAME_SAMPLES).collect();
+                while buf.len() >= *frame_samples {
+                    let frame: Vec<i16> = buf.drain(..*frame_samples).collect();
                     let mut encoded = [0u8; MAX_OPUS_PAYLOAD];
                     match enc.encode(&frame, &mut encoded) {
                         // With DTX, Opus signals "don't transmit" for a
@@ -567,13 +583,19 @@ impl AudioEncoder {
             Self::Pcm => Vec::new(),
             // The flush frame carries the trailing speech tail, so it's
             // always sent — DTX dropping doesn't apply here (`dtx` ignored).
-            Self::Opus { enc, buf, .. } => {
+            Self::Opus {
+                enc,
+                buf,
+                frame_samples,
+                ..
+            } => {
                 if buf.is_empty() {
                     return Vec::new();
                 }
                 // push() drains every whole frame, so buf is always a
-                // partial (< 480) frame here. Pad to 10 ms with silence.
-                buf.resize(OPUS_FRAME_SAMPLES, 0);
+                // partial (< frame_samples) remainder here. Pad to a full
+                // frame with silence.
+                buf.resize(*frame_samples, 0);
                 // Take the whole padded frame, leaving `buf` empty so the
                 // next transmission starts clean (no stale-tail leak).
                 let frame: Vec<i16> = std::mem::take(buf);
@@ -764,6 +786,10 @@ impl Session {
         // cutting outbound + the fan-out during gaps). Server-advertised;
         // only meaningful with Opus on.
         let opus_dtx = reg.opus_dtx;
+        // Server-advertised Opus frame duration in milliseconds (10, 20, or
+        // 40). Larger frames compress better but add latency; 0 or a missing
+        // field from an older server defaults to 10 ms (480 samples).
+        let opus_frame_ms = reg.opus_frame_ms;
         // Server must return exactly MAC_KEY_LEN bytes; treat any
         // other length as a protocol violation rather than silently
         // truncating / padding and producing useless MACs.
@@ -1334,7 +1360,12 @@ impl Session {
             cooldown_until: StdMutex::new(None),
             udp,
             signaling,
-            encode: StdMutex::new(AudioEncoder::new(opus_enabled, opus_bitrate, opus_dtx)),
+            encode: StdMutex::new(AudioEncoder::new(
+                opus_enabled,
+                opus_bitrate,
+                opus_dtx,
+                opus_frame_ms,
+            )),
             alive,
             self_muted,
             tasks: vec![
@@ -1766,15 +1797,18 @@ fn pcm_from_bytes(bytes: &[u8]) -> Vec<i16> {
         .collect()
 }
 
-/// Decode one Opus packet to 48 kHz mono i16. Output buffer has plenty of
-/// headroom (we only ever send 10 ms frames, but Opus reports the true
-/// length per packet). Returns empty on a decoder error or when the
-/// decoder is unavailable — playback treats it as loss.
+/// Decode one Opus packet to 48 kHz mono i16. The output buffer is sized
+/// at `OPUS_FRAME_SAMPLES * 4` (1920 samples) to cover the largest valid
+/// Opus frame: 40 ms at 48 kHz = 1920 samples. A 30 ms buffer (`* 3`)
+/// would overflow on a 40 ms frame. The decoder's returned sample count
+/// is used to truncate `out` to the true decoded length.
+/// Returns empty on a decoder error or when the decoder is unavailable —
+/// playback treats it as loss.
 fn decode_opus(decoder: &mut Option<audiopus::coder::Decoder>, packet: &[u8]) -> Vec<i16> {
     let Some(dec) = decoder.as_mut() else {
         return Vec::new();
     };
-    let mut out = vec![0i16; OPUS_FRAME_SAMPLES * 3];
+    let mut out = vec![0i16; OPUS_FRAME_SAMPLES * 4];
     match dec.decode(Some(packet), &mut out[..], false) {
         Ok(samples) => {
             out.truncate(samples);
@@ -1921,7 +1955,7 @@ mod tests {
 
     #[test]
     fn pcm_encoder_emits_one_packet_per_frame() {
-        let mut enc = AudioEncoder::new(false, 0, false);
+        let mut enc = AudioEncoder::new(false, 0, false, 10);
         let pkts = enc.push(&vec![0i16; 480]);
         assert_eq!(pkts.len(), 1);
         assert_eq!(pkts[0].0, VERSION_AUDIO_PCM);
@@ -1930,7 +1964,7 @@ mod tests {
 
     #[test]
     fn opus_emits_one_packet_per_10ms_frame_and_decodes() {
-        let mut enc = AudioEncoder::new(true, 24_000, false);
+        let mut enc = AudioEncoder::new(true, 24_000, false, 10);
         // Each 10 ms (480-sample) mic frame yields exactly one Opus
         // packet — same cadence as the mic, no buffering.
         let pkts = enc.push(&vec![1000i16; 480]);
@@ -1948,6 +1982,41 @@ mod tests {
         );
         let out = decode_opus(&mut dec, &pkts[0].1);
         assert_eq!(out.len(), OPUS_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn opus_20ms_frame_encodes_and_decodes() {
+        // Server advertises 20 ms frames (960 samples). Pushing exactly
+        // 960 samples must yield exactly one packet, which decodes back to
+        // 960 samples.
+        let mut enc = AudioEncoder::new(true, 24_000, false, 20);
+        let pkts = enc.push(&vec![1000i16; 960]);
+        assert_eq!(pkts.len(), 1, "960 samples at 20 ms frame → 1 packet");
+        assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
+        let mut dec = Some(
+            audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
+                .unwrap(),
+        );
+        let out = decode_opus(&mut dec, &pkts[0].1);
+        assert_eq!(out.len(), 960, "20 ms frame decodes to 960 samples");
+    }
+
+    #[test]
+    fn opus_40ms_frame_encodes_and_decodes() {
+        // Server advertises 40 ms frames (1920 samples). Pushing exactly
+        // 1920 samples must yield exactly one packet, which decodes back to
+        // 1920 samples. This also exercises the decode buffer fix: a 30 ms
+        // buffer (OPUS_FRAME_SAMPLES * 3 = 1440) would overflow here.
+        let mut enc = AudioEncoder::new(true, 24_000, false, 40);
+        let pkts = enc.push(&vec![1000i16; 1920]);
+        assert_eq!(pkts.len(), 1, "1920 samples at 40 ms frame → 1 packet");
+        assert_eq!(pkts[0].0, VERSION_AUDIO_OPUS);
+        let mut dec = Some(
+            audiopus::coder::Decoder::new(audiopus::SampleRate::Hz48000, audiopus::Channels::Mono)
+                .unwrap(),
+        );
+        let out = decode_opus(&mut dec, &pkts[0].1);
+        assert_eq!(out.len(), 1920, "40 ms frame decodes to 1920 samples");
     }
 
     /// Egress benchmark: encode a realistic speech-with-silence stream
@@ -1983,7 +2052,7 @@ mod tests {
 
         // Encode the same stream twice; sum the Opus payload bytes.
         let run = |dtx: bool| -> (usize, usize) {
-            let mut enc = AudioEncoder::new(true, 24_000, dtx);
+            let mut enc = AudioEncoder::new(true, 24_000, dtx, 10);
             let mut phase = 0.0f32;
             let (mut bytes, mut packets) = (0usize, 0usize);
             for _ in 0..CYCLES {
@@ -2061,7 +2130,7 @@ mod tests {
 
     #[test]
     fn opus_flush_emits_partial_tail_then_clears() {
-        let mut enc = AudioEncoder::new(true, 24_000, false);
+        let mut enc = AudioEncoder::new(true, 24_000, false, 10);
         // A short, odd-sized frame leaves a partial remainder buffered.
         assert!(
             enc.push(&vec![1000i16; 200]).is_empty(),
@@ -2082,7 +2151,7 @@ mod tests {
 
     #[test]
     fn pcm_flush_is_a_noop() {
-        let mut enc = AudioEncoder::new(false, 0, false);
+        let mut enc = AudioEncoder::new(false, 0, false, 10);
         assert!(enc.flush().is_empty(), "PCM carries no buffer to flush");
     }
 

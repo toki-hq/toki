@@ -95,6 +95,20 @@ struct RateState {
     packets: u32,
 }
 
+/// Drop rate-limit entries whose window has gone stale — i.e. tokens that
+/// haven't sent an audio frame within the last `RATE_WINDOW`. A live
+/// transmitter refills its entry every window, so this only ever removes
+/// idle, disconnected, or spoofed-token entries; a token that transmits
+/// again just re-inserts with a fresh window (and a fresh, empty budget,
+/// which is correct — it wasn't mid-window). Keeps the map bounded to
+/// recently-active tokens instead of every token ever seen.
+fn prune_rate_state(
+    rate_state: &mut HashMap<[u8; toki_proto::wire::TOKEN_LEN], RateState>,
+    now: Instant,
+) {
+    rate_state.retain(|_, s| now.duration_since(s.window_start) < RATE_WINDOW);
+}
+
 pub async fn run(
     bind: SocketAddr,
     registry: SharedRegistry,
@@ -104,13 +118,20 @@ pub async fn run(
     tracing::info!(?bind, "audio relay listening");
 
     let mut buf = vec![0u8; MAX_AUDIO_PACKET];
-    // Per-token rate state. Single-threaded access from this loop so
-    // a plain HashMap is fine — no Mutex needed. Entries are pruned
-    // implicitly when a window expires and the token isn't refilled;
-    // an explicit prune of dead-token entries would be nice but
-    // tokens get evicted by the reaper anyway, so this never grows
-    // beyond active-session count.
+    // Per-token rate state. Single-threaded access from this loop so a
+    // plain HashMap is fine — no Mutex needed. The key is the raw token
+    // *off the wire*, inserted before the registry lookup (so a flooder
+    // can't make us take the registry lock — see the rate check below).
+    // That means a spoofed or stale token also creates an entry, and a
+    // window expiring only *resets* an entry, never removes it — so
+    // without an explicit sweep the map would grow unbounded under a
+    // distinct-token flood. `prune_rate_state` drops entries whose window
+    // has gone stale, bounding the map to recently-active tokens.
     let mut rate_state: HashMap<[u8; toki_proto::wire::TOKEN_LEN], RateState> = HashMap::new();
+    // Sweep `rate_state` at most once per window. Bounds both the map
+    // size and the amortized prune cost (one full scan / sec, not per
+    // packet) regardless of inbound rate.
+    let mut last_prune = Instant::now();
 
     loop {
         let (len, peer) = match socket.recv_from(&mut buf).await {
@@ -120,6 +141,14 @@ pub async fn run(
                 continue;
             }
         };
+        // Periodic cleanup of dead-token rate entries. Cheap (a single
+        // retain scan), gated to once per `RATE_WINDOW` so it stays O(1)
+        // amortized per packet even under a flood.
+        let now = Instant::now();
+        if now.duration_since(last_prune) >= RATE_WINDOW {
+            prune_rate_state(&mut rate_state, now);
+            last_prune = now;
+        }
         // Ingress accounting: count every received datagram (incl.
         // keepalives + rejected packets) — it's real bytes on the wire.
         counters.add_rx(len as u64);
@@ -162,7 +191,7 @@ pub async fn run(
         if is_audio(version) {
             let mut rate_key = [0u8; TOKEN_LEN];
             rate_key.copy_from_slice(token);
-            let now = Instant::now();
+            // Reuse the loop-level `now` snapshot taken above.
             let entry = rate_state.entry(rate_key).or_insert(RateState {
                 window_start: now,
                 packets: 0,
@@ -476,6 +505,49 @@ mod tests {
         assert!(!payload_shape_ok(VERSION_PONG, PING_LEN));
         assert!(!payload_shape_ok(99, 1));
         assert!(payload_shape_ok(99, 0));
+    }
+
+    #[test]
+    fn prune_drops_stale_keeps_live_rate_entries() {
+        // The leak: spoofed/dead-token entries (key = raw wire token) are
+        // never reaped and a window reset doesn't remove them, so the map
+        // grows unbounded under a distinct-token flood. The sweep must
+        // drop entries whose window has gone stale and keep active ones.
+        let now = Instant::now();
+        let mut map: HashMap<[u8; TOKEN_LEN], RateState> = HashMap::new();
+        // Live: window opened "now" — still inside RATE_WINDOW.
+        map.insert(
+            [1u8; TOKEN_LEN],
+            RateState {
+                window_start: now,
+                packets: 5,
+            },
+        );
+        // Stale: window opened well over a window ago (a token that sent
+        // once and vanished, or a spoofed flood token).
+        map.insert(
+            [2u8; TOKEN_LEN],
+            RateState {
+                window_start: now - (RATE_WINDOW + Duration::from_millis(500)),
+                packets: 1,
+            },
+        );
+        // Exactly at the boundary counts as stale (`>= RATE_WINDOW` resets
+        // a live entry anyway, so a boundary entry carries no live budget).
+        map.insert(
+            [3u8; TOKEN_LEN],
+            RateState {
+                window_start: now - RATE_WINDOW,
+                packets: 1,
+            },
+        );
+
+        prune_rate_state(&mut map, now);
+
+        assert!(map.contains_key(&[1u8; TOKEN_LEN]), "live entry dropped");
+        assert!(!map.contains_key(&[2u8; TOKEN_LEN]), "stale entry kept");
+        assert!(!map.contains_key(&[3u8; TOKEN_LEN]), "boundary entry kept");
+        assert_eq!(map.len(), 1);
     }
 
     #[test]

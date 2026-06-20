@@ -278,20 +278,18 @@ enum RecordTarget {
     FreqDown,
 }
 
-/// The four pages of the Settings window. Each renders full-height on the
-/// right while the sidebar lists them; the selected one is held in
-/// [`TokiApp::settings_tab`]. Grouped by theme rather than one-per-section
-/// so each page is a comfortable length:
+/// The three pages of the Settings window. Each renders full-height on
+/// the right while the sidebar lists them; the selected one is held in
+/// [`TokiApp::settings_tab`]. Grouped by theme:
 ///   * **Controls** — PTT + memory + tuning key bindings.
-///   * **Audio** — input/output devices, level meters, test tone, the
-///     self-monitor.
-///   * **Voice** — capture DSP (noise/AGC), playback Radio FX, roger beeps.
+///   * **Audio** — everything sound-related: input/output devices, level
+///     meters, test tone, self-monitor, capture DSP (noise/AGC), playback
+///     Radio FX, and roger beeps.
 ///   * **Updates** — version + the update checker.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     Controls,
     Audio,
-    Voice,
     Updates,
 }
 
@@ -300,7 +298,6 @@ impl SettingsTab {
     const ALL: &'static [(SettingsTab, &'static str)] = &[
         (SettingsTab::Controls, "CONTROLS"),
         (SettingsTab::Audio, "AUDIO"),
-        (SettingsTab::Voice, "VOICE"),
         (SettingsTab::Updates, "UPDATES"),
     ];
 }
@@ -3769,7 +3766,6 @@ impl TokiApp {
                     .show(ui, |ui| match self.settings_tab {
                         SettingsTab::Controls => self.paint_settings_controls(ui),
                         SettingsTab::Audio => self.paint_settings_audio(ui),
-                        SettingsTab::Voice => self.paint_settings_voice(ui),
                         SettingsTab::Updates => self.paint_settings_updates(ui),
                     });
             });
@@ -3804,8 +3800,10 @@ impl TokiApp {
         self.bind_row(ui, "FREQ DOWN", RecordTarget::FreqDown);
     }
 
-    /// AUDIO tab — input/output device pickers, live level meters, the
-    /// output test tone, and the self-monitor sidetone.
+    /// AUDIO tab — everything sound-related. The top of the page is the
+    /// device/level/test/self-monitor block here; it then calls
+    /// [`Self::paint_settings_voice`] for the capture DSP, Radio FX, and
+    /// roger-beep sections that share the page.
     fn paint_settings_audio(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "AUDIO");
 
@@ -3943,10 +3941,17 @@ impl TokiApp {
         // adjust the same `config.audio.{input,output}_gain` fields —
         // duplicating them in Settings just left two ways to change
         // the same value out of sync.
+
+        // The voice-processing sections (capture DSP, Radio FX, roger
+        // beeps) continue the same page below the device/level controls.
+        ui.add_space(14.0);
+        self.paint_settings_voice(ui);
     }
 
-    /// VOICE tab — capture DSP (noise suppression + AGC), the playback
-    /// Radio FX dirtier, and the roger-beep presets.
+    /// The voice-processing portion of the AUDIO tab: capture DSP (noise
+    /// suppression + AGC), the playback Radio FX dirtier, and the
+    /// roger-beep presets. Kept as its own method (called at the foot of
+    /// [`Self::paint_settings_audio`]) so the page reads in clear blocks.
     fn paint_settings_voice(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "VOICE DSP");
 

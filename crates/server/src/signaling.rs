@@ -603,14 +603,25 @@ impl Signaling for SignalingSvc {
     }
 
     /// Issue a register-challenge nonce for the optional identity
-    /// handshake. Stateless: the nonce carries its own timestamp +
-    /// keyed tag (see `crate::identity`), so there's nothing to
-    /// store, rate-limit, or clean up — an unauthenticated caller
-    /// hammering this RPC gets back self-expiring blobs.
+    /// handshake. Stateless: the nonce carries its own timestamp + keyed
+    /// tag (see `crate::identity`), so there's nothing to store or clean
+    /// up. It *is* per-IP rate-capped, though — issuing a nonce still
+    /// burns randomness + a keyed hash, and an unauthenticated caller
+    /// could otherwise hammer it for free at line rate. The cap is
+    /// independent of (and looser than) the register cap so a legitimate
+    /// connect's single challenge never eats the register budget.
     async fn identity_challenge(
         &self,
-        _request: Request<IdentityChallengeRequest>,
+        request: Request<IdentityChallengeRequest>,
     ) -> Result<Response<IdentityChallengeResponse>, Status> {
+        // Per-IP challenge rate cap. Sockets without a peer addr (Unix
+        // transports) skip the gate, same as register.
+        if let Some(ip) = request.remote_addr().map(|a| a.ip()) {
+            if let Err(reject) = self.throttle.try_challenge(ip).await {
+                tracing::warn!(?ip, ?reject, "identity_challenge throttled");
+                return Err(Status::resource_exhausted("too many challenge requests"));
+            }
+        }
         Ok(Response::new(IdentityChallengeResponse {
             nonce: crate::identity::issue(&self.challenge_key, crate::admin::db::now_unix() as u64),
         }))

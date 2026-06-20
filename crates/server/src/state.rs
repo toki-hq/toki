@@ -92,6 +92,12 @@ pub struct Client {
     /// disconnect — session-scoped, like `priority_freq`. The durable,
     /// identity-keyed tier is a deliberate later slice.
     pub muted: bool,
+    /// Admin-granted global-broadcast capability. When true, this session
+    /// may key the broadcast PTT, which simultaneously seizes every occupied
+    /// room. Session-scoped: cleared on disconnect. Only one client holds it
+    /// at a time (admin RPC enforces); the broadcast itself is additionally
+    /// serialized by `Registry.broadcast_active`.
+    pub can_global_broadcast: bool,
     /// Most-recent connection-quality sample the client reported via
     /// `Signaling.ReportConnectionQuality`. `None` until the first
     /// report lands — the server can't measure these itself (only the
@@ -99,6 +105,30 @@ pub struct Client {
     /// round trip), so it just stores what the client pushes up for the
     /// admin dashboard.
     pub quality: Option<ConnQuality>,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Client {
+            id: String::new(),
+            display_name: String::new(),
+            audio_token_hash: [0u8; TOKEN_HASH_LEN],
+            audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
+            audio_last_seq: 0,
+            audio_outbound_seq: 1,
+            audio_addr: None,
+            events_tx: None,
+            current_frequency: None,
+            priority_freq: None,
+            last_seen: std::time::Instant::now(),
+            connected_at: std::time::Instant::now(),
+            expected_ip: None,
+            identity: None,
+            muted: false,
+            can_global_broadcast: false,
+            quality: None,
+        }
+    }
 }
 
 /// Client-reported connection-quality metrics, denormalized onto the
@@ -175,6 +205,11 @@ pub struct Registry {
     /// 16-byte token; the relay hashes it and looks up here. The
     /// raw token is never persisted server-side after registration.
     pub tokens: HashMap<[u8; TOKEN_HASH_LEN], String>,
+    /// Global broadcast lock. `Some(client_id)` while a broadcast is live,
+    /// `None` when idle. Serializes concurrent broadcast attempts (first-come
+    /// wins). On Registry so the audio relay + signaling handler read it under
+    /// the existing registry lock with no extra synchronization.
+    pub broadcast_active: Option<String>,
 }
 
 impl Registry {

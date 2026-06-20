@@ -458,6 +458,11 @@ struct Shared {
     /// subtracts 1. Drained by the UI via
     /// [`InstalledHotkey::take_freq_delta`].
     freq_delta: Arc<Mutex<i32>>,
+    /// Optional dedicated global-broadcast PTT binding. When held,
+    /// backends emit `Cmd::BroadcastPttDown` / `Cmd::BroadcastPttUp`
+    /// on the press/release edges — mirroring the normal PTT path but
+    /// sending the broadcast variants. `None` = unbound (no-op).
+    broadcast: Arc<Mutex<Option<Input>>>,
 }
 
 impl Shared {
@@ -466,6 +471,7 @@ impl Shared {
         initial_secondary: Option<Input>,
         initial_memory: [Option<Input>; 4],
         initial_freq: [Option<Input>; 2],
+        initial_broadcast: Option<Input>,
     ) -> Self {
         Shared {
             current: Arc::new(Mutex::new([initial, initial_secondary])),
@@ -476,6 +482,7 @@ impl Shared {
             recalls: Arc::new(Mutex::new(Vec::new())),
             freq: Arc::new(Mutex::new(initial_freq)),
             freq_delta: Arc::new(Mutex::new(0)),
+            broadcast: Arc::new(Mutex::new(initial_broadcast)),
         }
     }
 }
@@ -498,6 +505,10 @@ struct BackendState {
     mem_prev: [bool; 4],
     /// Same, for the tune up/down hotkeys (`[up, down]`).
     freq_prev: [bool; 2],
+    /// `true` if the broadcast PTT binding was pressed last tick, for
+    /// `BroadcastPttDown/Up` edge detection (mirrors `ptt_down` but for
+    /// the dedicated broadcast slot).
+    broadcast_ptt_down: bool,
     /// While recording, the earliest-press timestamp of every
     /// currently-held input from this backend. Cleared on entry into
     /// recording mode so anything pressed *before* "Bind" isn't
@@ -632,6 +643,27 @@ fn process_tick(
         state.freq_prev[i] = is_pressed;
     }
 
+    // Broadcast PTT: edge detection mirrors the normal PTT path but for
+    // the dedicated broadcast slot. `just_exited` suppression avoids
+    // spurious down edges on the first tick after a bind session (the
+    // user was holding the key to finish recording). Only fires when
+    // the slot is bound (`Some`).
+    let broadcast_bound = *shared.broadcast.lock().unwrap();
+    let broadcast_pressed = broadcast_bound
+        .map(|inp| pressed.contains(&inp))
+        .unwrap_or(false);
+    if broadcast_pressed != state.broadcast_ptt_down && !just_exited {
+        state.broadcast_ptt_down = broadcast_pressed;
+        let cmd = if broadcast_pressed {
+            Cmd::BroadcastPttDown
+        } else {
+            Cmd::BroadcastPttUp
+        };
+        if cmd_tx.send(cmd).is_err() {
+            return false;
+        }
+    }
+
     state.was_recording = is_recording;
     true
 }
@@ -695,6 +727,17 @@ impl InstalledHotkey {
         std::mem::take(&mut *self.shared.freq_delta.lock().unwrap())
     }
 
+    /// Set (or clear, with `None`) the dedicated global-broadcast PTT
+    /// binding. When held, backends emit `Cmd::BroadcastPttDown/Up`
+    /// on the down/up edges, independent of the normal PTT slot.
+    // Called from the Settings panel when the user rebinds; not yet
+    // wired in the initial feature PR (the capability gating ships first).
+    #[allow(dead_code)]
+    pub fn rebind_broadcast_ptt(&mut self, input: Option<Input>) {
+        *self.shared.broadcast.lock().unwrap() = input;
+        info!(?input, "broadcast PTT rebound");
+    }
+
     /// Begin recording the next press. The recorded press is captured
     /// inside the polling thread so the user can release naturally
     /// without it being counted as a separate event.
@@ -751,6 +794,7 @@ pub fn install(
     initial_secondary: Option<Input>,
     initial_memory: [Option<Input>; 4],
     initial_freq: [Option<Input>; 2],
+    initial_broadcast: Option<Input>,
 ) -> InstalledHotkey {
     // Belt-and-braces: a hand-edited config could point at Space /
     // Enter / Escape even though the bind UI refuses to record them.
@@ -765,11 +809,18 @@ pub fn install(
     };
     let initial = initial.filter(|i| restriction_guard(*i));
     let initial_secondary = initial_secondary.filter(|i| restriction_guard(*i));
-    // Same restriction guard for the memory + freq hotkeys.
+    // Same restriction guard for the memory + freq hotkeys and broadcast PTT.
     let initial_memory = initial_memory.map(|i| i.filter(|i| !is_restricted(*i)));
     let initial_freq = initial_freq.map(|i| i.filter(|i| !is_restricted(*i)));
+    let initial_broadcast = initial_broadcast.filter(|i| !is_restricted(*i));
 
-    let shared = Shared::new(initial, initial_secondary, initial_memory, initial_freq);
+    let shared = Shared::new(
+        initial,
+        initial_secondary,
+        initial_memory,
+        initial_freq,
+        initial_broadcast,
+    );
 
     let available = spawn_kbm_poller(shared.clone(), cmd_tx.clone());
     spawn_gamepad_poller(shared.clone(), cmd_tx.clone());
@@ -1858,7 +1909,7 @@ mod tests {
         memory: [Option<Input>; 4],
         freq: [Option<Input>; 2],
     ) -> Shared {
-        Shared::new(ptt, None, memory, freq)
+        Shared::new(ptt, None, memory, freq, None)
     }
 
     /// Collect every `Cmd` available on the receiver right now.
@@ -2057,6 +2108,7 @@ mod tests {
             Some(secondary),
             Default::default(),
             Default::default(),
+            None,
         );
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = BackendState::default();

@@ -247,6 +247,53 @@ first boot:
 | `opusFrameMs` | `10` | Opus encoder frame duration advertised to clients at register: `10`, `20`, or `40` ms. Larger frames bundle more 10 ms capture chunks per UDP packet, reducing per-packet overhead on the O(N) relay fan-out — useful when per-packet overhead dominates payload (~53 B overhead vs ~30 B payload at 24 kbps/10 ms). Cost: +10 ms latency (20 ms) or +30 ms latency (40 ms) mouth-to-ear. Stacks with DTX. No effect when `voiceQuality` is Raw PCM. **Compatibility:** `opusFrameMs > 10` requires all clients to be on the release that introduced this setting or newer — older clients have a decode buffer sized for ≤30 ms (1440 samples) and would overflow on a 40 ms frame (1920 samples). |
 | `grpcPassword` | `""` | Runtime-editable shared secret. **Overridden** by `config.toml`'s `password` field — if TOML set one, the UI greys out this input. |
 
+#### Global Broadcast
+
+Global broadcast lets a designated client transmit simultaneously to every
+frequency room that currently has listeners — a server-wide all-hands
+announcement that cuts through every channel at once.
+
+**Granting and revoking**
+
+In the admin panel **Channels** view, open the context menu on any connected
+member and choose **Grant broadcast** / **Revoke broadcast**. The grant is
+**session-scoped** — it clears automatically when the client disconnects, so
+there is nothing to clean up after a broadcast session ends.
+
+Only **one client may hold the capability at a time.** Attempting to grant it
+to a second client while one already holds it is rejected by the server
+(`FAILED_PRECONDITION: another client already holds the global-broadcast
+capability`).
+
+Grant and revoke are both recorded in the audit log under the `global_broadcast`
+action with a `granted` or `revoked` detail.
+
+**What broadcast does on air**
+
+When the broadcaster keys their broadcast PTT:
+
+- The PTT floor is seized on every occupied frequency simultaneously.
+- Any member currently transmitting on their channel is cut off.
+- Local talkers on every frequency are blocked from keying up for the duration
+  of the broadcast.
+- Listeners hear only the broadcaster's voice — no other audio passes through.
+
+On release, all floors free again and normal half-duplex rules resume.
+
+Broadcast **pierces all mutes**: it reaches every listener regardless of
+channel-mute or member-mute status. It is an all-hands announcement and is
+unmutable by design.
+
+If the broadcaster disconnects mid-broadcast, the server clears the broadcast
+and frees all floors automatically.
+
+**Broadcast roger beep**
+
+Listeners hear a distinct three-step falling tone (C6 → G5 → C5) at the start
+of a broadcast. This "broadcast roger" is separate from the normal take-floor
+beep and the priority roger, so listeners can immediately tell a server-wide
+broadcast from priority traffic on their own channel.
+
 ### Client: per-user config
 
 The client persists preferences as TOML at the platform's standard config
@@ -278,6 +325,7 @@ Schema:
 | `[audio]` `agc` | bool | `true` | Capture-side automatic gain control (eases speech toward a fixed level: −18 dBFS target, up to +18 dB boost / −6 dB cut, speech-gated so pauses don't pump the noise floor). Toggleable live in Settings → Voice DSP. |
 | `[hotkey]` `binding` | string? | unset | Primary PTT binding, tagged form for any peripheral (e.g. `key:F8`, `mouse:Middle`, `gamepad:0:South`, `streamdeck:0x0fd9:0x0080:3`, `hid:0x046d:0xc52b:2:4`). Preferred over the legacy `key`/`mouse_button` below; written by all new saves. |
 | `[hotkey]` `secondary` | string? | unset | Optional fallback PTT binding (same tagged form). PTT fires while *either* the primary or this is held — e.g. a keyboard key backing up a gamepad button. |
+| `[hotkey]` `broadcast_ptt` | string? | unset | Optional global-broadcast PTT binding (same tagged form, e.g. `"key:F9"`). When held, sends a broadcast PTT the server fans out to every occupied frequency simultaneously. Omitted (unbound) by default. **Inert until an admin grants the global-broadcast capability to this session.** Separate from and additive to the normal PTT — the normal PTT continues to work on the broadcaster's own channel regardless. |
 | `[hotkey]` `key` | string? | `"Backquote"` | Legacy PTT keyboard binding (`keyboard_types::Code` variant name). Read-only fallback used only when `binding` is absent. |
 | `[hotkey]` `mouse_button` | string? | unset | Legacy PTT mouse binding (`Left`, `Right`, `Middle`, `Mouse4`, …). Read-only fallback used only when `binding` is absent. |
 | `[beeps]` `preset` | string | `"default"` | Roger-beep preset id. Unknown ids resolve to `default` at load time. |
@@ -479,7 +527,8 @@ Sections:
 
 Per-client actions in the roster: **kick**, **move** (to another frequency),
 **rename** (broadcasts `DisplayNameChanged`), **priority** (elect/clear a
-priority speaker on a channel), **mute**, and **ban**.
+priority speaker on a channel), **mute**, **ban**, and **grant/revoke broadcast**
+(see Global Broadcast below).
 
 **Mute** silences a member's *transmit* without disconnecting them: the
 server refuses their PTT presses (`SetMute`), so they stay connected and keep
@@ -528,10 +577,10 @@ client stays attributable.
 | `Signaling.Join` | gRPC server-stream | Pushes `Event`s (members joined/left, PTT, frequency change, rename, channel-name change). |
 | `Signaling.Leave` | gRPC | Explicit disconnect. |
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
-| `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
+| `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. A broadcast PTT (sent when the client holds the broadcast binding and holds the admin-granted global-broadcast capability) seizes floors on all occupied frequencies simultaneously. |
 | `Signaling.ReportConnectionQuality` | gRPC | Client pushes its locally-measured RTT / jitter / loss every few seconds; the server denormalizes the latest onto the session for the admin Rooms quality column. Advisory — a dropped report just delays the next refresh. |
 | UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = Opus frame whose duration is server-advertised via `RegisterResponse.opus_frame_ms` (10/20/40 ms → 480/960/1920 samples; absent or 0 = legacy 10 ms); `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
-| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
+| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban** / **grant-broadcast** / **revoke-broadcast**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |
 
@@ -637,8 +686,9 @@ dev variant of this stack (`cargo run` + Vite dev server).
 
 ```toml
 [hotkey]
-binding   = "key:F8"          # primary trigger
-secondary = "gamepad:0:South" # optional fallback (PTT fires if either is held)
+binding       = "key:F8"          # primary trigger
+secondary     = "gamepad:0:South" # optional fallback (PTT fires if either is held)
+broadcast_ptt = "key:F9"          # global-broadcast PTT (inert until admin grants capability)
 ```
 
 The `binding` / `secondary` values use the tagged form:
@@ -711,6 +761,19 @@ target. Verify the URL and that the DB accepts TLS connections.
 
 You hit `maxPeers` (default 256). Bump it in the admin panel's Server Config
 section.
+
+### Broadcast PTT is bound but does nothing
+
+The `broadcast_ptt` binding is inert until an admin grants the global-broadcast
+capability to your session from the Channels view (member context menu →
+**Grant broadcast**). The binding has no effect in open mode or before a grant —
+this is by design.
+
+### Admin panel rejects "Grant broadcast" with `FAILED_PRECONDITION`
+
+Another connected client already holds the global-broadcast capability. Only one
+client may hold it at a time. Revoke it from the current holder first (member
+context menu → **Revoke broadcast**), then grant it to the new client.
 
 ### `cargo build` fails with "could not find `protoc`"
 

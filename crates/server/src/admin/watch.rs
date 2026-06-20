@@ -36,6 +36,7 @@ fn fill_member_identity(m: &mut pb::Member, c: &Client) {
         m.identity_first_seen_unix = identity.first_seen.max(0) as u64;
     }
     m.muted = c.muted;
+    m.can_global_broadcast = c.can_global_broadcast;
     if let Some(q) = &c.quality {
         m.rtt_ms = q.rtt_ms;
         m.jitter_ms = q.jitter_ms;
@@ -236,6 +237,7 @@ mod tests {
             priority_freq: None,
             expected_ip: None,
             muted: false,
+            can_global_broadcast: false,
             quality: None,
         }
     }

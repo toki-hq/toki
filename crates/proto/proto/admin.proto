@@ -34,6 +34,15 @@ service Admin {
   rpc MoveClient(MoveClientRequest) returns (MoveClientResponse);
   rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
   rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
+  // Grant or revoke the *global broadcast* capability on a connected
+  // client. When granted, the client may key a dedicated broadcast PTT
+  // that simultaneously seizes every occupied frequency room, blocks
+  // local talkers, and reaches every listener regardless of mute.
+  // Session-scoped (cleared on disconnect). NOT_FOUND for an unknown id.
+  // FAILED_PRECONDITION if another client already holds the capability
+  // (only one at a time). If the client is mid-broadcast when revoked,
+  // the broadcast is torn down before the response returns.
+  rpc SetGlobalBroadcast(SetGlobalBroadcastRequest) returns (SetGlobalBroadcastResponse);
   // Server-side mute: revoke (or restore) a member's ability to take
   // the PTT floor, without disconnecting them. A muted member's press
   // is refused server-side — they stay connected and keep hearing the
@@ -165,6 +174,10 @@ message Member {
   // True once at least one quality report has been received for this
   // session. Gates the panel between "—" and an actual reading.
   bool quality_fresh = 13;
+  // True when an admin has granted this session the global-broadcast
+  // capability. Session-scoped (cleared on disconnect). The admin panel
+  // shows a "BCAST" badge and a grant/revoke toggle.
+  bool can_global_broadcast = 14;
 }
 
 // ── Server metadata + config ──────────────────────────────────────
@@ -262,6 +275,12 @@ message SetPriorityRequest {
   bool grant = 2;
 }
 message SetPriorityResponse {}
+
+message SetGlobalBroadcastRequest {
+  string id = 1;
+  bool grant = 2;
+}
+message SetGlobalBroadcastResponse {}
 
 message SetMuteRequest {
   string id = 1;

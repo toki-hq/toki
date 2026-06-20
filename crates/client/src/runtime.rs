@@ -71,6 +71,12 @@ pub enum Cmd {
     ChangeFrequency(String),
     PttDown,
     PttUp,
+    /// Press or release the dedicated global-broadcast PTT. Only effective
+    /// when the server has granted us broadcast capability (`can_broadcast`).
+    /// Sends `PttEvent { broadcast: true }` on the existing PushToTalk
+    /// stream; the server fans the audio out to every frequency room.
+    BroadcastPttDown,
+    BroadcastPttUp,
     /// Preview a beep with the current [`BeepParams`] values. No gRPC
     /// traffic and no session required — used by the Settings TEST
     /// buttons so the user can audition tone tweaks without having
@@ -392,6 +398,16 @@ async fn handle_cmd(
                 s.request_ptt(false).await;
             }
         }
+        Cmd::BroadcastPttDown => {
+            if let Some(s) = session.as_ref() {
+                s.request_broadcast_ptt(true, state).await;
+            }
+        }
+        Cmd::BroadcastPttUp => {
+            if let Some(s) = session.as_ref() {
+                s.request_broadcast_ptt(false, state).await;
+            }
+        }
         Cmd::TestBeep(kind) => {
             // Preview tones don't require an active session — they
             // just synthesise audio with the current BeepParams and
@@ -637,6 +653,11 @@ struct Session {
     /// `PttDown` is allowed; set whenever we send a `PttUp`.
     local_pressed: AtomicBool,
     cooldown_until: StdMutex<Option<Instant>>,
+    /// Separate debounce state for the broadcast PTT path so it can't
+    /// interfere with the normal PTT gate. Mirrors the semantics of
+    /// `local_pressed` / `cooldown_until` above.
+    broadcast_local_pressed: AtomicBool,
+    broadcast_cooldown_until: StdMutex<Option<Instant>>,
     udp: Arc<UdpSocket>,
     signaling: SignalingClient<Channel>,
     /// Outbound voice encoder (PCM or Opus per the server's advertised
@@ -948,6 +969,20 @@ impl Session {
                                     .lock()
                                     .unwrap()
                                     .log(format!("⚡ Preempted by {talker_name}"));
+                            } else if p.broadcast && (acquired || took_over) {
+                                // A global broadcast acquired the floor —
+                                // play the distinct three-step falling cue
+                                // so listeners know this is fleet-wide.
+                                // Supersedes the priority roger check below.
+                                let tone = audio::beep_pattern(
+                                    audio::BROADCAST_ROGER,
+                                    beeps_for_events.volume(),
+                                );
+                                push_playback(&effects_for_events, &tone);
+                                state_for_events
+                                    .lock()
+                                    .unwrap()
+                                    .log(format!("📡 BROADCAST: {talker_name}"));
                             } else if p.priority && (acquired || took_over) {
                                 // A priority speaker took the floor (idle-grant
                                 // or preemption). Everyone still listening hears
@@ -976,7 +1011,12 @@ impl Session {
                                     .lock()
                                     .unwrap()
                                     .log(format!("🔒 {talker_name} took the floor"));
-                            } else if released {
+                            } else if released && !p.broadcast {
+                                // Normal floor-clear cue. Suppressed when the
+                                // release belongs to a broadcast session
+                                // (`p.broadcast == true`) — the teardown is
+                                // silent on the listener side; only the
+                                // acquire deserves an audible signal.
                                 let preset = beeps_for_events.current_preset();
                                 let tone = audio::beep_pattern(
                                     preset.release.steps,
@@ -1137,6 +1177,24 @@ impl Session {
                                 } else if !pc.granted && was {
                                     st.log("⚡ Priority speaker status removed");
                                 }
+                            }
+                        }
+                        Some(Ev::BroadcastCapabilityChanged(bc)) => {
+                            // The server granted or revoked our global-broadcast
+                            // capability (or delivered the current standing on
+                            // join / change-frequency). Addressed only to us
+                            // (the server filters by client_id server-side, but
+                            // we double-check here for belt-and-braces safety).
+                            // Session-scoped: we do NOT clear it on channel
+                            // change — the server re-asserts it via this event.
+                            let mut st = state_for_events.lock().unwrap();
+                            if bc.client_id == self_id_for_events {
+                                st.can_broadcast = bc.granted;
+                                st.log(if bc.granted {
+                                    "📡 Global broadcast capability granted".to_string()
+                                } else {
+                                    "📡 Global broadcast capability revoked".to_string()
+                                });
                             }
                         }
                         None => {}
@@ -1358,6 +1416,8 @@ impl Session {
             ptt_tx,
             local_pressed: AtomicBool::new(false),
             cooldown_until: StdMutex::new(None),
+            broadcast_local_pressed: AtomicBool::new(false),
+            broadcast_cooldown_until: StdMutex::new(None),
             udp,
             signaling,
             encode: StdMutex::new(AudioEncoder::new(
@@ -1483,9 +1543,61 @@ impl Session {
             // sole arbiter. This field is only meaningful on the
             // server→client grant broadcast.
             priority: false,
+            // Normal PTT is never a broadcast; the server is the arbiter
+            // for the fan-out flag.
+            broadcast: false,
         };
         if let Err(e) = self.ptt_tx.send(evt).await {
             warn!(error = %e, "ptt send failed");
+        }
+    }
+
+    /// Request a global-broadcast PTT state change. Works like
+    /// [`Session::request_ptt`] but sends `broadcast: true` and is
+    /// gated on `state.can_broadcast` — the hotkey is silently inert
+    /// if the admin hasn't granted capability. Uses separate debounce
+    /// state (`broadcast_local_pressed` / `broadcast_cooldown_until`)
+    /// so it can't interfere with the normal PTT gate.
+    async fn request_broadcast_ptt(&self, pressed: bool, state: &SharedState) {
+        // Capability gate: if the admin hasn't granted broadcast capability,
+        // the hotkey does nothing. Re-checked on every press so a revocation
+        // that lands mid-hold takes effect on the next key event.
+        if !state.lock().unwrap().can_broadcast {
+            return;
+        }
+
+        if pressed {
+            // Already pressing broadcast PTT? Drop duplicate down.
+            if self.broadcast_local_pressed.load(Ordering::Relaxed) {
+                return;
+            }
+            // Inside the post-release cooldown? Drop.
+            let until = *self.broadcast_cooldown_until.lock().unwrap();
+            if let Some(t) = until {
+                if Instant::now() < t {
+                    return;
+                }
+            }
+            self.broadcast_local_pressed.store(true, Ordering::Relaxed);
+        } else {
+            // Orphan up (no matching down) — ignore.
+            if !self.broadcast_local_pressed.swap(false, Ordering::Relaxed) {
+                return;
+            }
+            *self.broadcast_cooldown_until.lock().unwrap() = Some(Instant::now() + PTT_COOLDOWN);
+        }
+
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let evt = PttEvent {
+            client_id: self.client_id.clone(),
+            pressed,
+            sequence: seq,
+            priority: false,
+            // This is the broadcast flag the server routes fleet-wide.
+            broadcast: true,
+        };
+        if let Err(e) = self.ptt_tx.send(evt).await {
+            warn!(error = %e, "broadcast ptt send failed");
         }
     }
 

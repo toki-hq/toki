@@ -381,6 +381,7 @@ impl TokiApp {
             config.hotkey.to_input_secondary(),
             config.hotkey.memory_inputs(),
             config.hotkey.freq_inputs(),
+            config.hotkey.broadcast_ptt_input(),
         );
 
         // Seed the channel index from the saved frequency. If the

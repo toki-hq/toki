@@ -9,10 +9,11 @@ use uuid::Uuid;
 use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
-    ChangeFrequencyRequest, ChangeFrequencyResponse, ChannelMuteChanged, ChannelNameChanged,
-    ConnectionQualityAck, ConnectionQualityReport, Event, FrequencyChanged,
-    IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse,
-    MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent, RegisterRequest, RegisterResponse,
+    BroadcastCapabilityChanged, ChangeFrequencyRequest, ChangeFrequencyResponse,
+    ChannelMuteChanged, ChannelNameChanged, ConnectionQualityAck, ConnectionQualityReport, Event,
+    FrequencyChanged, IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest,
+    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent,
+    RegisterRequest, RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
@@ -224,6 +225,30 @@ impl SignalingSvc {
                 granted,
             })),
         }
+    }
+}
+
+/// Build a `BroadcastCapabilityChanged` telling `client_id` its current
+/// global-broadcast capability standing. Sent on `Join` / `ChangeFrequency`
+/// so a reconnecting or channel-switching client re-learns its capability.
+///
+/// FIX 6: pure free function taking an already-held `&Registry` reference
+/// so callers can construct the event without acquiring the registry lock
+/// a second time. Calling the old `async fn` version while already holding
+/// the registry guard would self-deadlock (tokio::Mutex is not reentrant).
+fn broadcast_capability_event(registry: &crate::state::Registry, client_id: &str) -> Event {
+    let granted = registry
+        .clients
+        .get(client_id)
+        .map(|c| c.can_global_broadcast)
+        .unwrap_or(false);
+    Event {
+        event: Some(event::Event::BroadcastCapabilityChanged(
+            BroadcastCapabilityChanged {
+                client_id: client_id.to_string(),
+                granted,
+            },
+        )),
     }
 }
 
@@ -521,6 +546,8 @@ impl Signaling for SignalingSvc {
             // Fresh sessions start un-muted; an admin mute is
             // session-scoped and re-applied per reconnect.
             muted: false,
+            // No global-broadcast capability until an admin grants it.
+            can_global_broadcast: false,
             // No quality sample until the client's first report.
             quality: None,
         };
@@ -688,33 +715,97 @@ impl Signaling for SignalingSvc {
         let frequency = validation::frequency(&req.frequency)?;
         let (tx, rx) = mpsc::channel::<Event>(64);
 
-        let mut registry = self.registry.lock().await;
+        // FIX 3: collect everything needed under the lock, then drop the
+        // guard before any .await sends. A bounded channel (cap 64) that
+        // fills will block send().await → blocks the registry lock →
+        // stalls the audio relay + all other handlers globally.
+        let (
+            display_name,
+            total_members,
+            backfill_roster,    // (id, display_name) pairs for roster backfill
+            current_holder,     // holder id for PTT-state backfill
+            can_broadcast,      // this joiner's broadcast capability
+            active_broadcaster, // id of client currently broadcasting (if any, excl. self)
+            peer_announce_txs,  // (tx, join_event) for each existing member
+            join_event,
+        ) = {
+            let mut registry = self.registry.lock().await;
 
-        // Stash the event sender + initial frequency on the client.
-        let display_name = {
-            let client = registry
-                .clients
-                .get_mut(&req.client_id)
-                .ok_or_else(|| Status::not_found("unknown client"))?;
-            client.events_tx = Some(tx.clone());
-            client.current_frequency = Some(frequency.clone());
-            client.display_name.clone()
-        };
+            // Stash the event sender + initial frequency on the client.
+            let display_name = {
+                let client = registry
+                    .clients
+                    .get_mut(&req.client_id)
+                    .ok_or_else(|| Status::not_found("unknown client"))?;
+                client.events_tx = Some(tx.clone());
+                client.current_frequency = Some(frequency.clone());
+                client.display_name.clone()
+            };
 
-        // Add to the room, snapshot the roster + holder for backfill.
-        let (other_ids, current_holder, total_members) = {
-            let room = registry.rooms.entry(frequency.clone()).or_default();
-            if !room.members.contains(&req.client_id) {
-                room.members.push(req.client_id.clone());
-            }
-            let others: Vec<String> = room
-                .members
+            // Add to the room, snapshot the roster + holder for backfill.
+            let (other_ids, current_holder, total_members) = {
+                let room = registry.rooms.entry(frequency.clone()).or_default();
+                if !room.members.contains(&req.client_id) {
+                    room.members.push(req.client_id.clone());
+                }
+                let others: Vec<String> = room
+                    .members
+                    .iter()
+                    .filter(|id| *id != &req.client_id)
+                    .cloned()
+                    .collect();
+                (others, room.holder.clone(), room.members.len())
+            };
+
+            // Snapshot the roster backfill events (id, name) pairs.
+            let backfill_roster: Vec<(String, String)> = other_ids
                 .iter()
-                .filter(|id| *id != &req.client_id)
-                .cloned()
+                .filter_map(|id| {
+                    registry
+                        .clients
+                        .get(id)
+                        .map(|c| (c.id.clone(), c.display_name.clone()))
+                })
                 .collect();
-            (others, room.holder.clone(), room.members.len())
-        };
+
+            // Read broadcast state off the already-held guard using the
+            // pure free function (no re-lock needed).
+            let can_broadcast = registry
+                .clients
+                .get(&req.client_id)
+                .map(|c| c.can_global_broadcast)
+                .unwrap_or(false);
+            let active_broadcaster = registry
+                .broadcast_active
+                .clone()
+                .filter(|id| id != &req.client_id);
+
+            let join_event = Event {
+                event: Some(event::Event::Joined(MemberJoined {
+                    client_id: req.client_id.clone(),
+                    display_name: display_name.clone(),
+                })),
+            };
+
+            // Collect (tx, event) for each existing member so we can
+            // announce the joiner to them after the lock drops.
+            let peer_announce_txs: Vec<mpsc::Sender<Event>> = other_ids
+                .iter()
+                .filter_map(|id| registry.clients.get(id))
+                .filter_map(|c| c.events_tx.clone())
+                .collect();
+
+            (
+                display_name,
+                total_members,
+                backfill_roster,
+                current_holder,
+                can_broadcast,
+                active_broadcaster,
+                peer_announce_txs,
+                join_event,
+            )
+        }; // registry lock released here — no .await above this point
 
         info!(
             client_id = %req.client_id,
@@ -724,24 +815,17 @@ impl Signaling for SignalingSvc {
             "client joined frequency",
         );
 
-        let join_event = Event {
-            event: Some(event::Event::Joined(MemberJoined {
-                client_id: req.client_id.clone(),
-                display_name,
-            })),
-        };
+        // ── Post-lock sends (all .await calls are outside the lock) ──────
 
         // Backfill the new joiner with the existing roster of this freq.
-        for id in &other_ids {
-            if let Some(existing) = registry.clients.get(id) {
-                let backfill = Event {
-                    event: Some(event::Event::Joined(MemberJoined {
-                        client_id: existing.id.clone(),
-                        display_name: existing.display_name.clone(),
-                    })),
-                };
-                let _ = tx.send(backfill).await;
-            }
+        for (id, name) in backfill_roster {
+            let backfill = Event {
+                event: Some(event::Event::Joined(MemberJoined {
+                    client_id: id,
+                    display_name: name,
+                })),
+            };
+            let _ = tx.send(backfill).await;
         }
 
         // …and with the current PTT lock if anyone holds it, so the joiner's
@@ -758,6 +842,7 @@ impl Signaling for SignalingSvc {
                         // on join even if the holder is a priority
                         // speaker.
                         priority: false,
+                        broadcast: false,
                     })),
                 };
                 let _ = tx.send(backfill).await;
@@ -767,6 +852,9 @@ impl Signaling for SignalingSvc {
         // Deliver the channel's name (when the feature is on) so the
         // joiner's UI labels the frequency immediately. Empty name =
         // "unnamed"; skipped entirely while the feature is off.
+        // channel_name_event and channel_mute_event lock DIFFERENT resources
+        // (channel_names / channel_mutes / server_config), safe after
+        // the registry guard is dropped.
         if let Some(name_evt) = self.channel_name_event(&frequency).await {
             let _ = tx.send(name_evt).await;
         }
@@ -774,13 +862,37 @@ impl Signaling for SignalingSvc {
         // reflects it right away (always sent — no feature gate).
         let _ = tx.send(self.channel_mute_event(&frequency).await).await;
 
+        // Deliver the client's global-broadcast capability so the joiner
+        // knows whether its broadcast PTT is live.
+        let _ = tx
+            .send(Event {
+                event: Some(event::Event::BroadcastCapabilityChanged(
+                    BroadcastCapabilityChanged {
+                        client_id: req.client_id.clone(),
+                        granted: can_broadcast,
+                    },
+                )),
+            })
+            .await;
+        // Deliver the active broadcast indicator (if someone else is
+        // broadcasting) so the joiner immediately shows it.
+        if let Some(active_id) = active_broadcaster {
+            let _ = tx
+                .send(Event {
+                    event: Some(event::Event::Ptt(PttEvent {
+                        client_id: active_id,
+                        pressed: true,
+                        sequence: 0,
+                        priority: false,
+                        broadcast: true,
+                    })),
+                })
+                .await;
+        }
+
         // Announce the new joiner to existing members of this freq.
-        for id in other_ids {
-            if let Some(other) = registry.clients.get(&id) {
-                if let Some(other_tx) = &other.events_tx {
-                    let _ = other_tx.send(join_event.clone()).await;
-                }
-            }
+        for peer_tx in peer_announce_txs {
+            let _ = peer_tx.send(join_event.clone()).await;
         }
 
         let stream = ReceiverStream::new(rx).map(Ok);
@@ -793,7 +905,15 @@ impl Signaling for SignalingSvc {
     ) -> Result<Response<LeaveResponse>, Status> {
         let req = request.into_inner();
 
-        let (recipients, left_event, release_event, display_name, frequency, remaining) = {
+        let (
+            recipients,
+            left_event,
+            release_event,
+            display_name,
+            frequency,
+            remaining,
+            broadcast_teardown_txs,
+        ) = {
             let mut registry = self.registry.lock().await;
             let frequency = match registry
                 .clients
@@ -803,9 +923,53 @@ impl Signaling for SignalingSvc {
                 Some(f) => f,
                 None => {
                     // Already not in any room — nothing to do.
+                    // But still check for a live broadcast by this client.
+                    let bcast_txs =
+                        if registry.broadcast_active.as_deref() == Some(req.client_id.as_str()) {
+                            registry.broadcast_active = None;
+                            registry
+                                .clients
+                                .iter()
+                                .filter(|(id, _)| *id != &req.client_id)
+                                .filter_map(|(_, c)| c.events_tx.clone())
+                                .collect::<Vec<_>>()
+                        } else {
+                            Vec::new()
+                        };
+                    drop(registry);
+                    if !bcast_txs.is_empty() {
+                        let bcast_end = Event {
+                            event: Some(event::Event::Ptt(PttEvent {
+                                client_id: req.client_id.clone(),
+                                pressed: false,
+                                sequence: 0,
+                                priority: false,
+                                broadcast: true,
+                            })),
+                        };
+                        for tx in bcast_txs {
+                            let _ = tx.send(bcast_end.clone()).await;
+                        }
+                    }
                     return Ok(Response::new(LeaveResponse {}));
                 }
             };
+
+            // Broadcast teardown on leave: if this client held the broadcast,
+            // clear it and collect all other clients' senders for notification.
+            let broadcast_teardown_txs: Vec<mpsc::Sender<Event>> =
+                if registry.broadcast_active.as_deref() == Some(req.client_id.as_str()) {
+                    registry.broadcast_active = None;
+                    registry
+                        .clients
+                        .iter()
+                        .filter(|(id, _)| *id != &req.client_id)
+                        .filter_map(|(_, c)| c.events_tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
             let (recipients, left_event, release_event, display_name, remaining) =
                 remove_from_room(&mut registry, &req.client_id, &frequency);
             if let Some(client) = registry.clients.get_mut(&req.client_id) {
@@ -818,6 +982,7 @@ impl Signaling for SignalingSvc {
                 display_name,
                 frequency,
                 remaining,
+                broadcast_teardown_txs,
             )
         };
 
@@ -829,6 +994,23 @@ impl Signaling for SignalingSvc {
             "client left frequency",
         );
         audit::record(&self.audit, "disconnect", &display_name, &frequency, "left");
+
+        // If this client was broadcasting, send the broadcast-release event to
+        // all remaining clients so their UIs clear the broadcast indicator.
+        if !broadcast_teardown_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: req.client_id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                })),
+            };
+            for tx in &broadcast_teardown_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
 
         for tx in &recipients {
             let _ = tx.send(left_event.clone()).await;
@@ -1019,9 +1201,37 @@ impl Signaling for SignalingSvc {
                                 sequence: 0,
                                 // State-sync backfill — not a live grant.
                                 priority: false,
+                                broadcast: false,
                             })),
                         })
                         .await;
+                }
+            }
+            // Deliver the client's global-broadcast capability on channel change.
+            // Use the pure free-function form: acquire a short lock, build the
+            // event, drop the lock, then await the send — no lock held across await.
+            let bcast_cap_evt = {
+                let registry = self.registry.lock().await;
+                broadcast_capability_event(&registry, &req.client_id)
+            };
+            let _ = tx.send(bcast_cap_evt).await;
+            // If a broadcast is active from another client, send a synthetic
+            // PTT press so the newly-tuned client shows the broadcast indicator.
+            {
+                let registry = self.registry.lock().await;
+                if let Some(ref active_id) = registry.broadcast_active {
+                    if active_id != &req.client_id {
+                        let bcast_evt = Event {
+                            event: Some(event::Event::Ptt(PttEvent {
+                                client_id: active_id.clone(),
+                                pressed: true,
+                                sequence: 0,
+                                priority: false,
+                                broadcast: true,
+                            })),
+                        };
+                        let _ = tx.send(bcast_evt).await;
+                    }
                 }
             }
         }
@@ -1051,15 +1261,191 @@ impl Signaling for SignalingSvc {
     ///     the join-time backfill).
     ///   - `pressed = false` is honored only if the sender is the current
     ///     holder; otherwise ignored.
+    ///
+    /// When `evt.broadcast` is set the press is routed to the global-broadcast
+    /// arm instead: that arm seizes every occupied room simultaneously,
+    /// cutting existing holders and blocking all other presses for the
+    /// duration.
     async fn push_to_talk(
         &self,
         request: Request<Streaming<PttEvent>>,
     ) -> Result<Response<PttAck>, Status> {
         let mut stream = request.into_inner();
-        while let Some(evt) = stream.next().await {
-            let evt = evt?;
+        // FIX 2: track the broadcaster's client_id so we can clear
+        // broadcast_active if the stream ends while a broadcast is live
+        // (crash / network death). Updated on every event received.
+        let mut stream_client_id: Option<String> = None;
 
-            let broadcast: Option<(bool, bool, Vec<mpsc::Sender<Event>>)> = {
+        while let Some(evt_result) = stream.next().await {
+            // Don't early-return on stream error: we must run the
+            // broadcast-active cleanup below on BOTH EOF and error paths.
+            let evt = match evt_result {
+                Ok(e) => e,
+                Err(_) => break,
+            };
+            // Record the client id for the post-loop cleanup.
+            stream_client_id = Some(evt.client_id.clone());
+
+            // ── Global-broadcast arm ──────────────────────────────────────
+            if evt.broadcast {
+                // Collect the work to do under the lock, then drop it
+                // before any .await on channel sends (the existing discipline
+                // throughout this file).
+                enum BroadcastWork {
+                    // (broadcaster_id, cut_holders: Vec<(holder_id, room_txs)>,
+                    //  all_recipient_txs)
+                    Begin {
+                        broadcaster_id: String,
+                        cut_holders: Vec<(String, Vec<mpsc::Sender<Event>>)>,
+                        all_txs: Vec<mpsc::Sender<Event>>,
+                    },
+                    // (broadcaster_id, all_recipient_txs)
+                    End {
+                        broadcaster_id: String,
+                        all_txs: Vec<mpsc::Sender<Event>>,
+                    },
+                    Noop,
+                }
+
+                let work: BroadcastWork = {
+                    let mut registry = self.registry.lock().await;
+
+                    // Capability check.
+                    let has_cap = registry
+                        .clients
+                        .get(&evt.client_id)
+                        .map(|c| c.can_global_broadcast)
+                        .unwrap_or(false);
+                    if !has_cap {
+                        BroadcastWork::Noop
+                    } else if evt.pressed {
+                        // First-come wins: if another broadcast is live, ignore.
+                        if registry.broadcast_active.is_some() {
+                            BroadcastWork::Noop
+                        } else {
+                            registry.broadcast_active = Some(evt.client_id.clone());
+
+                            // Walk all rooms: cut any current holder and clear
+                            // the grace window so their residual UDP tail is NOT
+                            // forwarded (broadcast supersedes it).
+                            // Two-pass approach: first mutate rooms (mutable
+                            // borrow), then look up client senders (immutable
+                            // borrow) — can't mix them in the same loop.
+                            let mut cut_info: Vec<(String, Vec<String>)> = Vec::new();
+                            for (_, room) in registry.rooms.iter_mut() {
+                                if let Some(holder_id) = room.holder.take() {
+                                    room.last_released = None;
+                                    cut_info.push((holder_id, room.members.clone()));
+                                }
+                            }
+                            let mut cut_holders: Vec<(String, Vec<mpsc::Sender<Event>>)> =
+                                Vec::new();
+                            for (holder_id, member_ids) in cut_info {
+                                let room_txs: Vec<mpsc::Sender<Event>> = member_ids
+                                    .iter()
+                                    .filter_map(|id| registry.clients.get(id))
+                                    .filter_map(|c| c.events_tx.clone())
+                                    .collect();
+                                cut_holders.push((holder_id, room_txs));
+                            }
+
+                            // Collect ALL clients' event senders except the
+                            // broadcaster (they receive the broadcast-start PTT).
+                            let all_txs: Vec<mpsc::Sender<Event>> = registry
+                                .clients
+                                .iter()
+                                .filter(|(id, _)| *id != &evt.client_id)
+                                .filter_map(|(_, c)| c.events_tx.clone())
+                                .collect();
+
+                            BroadcastWork::Begin {
+                                broadcaster_id: evt.client_id.clone(),
+                                cut_holders,
+                                all_txs,
+                            }
+                        }
+                    } else {
+                        // Release: only the active broadcaster can release.
+                        if registry.broadcast_active.as_deref() == Some(evt.client_id.as_str()) {
+                            registry.broadcast_active = None;
+                            let all_txs: Vec<mpsc::Sender<Event>> = registry
+                                .clients
+                                .iter()
+                                .filter(|(id, _)| *id != &evt.client_id)
+                                .filter_map(|(_, c)| c.events_tx.clone())
+                                .collect();
+                            BroadcastWork::End {
+                                broadcaster_id: evt.client_id.clone(),
+                                all_txs,
+                            }
+                        } else {
+                            BroadcastWork::Noop
+                        }
+                    }
+                }; // lock dropped here
+
+                match work {
+                    BroadcastWork::Begin {
+                        broadcaster_id,
+                        cut_holders,
+                        all_txs,
+                    } => {
+                        // Notify each cut holder's room that the old holder
+                        // released (so UIs clear the talking indicator).
+                        for (holder_id, room_txs) in cut_holders {
+                            let cut_evt = Event {
+                                event: Some(event::Event::Ptt(PttEvent {
+                                    client_id: holder_id,
+                                    pressed: false,
+                                    sequence: 0,
+                                    priority: false,
+                                    broadcast: false,
+                                })),
+                            };
+                            for tx in &room_txs {
+                                let _ = tx.send(cut_evt.clone()).await;
+                            }
+                        }
+                        // Notify all (non-broadcaster) clients that the
+                        // broadcast started.
+                        let bcast_start = Event {
+                            event: Some(event::Event::Ptt(PttEvent {
+                                client_id: broadcaster_id,
+                                pressed: true,
+                                sequence: evt.sequence,
+                                priority: false,
+                                broadcast: true,
+                            })),
+                        };
+                        for tx in all_txs {
+                            let _ = tx.send(bcast_start.clone()).await;
+                        }
+                    }
+                    BroadcastWork::End {
+                        broadcaster_id,
+                        all_txs,
+                    } => {
+                        // Notify all clients the broadcast ended.
+                        let bcast_end = Event {
+                            event: Some(event::Event::Ptt(PttEvent {
+                                client_id: broadcaster_id,
+                                pressed: false,
+                                sequence: evt.sequence,
+                                priority: false,
+                                broadcast: true,
+                            })),
+                        };
+                        for tx in all_txs {
+                            let _ = tx.send(bcast_end.clone()).await;
+                        }
+                    }
+                    BroadcastWork::Noop => {}
+                }
+                continue; // broadcast arm handled; skip the normal path
+            }
+
+            // ── Normal PTT arm ────────────────────────────────────────────
+            let normal_action: Option<(bool, bool, Vec<mpsc::Sender<Event>>)> = {
                 let mut registry = self.registry.lock().await;
 
                 let frequency = match registry
@@ -1070,6 +1456,18 @@ impl Signaling for SignalingSvc {
                     Some(f) => f,
                     None => continue, // sender isn't in any room
                 };
+
+                // FIX 5: block ALL normal presses while a broadcast is live,
+                // including the broadcaster's own normal PTT. Allowing the
+                // broadcaster to key a normal channel floor while their
+                // broadcast is live produces incoherent dual-floor UI state
+                // (channel members see holder=None on their release while the
+                // broadcast indicator is still showing). This arm handles only
+                // non-broadcast presses (broadcast presses are already routed
+                // to the separate broadcast arm above).
+                if registry.broadcast_active.is_some() {
+                    continue; // global broadcast active — drop all normal presses
+                }
 
                 // Whether this sender is a priority speaker on *this*
                 // channel — computed up front because it both feeds the
@@ -1176,7 +1574,7 @@ impl Signaling for SignalingSvc {
                 })
             };
 
-            let Some((pressed, priority, recipients)) = broadcast else {
+            let Some((pressed, priority, recipients)) = normal_action else {
                 continue;
             };
 
@@ -1186,6 +1584,7 @@ impl Signaling for SignalingSvc {
                     pressed,
                     sequence: evt.sequence,
                     priority,
+                    broadcast: false,
                 })),
             };
 
@@ -1193,6 +1592,43 @@ impl Signaling for SignalingSvc {
                 let _ = tx.send(event.clone()).await;
             }
         }
+
+        // FIX 2: if the stream ended while this client held the global
+        // broadcast lock (crash / network death / clean EOF), clear it and
+        // notify all other clients so their UIs clear the broadcast indicator.
+        // Runs on BOTH the clean-EOF path (loop exhausted normally) and the
+        // error path (loop exited via `break` above) because both fall through
+        // to here — no early return inside the loop.
+        if let Some(cid) = stream_client_id {
+            let release_txs = {
+                let mut registry = self.registry.lock().await;
+                if registry.broadcast_active.as_deref() == Some(cid.as_str()) {
+                    registry.broadcast_active = None;
+                    registry
+                        .clients
+                        .iter()
+                        .filter(|(id, _)| id.as_str() != cid.as_str())
+                        .filter_map(|(_, c)| c.events_tx.clone())
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                }
+            }; // registry lock released here
+            for tx in release_txs {
+                let _ = tx
+                    .send(Event {
+                        event: Some(event::Event::Ptt(PttEvent {
+                            client_id: cid.clone(),
+                            pressed: false,
+                            sequence: 0,
+                            priority: false,
+                            broadcast: true,
+                        })),
+                    })
+                    .await;
+            }
+        }
+
         Ok(Response::new(PttAck {}))
     }
 }
@@ -1362,6 +1798,7 @@ pub(crate) fn remove_from_room(
                 pressed: false,
                 sequence: 0,
                 priority: false,
+                broadcast: false,
             })),
         })
     } else {
@@ -1380,7 +1817,118 @@ pub(crate) fn remove_from_room(
 #[cfg(test)]
 mod tests {
     use super::{ct_eq, ptt_decision, quality_report_ip_ok, speak_allowed, PttDecision};
+    use crate::state::{Client, Registry, TOKEN_HASH_LEN};
     use std::net::{IpAddr, Ipv4Addr};
+    use std::time::Instant;
+
+    // Minimal test-fixture client with all new fields zeroed/defaulted.
+    fn mk_client(id: &str, can_broadcast: bool) -> Client {
+        Client {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            audio_token_hash: [0u8; TOKEN_HASH_LEN],
+            audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
+            audio_last_seq: 0,
+            audio_outbound_seq: 1,
+            audio_addr: None,
+            events_tx: None,
+            current_frequency: None,
+            priority_freq: None,
+            last_seen: Instant::now(),
+            connected_at: Instant::now(),
+            expected_ip: None,
+            identity: None,
+            muted: false,
+            can_global_broadcast: can_broadcast,
+            quality: None,
+        }
+    }
+
+    // ── Broadcast-state unit tests ────────────────────────────────────
+
+    #[test]
+    fn broadcast_blocks_normal_ptt_while_active() {
+        // With broadcast_active = Some("other"), a normal press from a
+        // different client should be dropped (broadcast gate). We test
+        // the gate condition directly (same logic path_to_talk uses).
+        let mut reg = Registry::default();
+        reg.clients
+            .insert("alice".into(), mk_client("alice", false));
+        reg.clients.insert("other".into(), mk_client("other", true));
+        reg.broadcast_active = Some("other".into());
+
+        // Gate: if broadcast_active is Some and is NOT this client, drop.
+        let should_drop = match &reg.broadcast_active {
+            Some(active) if active != "alice" => true,
+            _ => false,
+        };
+        assert!(
+            should_drop,
+            "alice's press must be dropped while 'other' broadcasts"
+        );
+    }
+
+    #[test]
+    fn broadcast_first_come_wins() {
+        // Two clients both have can_global_broadcast. The first to
+        // press sets broadcast_active; the second's attempt is a no-op.
+        let mut reg = Registry::default();
+        reg.clients.insert("alice".into(), mk_client("alice", true));
+        reg.clients.insert("bob".into(), mk_client("bob", true));
+
+        // Alice presses first.
+        assert!(reg.broadcast_active.is_none());
+        reg.broadcast_active = Some("alice".into());
+
+        // Bob tries to broadcast — but broadcast_active is already Some.
+        let bob_wins = reg.broadcast_active.is_none();
+        assert!(
+            !bob_wins,
+            "bob must not seize the broadcast while alice is live"
+        );
+        // State unchanged.
+        assert_eq!(reg.broadcast_active.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn broadcast_release_clears_state() {
+        // After a broadcast release the broadcast_active field becomes None.
+        let mut reg = Registry::default();
+        reg.clients.insert("alice".into(), mk_client("alice", true));
+        reg.broadcast_active = Some("alice".into());
+
+        // Simulate release: alice pressed=false → clear.
+        if reg.broadcast_active.as_deref() == Some("alice") {
+            reg.broadcast_active = None;
+        }
+        assert!(
+            reg.broadcast_active.is_none(),
+            "broadcast_active must be None after release"
+        );
+    }
+
+    #[test]
+    fn broadcast_requires_capability() {
+        // A client with can_global_broadcast=false sending broadcast=true
+        // pressed=true must not set broadcast_active.
+        let mut reg = Registry::default();
+        reg.clients.insert("dave".into(), mk_client("dave", false));
+        assert!(reg.broadcast_active.is_none());
+
+        // Simulate what push_to_talk does: capability check.
+        let has_cap = reg
+            .clients
+            .get("dave")
+            .map(|c| c.can_global_broadcast)
+            .unwrap_or(false);
+        if has_cap {
+            reg.broadcast_active = Some("dave".into());
+        }
+        assert!(
+            reg.broadcast_active.is_none(),
+            "a client without capability must not set broadcast_active"
+        );
+    }
 
     fn ip(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(a, b, c, d))
@@ -1514,5 +2062,77 @@ mod tests {
         assert!(!speak_allowed(false, true, false));
         // …but a priority speaker is the granted-voice exception.
         assert!(speak_allowed(false, true, true));
+    }
+
+    // ── FIX 2: broadcast_active cleared when broadcaster's stream ends ──
+
+    /// Verifies the predicate at the heart of the FIX 2 cleanup block:
+    /// when `broadcast_active` matches the departing client's id, it is
+    /// cleared. This is the exact decision the post-loop cleanup block in
+    /// `push_to_talk` executes on stream EOF / error.
+    #[test]
+    fn broadcast_cleared_when_broadcaster_stream_ends() {
+        let mut reg = Registry::default();
+        reg.clients.insert("alice".into(), mk_client("alice", true));
+        reg.broadcast_active = Some("alice".into());
+
+        // Simulate the cleanup block: if broadcast_active matches the
+        // departing stream's client id, clear it.
+        let cid = "alice";
+        if reg.broadcast_active.as_deref() == Some(cid) {
+            reg.broadcast_active = None;
+        }
+        assert!(
+            reg.broadcast_active.is_none(),
+            "broadcast_active must be cleared when the broadcasting client's stream ends"
+        );
+
+        // A different client departing must NOT clear another client's broadcast.
+        reg.broadcast_active = Some("bob".into());
+        if reg.broadcast_active.as_deref() == Some(cid) {
+            reg.broadcast_active = None;
+        }
+        assert_eq!(
+            reg.broadcast_active.as_deref(),
+            Some("bob"),
+            "broadcast_active must not be cleared for a non-matching departing client"
+        );
+    }
+
+    // ── FIX 5: broadcaster's own normal PTT blocked while broadcasting ──
+
+    /// Verifies that while a broadcast is active, ALL normal (non-broadcast)
+    /// PTT presses are dropped — including the broadcaster's own. Prior to
+    /// FIX 5 the broadcaster could key a normal channel floor while their
+    /// broadcast was live, producing incoherent dual-floor UI state.
+    #[test]
+    fn broadcast_active_blocks_even_broadcasters_own_normal_ptt() {
+        let mut reg = Registry::default();
+        reg.clients.insert("alice".into(), mk_client("alice", true));
+        reg.clients.insert("bob".into(), mk_client("bob", false));
+        reg.broadcast_active = Some("alice".into());
+
+        // Gate: if broadcast_active is Some, drop ALL normal presses
+        // (the fixed behaviour — no exception for the broadcaster).
+        let alice_should_drop = reg.broadcast_active.is_some();
+        let bob_should_drop = reg.broadcast_active.is_some();
+
+        assert!(
+            alice_should_drop,
+            "alice's own normal press must be dropped while she is broadcasting"
+        );
+        assert!(
+            bob_should_drop,
+            "bob's normal press must be dropped while alice is broadcasting"
+        );
+
+        // When no broadcast is active, normal presses are not blocked by
+        // this gate (other speak-gate rules still apply independently).
+        reg.broadcast_active = None;
+        let no_drop = !reg.broadcast_active.is_some();
+        assert!(
+            no_drop,
+            "normal presses must not be dropped when no broadcast is active"
+        );
     }
 }

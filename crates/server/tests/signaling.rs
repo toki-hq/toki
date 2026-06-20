@@ -429,6 +429,7 @@ async fn boot_with_passwords(
         require_identity: false,
         unique_callsigns: true,
         opus_dtx: true,
+        opus_frame_ms: 10,
     };
     let server_config = Arc::new(RwLock::new(cfg));
     let svc = SignalingSvc::new(
@@ -558,6 +559,7 @@ async fn register_rejected_when_at_max_peers() {
         require_identity: false,
         unique_callsigns: true,
         opus_dtx: true,
+        opus_frame_ms: 10,
     })
     .await;
     for i in 0..2 {

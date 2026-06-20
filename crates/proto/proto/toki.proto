@@ -155,6 +155,11 @@ message RegisterResponse {
   // the existing path; no effect on the raw-PCM path. Advisory like the
   // other codec fields.
   bool opus_dtx = 7;
+  // Opus frame size the server wants clients to use: 10, 20, or 40 ms.
+  // Maps directly to the number of 48 kHz samples passed to the encoder
+  // (480 / 960 / 1920). Absent (0) means 10 ms — legacy behaviour.
+  // Larger frames reduce relay egress but add mouth-to-ear latency.
+  uint32 opus_frame_ms = 8;
 }
 
 message JoinRequest {

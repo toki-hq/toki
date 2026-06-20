@@ -244,6 +244,7 @@ first boot:
 | `voiceQuality` | `Standard` | Codec/quality advertised to clients at register: Raw PCM, or Low/Standard/High Opus. |
 | `namedChannels` | `off` | When on, clients receive admin-assigned channel names beside their tuner. |
 | `uniqueCallsigns` | `on` | When on, a register or admin rename onto a callsign another connected member already holds is refused (`ALREADY_EXISTS`, case-insensitive). A name frees the instant its holder disconnects; a keypair client reconnecting keeps its own name. Off allows duplicates. |
+| `opusFrameMs` | `10` | Opus encoder frame duration advertised to clients at register: `10`, `20`, or `40` ms. Larger frames bundle more 10 ms capture chunks per UDP packet, reducing per-packet overhead on the O(N) relay fan-out — useful when per-packet overhead dominates payload (~53 B overhead vs ~30 B payload at 24 kbps/10 ms). Cost: +10 ms latency (20 ms) or +30 ms latency (40 ms) mouth-to-ear. Stacks with DTX. No effect when `voiceQuality` is Raw PCM. **Compatibility:** `opusFrameMs > 10` requires all clients to be on the release that introduced this setting or newer — older clients have a decode buffer sized for ≤30 ms (1440 samples) and would overflow on a 40 ms frame (1920 samples). |
 | `grpcPassword` | `""` | Runtime-editable shared secret. **Overridden** by `config.toml`'s `password` field — if TOML set one, the UI greys out this input. |
 
 ### Client: per-user config
@@ -529,7 +530,7 @@ client stays attributable.
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
 | `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
 | `Signaling.ReportConnectionQuality` | gRPC | Client pushes its locally-measured RTT / jitter / loss every few seconds; the server denormalizes the latest onto the session for the admin Rooms quality column. Advisory — a dropped report just delays the next refresh. |
-| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame; `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
+| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = Opus frame whose duration is server-advertised via `RegisterResponse.opus_frame_ms` (10/20/40 ms → 480/960/1920 samples; absent or 0 = legacy 10 ms); `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
 | `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |
@@ -805,3 +806,20 @@ so there's no encoder buffering. Operators can drop to raw PCM or dial Opus
 quality from the admin panel; the codec lives entirely on the clients (the
 server relays opaque encrypted payloads), so adding future codecs is a
 client-only change plus a wire-version byte.
+
+**Opus frame size.** The server advertises a frame duration (10/20/40 ms) in
+`RegisterResponse.opus_frame_ms`; the client encoder accumulates that many
+10 ms capture chunks before sending one UDP packet. At 24 kbps/10 ms the
+payload is only ~30 B while per-packet overhead is ~53 B, so doubling the
+frame to 20 ms halves packet rate and cuts relay egress materially. Stacks with
+DTX (silence suppression) for further savings during speech pauses.
+
+The latency cost is +10 ms at 20 ms frames, +30 ms at 40 ms frames
+(mouth-to-ear). The default (10 ms) preserves the original low-latency
+behaviour.
+
+**Client-compatibility warning.** Clients older than the release that added
+`opus_frame_ms` carry a decode buffer sized for ≤30 ms (1440 samples). A 40 ms
+frame (1920 samples) would have overflowed that buffer — the bug is fixed in
+the same release. Do not raise `opusFrameMs` above `10` until every connected
+client is on this release or newer.

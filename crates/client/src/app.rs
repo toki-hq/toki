@@ -23,7 +23,7 @@ use crate::audio::{
     BeepPreset,
 };
 use crate::config::{self, HotkeyBinding};
-use crate::dsp::{DspParams, OutputDspParams};
+use crate::dsp::{DspParams, MonitorParams, OutputDspParams};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -133,6 +133,12 @@ pub struct TokiApp {
     /// runtime's UDP recv task per voice chunk, so the Settings toggle /
     /// intensity slider take effect on the next chunk. Off by default.
     output_dsp_params: OutputDspParams,
+    /// Live atomics behind the self-monitor (sidetone) test aid. Read by
+    /// the runtime's mic loop every frame: when enabled it loops the mic
+    /// (raw or DSP-processed, per `processed`) back to the speakers so the
+    /// operator can hear themselves and A/B the capture DSP. Always starts
+    /// off — not persisted — since a mic→speaker loop is a feedback risk.
+    monitor_params: MonitorParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -313,6 +319,11 @@ impl TokiApp {
         // task (same arrangement as the capture DSP above).
         let output_dsp_params =
             OutputDspParams::new(config.audio.output_dirty, config.audio.output_dirty_amount);
+        // Self-monitor atomics — always start off (not persisted; a
+        // mic→speaker loop left on across launches would howl) and default
+        // to monitoring the processed mic so the first listen shows the
+        // DSP at work. Shared live with the runtime's mic loop.
+        let monitor_params = MonitorParams::new(false, true);
         let cmd_tx = runtime::spawn(
             state.clone(),
             mic_rx,
@@ -320,6 +331,7 @@ impl TokiApp {
             beep_params.clone(),
             dsp_params.clone(),
             output_dsp_params.clone(),
+            monitor_params.clone(),
         );
 
         let initial = config.hotkey.to_input().or_else(|| {
@@ -382,6 +394,7 @@ impl TokiApp {
             beep_params,
             dsp_params,
             output_dsp_params,
+            monitor_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
@@ -3748,6 +3761,49 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::TestTone);
             }
         });
+
+        // Self-monitor (sidetone): loop the mic back to the speakers so
+        // the operator can hear themselves — a mic/device check, and with
+        // the SOURCE toggle an A/B of the capture DSP (noise suppression +
+        // AGC) on their own voice. Needs no session; writes straight into
+        // the shared `MonitorParams`, so it engages on the next mic frame.
+        // Not persisted — always starts off — because a mic→speaker loop
+        // over speakers howls; the caption nudges toward headphones.
+        settings_row(ui, "SELF MONITOR", |ui| {
+            let mut v = self.monitor_params.enabled();
+            if ui.checkbox(&mut v, "").changed() {
+                self.monitor_params.set_enabled(v);
+            }
+            ui.label(
+                egui::RichText::new("hear your own mic — use headphones (speakers feed back)")
+                    .color(T::WARN)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "SOURCE", |ui| {
+            // RAW vs PROCESSED A/B. Disabled until the monitor is on so
+            // it's clear the choice only matters while monitoring.
+            let on = self.monitor_params.enabled();
+            let mut processed = self.monitor_params.processed();
+            ui.add_enabled_ui(on, |ui| {
+                if ui.selectable_label(!processed, "RAW").clicked() {
+                    processed = false;
+                    self.monitor_params.set_processed(false);
+                }
+                if ui.selectable_label(processed, "PROCESSED").clicked() {
+                    processed = true;
+                    self.monitor_params.set_processed(true);
+                }
+            });
+            ui.label(
+                egui::RichText::new("PROCESSED = what peers hear (NS + AGC)")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+
         // Mic / Speaker gain sliders used to live here. They moved to
         // the bottom-row knobs (MIC VOL / SPK VOL) on the strip, which
         // adjust the same `config.audio.{input,output}_gain` fields —

@@ -34,7 +34,7 @@ use toki_proto::wire::{
 };
 
 use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
-use crate::dsp::{Dsp, DspParams, OutputDsp, OutputDspParams};
+use crate::dsp::{Dsp, DspParams, MonitorParams, OutputDsp, OutputDspParams};
 use crate::state::{ConnState, SharedState};
 use crate::telemetry::QualityTracker;
 
@@ -108,6 +108,7 @@ pub fn spawn(
     beeps: BeepParams,
     dsp_params: DspParams,
     output_dsp_params: OutputDspParams,
+    monitor_params: MonitorParams,
 ) -> UnboundedSender<Cmd> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
@@ -134,6 +135,7 @@ pub fn spawn(
                 beeps,
                 dsp_params,
                 output_dsp_params,
+                monitor_params,
             ));
         })
         .expect("spawn runtime thread");
@@ -149,6 +151,7 @@ async fn run(
     beeps: BeepParams,
     dsp_params: DspParams,
     output_dsp_params: OutputDspParams,
+    monitor_params: MonitorParams,
 ) {
     let mut session: Option<Session> = None;
     // Capture-side DSP (noise suppression + AGC), applied to every mic
@@ -188,8 +191,41 @@ async fn run(
             }
             frame = mic_rx.recv() => {
                 let Some(mut frame) = frame else { break; };
-                if let Some(s) = &session {
+                let monitoring = monitor_params.enabled();
+                // Run the capture DSP whenever a session is live *or* the
+                // self-monitor is on. Keeping it running while monitoring
+                // — even in raw mode — keeps the denoiser RNN / AGC gain
+                // warm, so flipping the monitor's RAW↔PROCESSED toggle is
+                // an instant A/B instead of a half-second of the AGC
+                // re-settling. With both stages off, `process` is a
+                // bit-exact passthrough, so this costs nothing then.
+                let want_dsp = session.is_some() || monitoring;
+                // Snapshot the raw mic *before* DSP only when the monitor
+                // needs it, so the common connected-not-monitoring path
+                // keeps its zero-copy in-place processing.
+                let raw = if monitoring && !monitor_params.processed() {
+                    Some(frame.clone())
+                } else {
+                    None
+                };
+                if want_dsp {
                     dsp.process(&mut frame);
+                }
+
+                // Self-monitor (sidetone): loop our own mic to the
+                // speakers so the operator can hear themselves and audibly
+                // confirm the DSP. Works with no session — it's a local
+                // test path. `raw` is `Some` only in RAW mode; otherwise
+                // we monitor the just-processed `frame`. push_voice keeps
+                // the sidetone backlog tight like incoming voice.
+                if monitoring {
+                    match &raw {
+                        Some(raw) => push_voice(&playback, raw),
+                        None => push_voice(&playback, &frame),
+                    }
+                }
+
+                if let Some(s) = &session {
                     // Server-side mute is a hard local gate: even if a PTT
                     // grant is somehow still set, a muted session uploads
                     // nothing (the relay would drop it anyway). The

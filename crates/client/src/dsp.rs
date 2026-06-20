@@ -142,6 +142,51 @@ impl DspParams {
     }
 }
 
+/// Lock-free controls for the **self-monitor** (sidetone): a test aid
+/// that loops the local mic back to the speakers so the operator can hear
+/// themselves — and, by flipping `processed`, A/B the raw mic against the
+/// capture DSP to confirm noise suppression + AGC are doing what they
+/// should. Same `Arc`-of-atomics pattern as [`DspParams`]; the runtime's
+/// mic loop reads both flags every frame so a Settings toggle is audible
+/// immediately.
+///
+/// Deliberately **not persisted**: it's a transient diagnostic, and a
+/// mic→speaker loop left on across restarts is a feedback-howl waiting to
+/// happen. Always starts off; the UI warns to wear headphones.
+#[derive(Clone)]
+pub struct MonitorParams {
+    enabled: Arc<AtomicBool>,
+    /// `true` → monitor the DSP-processed mic (what peers hear); `false`
+    /// → the raw, unprocessed mic. The A/B that makes the capture DSP's
+    /// effect audible.
+    processed: Arc<AtomicBool>,
+}
+
+impl MonitorParams {
+    pub fn new(enabled: bool, processed: bool) -> Self {
+        Self {
+            enabled: Arc::new(AtomicBool::new(enabled)),
+            processed: Arc::new(AtomicBool::new(processed)),
+        }
+    }
+
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::Relaxed);
+    }
+
+    pub fn set_processed(&self, on: bool) {
+        self.processed.store(on, Ordering::Relaxed);
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn processed(&self) -> bool {
+        self.processed.load(Ordering::Relaxed)
+    }
+}
+
 /// The stateful processor, owned by the runtime loop. Holds the RNNoise
 /// state and the AGC's current gain across frames.
 pub struct Dsp {
@@ -561,6 +606,17 @@ mod tests {
         p.set_agc(true);
         assert!(!p.noise_suppression());
         assert!(p.agc());
+    }
+
+    #[test]
+    fn monitor_params_toggles_round_trip() {
+        let m = MonitorParams::new(false, true);
+        assert!(!m.enabled());
+        assert!(m.processed());
+        m.set_enabled(true);
+        m.set_processed(false);
+        assert!(m.enabled());
+        assert!(!m.processed());
     }
 
     #[test]

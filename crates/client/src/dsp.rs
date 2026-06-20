@@ -44,9 +44,11 @@
 //!      "air"; this single step is most of the walkie-talkie character.
 //!   2. **Saturation** — a `tanh` soft-clipper adds the gritty, slightly
 //!      broken-up harmonics of an overdriven cheap amplifier.
-//!   3. **Static** — additive white noise with a steady squelch-floor
-//!      plus a component that rides the speech envelope, so quiet gaps
-//!      get a faint hiss and live speech sits in a bed of static.
+//!   3. **Static** — additive noise with a steady squelch-floor plus a
+//!      component that rides the speech envelope, so quiet gaps get a
+//!      faint hiss and live speech sits in a bed of static. The noise is
+//!      run through its own copy of the band-pass so the hiss sits in the
+//!      voice band — receiver static, not full-spectrum white noise.
 //!
 //! A single `amount` knob (0..1) crossfades dry→wet and scales the noise,
 //! so the operator can dial anywhere from "barely coloured" to "terrible
@@ -336,6 +338,12 @@ const SATURATION_DRIVE: f32 = 2.5;
 /// transmissions sit in a thicker bed of static than silence does.
 const NOISE_FLOOR: f32 = 120.0;
 const NOISE_SPEECH: f32 = 900.0;
+/// Make-up gain applied to the static *after* it's band-passed. The
+/// voice-band filter discards most of white noise's (full-spectrum)
+/// energy, so the band-limited hiss would otherwise be far quieter than
+/// the `NOISE_*` levels imply; ≈3× restores it to roughly the level the
+/// `amount` knob asks for. Empirical — adjust by ear, not by formula.
+const NOISE_BANDPASS_MAKEUP: f32 = 3.0;
 /// Envelope-follower decay per sample for the speech-riding noise. ≈ a
 /// 30 ms release at 48 kHz — fast enough to track syllables, slow enough
 /// that the static bed doesn't pump on every glottal pulse.
@@ -474,6 +482,14 @@ pub struct OutputDsp {
     params: OutputDspParams,
     hp: Biquad,
     lp: Biquad,
+    /// A *second* band-pass, run over the static before it's mixed in, so
+    /// the hiss occupies the same voice band as the signal — like real
+    /// receiver noise coming through the set's passband — instead of the
+    /// full-spectrum white hiss it'd be added raw. Separate filter state
+    /// from `hp`/`lp` because it processes a different stream (noise, not
+    /// voice); same cutoffs so voice and static share one passband.
+    noise_hp: Biquad,
+    noise_lp: Biquad,
     /// xorshift PRNG state for the additive static. Non-zero seed
     /// (xorshift latches on 0); the exact value is unimportant — this is
     /// decorative noise, not anything peers must agree on.
@@ -489,6 +505,8 @@ impl OutputDsp {
             params,
             hp: Biquad::high_pass(HP_HZ, sr),
             lp: Biquad::low_pass(LP_HZ, sr),
+            noise_hp: Biquad::high_pass(HP_HZ, sr),
+            noise_lp: Biquad::low_pass(LP_HZ, sr),
             rng: 0x2545_f491,
             env: 0.0,
         }
@@ -539,8 +557,16 @@ impl OutputDsp {
                 self.env * ENV_DECAY
             };
             let env_norm = (self.env / i16::MAX as f32).clamp(0.0, 1.0);
-            let noise = next_white(&mut self.rng) * (floor + speech * env_norm);
-            wet += noise;
+            //    Band-pass the noise through its own filter pair so the
+            //    hiss sits in the voice band like real receiver static,
+            //    not as full-spectrum white noise. The band-pass throws
+            //    away most of white noise's energy, so a make-up gain
+            //    restores the level the `amount` knob asks for (same
+            //    reason the roger-beep noise renderer scales its output).
+            let raw_noise = next_white(&mut self.rng) * (floor + speech * env_norm);
+            let band_noise =
+                self.noise_lp.process(self.noise_hp.process(raw_noise)) * NOISE_BANDPASS_MAKEUP;
+            wet += band_noise;
 
             // Crossfade dry → wet by amount, then hard-clamp to i16.
             let out = dry + (wet - dry) * amount;
@@ -902,6 +928,47 @@ mod tests {
         let mut silent = vec![0i16; FRAME_SAMPLES];
         off.process(&mut silent);
         assert!(silent.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn output_static_is_band_limited() {
+        // The static must come through the voice-band filter, not as
+        // full-spectrum white hiss. We can detect that without an FFT:
+        // a low-pass at 2.6 kHz strongly correlates adjacent 48 kHz
+        // samples, so the mean sample-to-sample difference (a discrete
+        // high-frequency proxy) is small relative to the RMS. Raw white
+        // noise, with independent neighbours, has a difference ≈ √2×RMS.
+        //
+        // Feed silence so the output is *only* the noise bed, gather it,
+        // and compare the two HF ratios.
+        let hf_ratio = |sig: &[f32]| -> f32 {
+            let rms = rms(sig.iter().copied());
+            if rms == 0.0 {
+                return 0.0;
+            }
+            let diff =
+                sig.windows(2).map(|w| (w[1] - w[0]).abs()).sum::<f32>() / (sig.len() - 1) as f32;
+            diff / rms
+        };
+
+        let mut dsp = OutputDsp::new(OutputDspParams::new(true, 1.0));
+        let mut bed: Vec<f32> = Vec::new();
+        for _ in 0..40 {
+            let mut frame = vec![0i16; FRAME_SAMPLES];
+            dsp.process(&mut frame);
+            bed.extend(frame.iter().map(|&s| s as f32));
+        }
+
+        // Reference: raw white noise straight from the same generator.
+        let mut rng = 0x2545_f491_u32;
+        let white: Vec<f32> = (0..bed.len()).map(|_| next_white(&mut rng)).collect();
+
+        let band_hf = hf_ratio(&bed);
+        let white_hf = hf_ratio(&white);
+        assert!(
+            band_hf < white_hf * 0.5,
+            "static not band-limited: band HF ratio {band_hf} vs white {white_hf}"
+        );
     }
 
     #[test]

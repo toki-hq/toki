@@ -161,6 +161,15 @@ async fn run(
     // Toggles arrive live through `dsp_params`; with both stages off,
     // `process` is a bit-exact passthrough.
     let mut dsp = Dsp::new(dsp_params);
+    // A *second* radio-FX dirtier, private to the self-monitor path, so
+    // monitoring previews the full chain a peer hears — capture DSP *and*
+    // the playback Radio FX. It reads the same `OutputDspParams` atoms as
+    // the recv task's instance (one toggle drives both) but keeps its own
+    // filter / noise / envelope state: the two process different streams
+    // (your mic vs incoming voice) and must not share continuity. Off by
+    // default like the recv-side one, so it's a passthrough until the
+    // user turns Radio FX on.
+    let mut monitor_fx = OutputDsp::new(output_dsp_params.clone());
     // Tracks the confirmed-talking state across mic frames so we can
     // detect the talk→silent edge (PTT release) and flush the encoder's
     // trailing partial frame exactly once. The mic stream runs
@@ -201,9 +210,10 @@ async fn run(
                 // bit-exact passthrough, so this costs nothing then.
                 let want_dsp = session.is_some() || monitoring;
                 // Snapshot the raw mic *before* DSP only when the monitor
-                // needs it, so the common connected-not-monitoring path
+                // is in RAW mode — that's the buffer it'll loop back. The
+                // common connected-not-monitoring path skips the clone and
                 // keeps its zero-copy in-place processing.
-                let raw = if monitoring && !monitor_params.processed() {
+                let monitor_raw = if monitoring && !monitor_params.processed() {
                     Some(frame.clone())
                 } else {
                     None
@@ -214,15 +224,22 @@ async fn run(
 
                 // Self-monitor (sidetone): loop our own mic to the
                 // speakers so the operator can hear themselves and audibly
-                // confirm the DSP. Works with no session — it's a local
-                // test path. `raw` is `Some` only in RAW mode; otherwise
-                // we monitor the just-processed `frame`. push_voice keeps
-                // the sidetone backlog tight like incoming voice.
+                // confirm the chain. Works with no session — a local test
+                // path. We preview the *full* outgoing-to-peer chain:
+                //   RAW       → mic → (Radio FX)
+                //   PROCESSED → mic → capture DSP → (Radio FX)
+                // so Radio FX is heard here too when it's on (its recv-task
+                // instance only colours *incoming* network voice). We dirty
+                // an owned copy, never `frame` itself — `frame` still goes
+                // to peers untouched, and applying our local Radio FX to it
+                // would wrongly pre-dirty their audio. push_voice keeps the
+                // sidetone backlog tight like incoming voice.
                 if monitoring {
-                    match &raw {
-                        Some(raw) => push_voice(&playback, raw),
-                        None => push_voice(&playback, &frame),
-                    }
+                    // RAW reuses the pre-DSP snapshot; PROCESSED copies the
+                    // post-DSP frame so the peer-bound `frame` stays clean.
+                    let mut monitor_buf = monitor_raw.unwrap_or_else(|| frame.clone());
+                    monitor_fx.process(&mut monitor_buf);
+                    push_voice(&playback, &monitor_buf);
                 }
 
                 if let Some(s) = &session {

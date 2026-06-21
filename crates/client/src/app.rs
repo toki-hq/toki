@@ -1980,6 +1980,7 @@ impl TokiApp {
                 (pulsing, "CONN…", 1.0, T::INK_DIM)
             }
             _ if self.is_tuning() => (T::TX, "TUNING", 1.0, T::INK_DIM),
+            RadioState::Tx if snap.broadcast_active => (T::BROADCAST, "BCAST", 1.2, T::INK_DIM),
             RadioState::Tx => (T::TX, "TX", 1.2, T::INK_DIM),
             RadioState::Rx => (T::PRIMARY, "RX", 1.2, T::INK_DIM),
             RadioState::Busy => (T::WARN, "BUSY", 1.0, T::INK_DIM),
@@ -2113,7 +2114,7 @@ impl TokiApp {
             Pos2::new(left_rect.right() + T::GAP_ROW, rect.top()),
             rect.max,
         );
-        self.paint_oled_left(ui, painter, left_rect, st);
+        self.paint_oled_left(ui, painter, left_rect, st, snap.broadcast_active);
         self.paint_oled_center(painter, center_rect, snap, st);
     }
 
@@ -2123,6 +2124,7 @@ impl TokiApp {
         painter: &egui::Painter,
         rect: Rect,
         st: RadioState,
+        broadcasting: bool,
     ) {
         paint_panel(painter, rect, T::OLED, T::OLED_RIM, T::RADIUS_OLED, None);
         paint_scanlines(painter, rect, T::RADIUS_OLED);
@@ -2206,10 +2208,18 @@ impl TokiApp {
         } else {
             T::frequency_label(freq)
         };
+        // When *we* are the global broadcaster the frequency readout goes
+        // light blue (matching the rest of the broadcast cue) instead of
+        // the amber transmit colour.
+        let (tx_color, tx_glow) = if broadcasting {
+            (T::BROADCAST, T::BROADCAST_GLOW)
+        } else {
+            (T::TX, T::TX_GLOW)
+        };
         let active_color = if offline_view {
             T::INK_MUTE
         } else if matches!(st, RadioState::Tx) {
-            T::TX
+            tx_color
         } else {
             T::PRIMARY
         };
@@ -2219,7 +2229,7 @@ impl TokiApp {
             // skips them.
             Color32::TRANSPARENT
         } else if matches!(st, RadioState::Tx) {
-            T::TX_GLOW
+            tx_glow
         } else {
             T::PRIMARY_GLOW
         };
@@ -2633,7 +2643,7 @@ impl TokiApp {
             Pos2::new(rect.left() + pad_x, rect.top() + pad_y),
             Pos2::new(rect.right() - pad_x, rect.bottom() - status_h - pad_y),
         );
-        self.paint_waveform(painter, wave_rect, st);
+        self.paint_waveform(painter, wave_rect, st, snap.broadcast_active);
 
         // 1 px primary_ink divider between waveform and status row.
         let divider_y = rect.bottom() - status_h - 2.0;
@@ -2961,9 +2971,18 @@ impl TokiApp {
     /// We mirror the bars top + bottom so the panel reads like an
     /// audio analyzer rather than a one-sided meter — keeps visual
     /// weight in the center the same as the old waveform.
-    fn paint_waveform(&self, painter: &egui::Painter, rect: Rect, st: RadioState) {
+    fn paint_waveform(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        st: RadioState,
+        broadcasting: bool,
+    ) {
         let active = matches!(st, RadioState::Tx | RadioState::Rx);
         let color = match st {
+            // Our own broadcast transmit tints the analyzer light blue
+            // (matches the rest of the broadcast cue) instead of amber.
+            RadioState::Tx if broadcasting => T::BROADCAST,
             RadioState::Tx => T::TX,
             _ if active => T::PRIMARY,
             _ => T::PRIMARY_INK,
@@ -3753,11 +3772,11 @@ impl TokiApp {
         } else {
             match st {
                 // We are the global broadcaster: light-blue "BROADCASTING"
-                // with the broadcast glow, so our own button matches the
-                // fleet-wide cue listeners see instead of the amber TX look.
+                // with the broadcast gradient + glow, so our own button
+                // matches the fleet-wide cue listeners see — no amber leak.
                 RadioState::Tx if snap.broadcast_active => (
-                    T::PTT_TX_TOP,
-                    T::PTT_TX_BOTTOM,
+                    T::PTT_BCAST_TOP,
+                    T::PTT_BCAST_BOTTOM,
                     "BROADCASTING",
                     T::BROADCAST,
                     T::BROADCAST,
@@ -3822,8 +3841,11 @@ impl TokiApp {
             StrokeKind::Inside,
         );
 
-        // TX progress underline.
-        if matches!(st, RadioState::Tx) {
+        // TX progress underline. Not drawn while broadcasting — a
+        // broadcast has no per-transmission time cap, so there's no
+        // progress to show (and it would be an amber bar under a blue
+        // button).
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             let progress = self
                 .tx_start
                 .map(|s| s.elapsed().as_millis() as f32 / T::TX_LIMIT_MS as f32)
@@ -3855,7 +3877,11 @@ impl TokiApp {
                 label,
                 font_ui(12.0, true),
                 label_color,
-                T::TX_GLOW,
+                if snap.broadcast_active {
+                    T::BROADCAST_GLOW
+                } else {
+                    T::TX_GLOW
+                },
                 0.6,
             );
         } else {

@@ -87,6 +87,12 @@ pub const PTT_IDLE_TOP: Color32 = Color32::from_rgb(0x23, 0x26, 0x27);
 pub const PTT_IDLE_BOTTOM: Color32 = Color32::from_rgb(0x13, 0x15, 0x16);
 pub const PTT_TX_TOP: Color32 = Color32::from_rgb(0x6b, 0x49, 0x1c);
 pub const PTT_TX_BOTTOM: Color32 = Color32::from_rgb(0x3f, 0x2a, 0x10);
+/// Broadcast transmit gradient — the cool counterpart of the amber TX
+/// stops above, at matching luminance, so when *we* are the global
+/// broadcaster the button reads light-blue end to end (background
+/// included) instead of amber.
+pub const PTT_BCAST_TOP: Color32 = Color32::from_rgb(0x1c, 0x4a, 0x6b);
+pub const PTT_BCAST_BOTTOM: Color32 = Color32::from_rgb(0x10, 0x29, 0x3f);
 pub const PTT_BUSY_TOP: Color32 = Color32::from_rgb(0x6b, 0x1f, 0x1f);
 pub const PTT_BUSY_BOTTOM: Color32 = Color32::from_rgb(0x3e, 0x12, 0x12);
 // Muted: the button is inert (we can't transmit — operator member-mute

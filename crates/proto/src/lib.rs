@@ -229,6 +229,35 @@ mod wire_tests {
         assert!(is_audio(VERSION_AUDIO_PCM));
         assert!(is_audio(VERSION_AUDIO_OPUS));
     }
+
+    #[test]
+    fn s2c_header_layout_is_29_bytes() {
+        // version(1) + sender_id(4) + seq(8) + tag(16)
+        assert_eq!(HEADER_LEN_S2C, 1 + 4 + 8 + 16);
+        assert_eq!(SENDER_ID_LEN, 4);
+        // The S2C PCM packet must still fit under the global ceiling.
+        assert!(HEADER_LEN_S2C + FRAME_BYTES <= MAX_AUDIO_PACKET);
+    }
+
+    #[test]
+    fn s2c_aad_round_trips_version_and_sender() {
+        let aad = s2c_aad(VERSION_AUDIO_OPUS, 0xDEAD_BEEF);
+        assert_eq!(aad[0], VERSION_AUDIO_OPUS);
+        assert_eq!(
+            u32::from_le_bytes([aad[1], aad[2], aad[3], aad[4]]),
+            0xDEAD_BEEF
+        );
+        // Distinct (version, sender) pairs yield distinct AAD, so a
+        // packet resealed for one stream can't be replayed as another.
+        assert_ne!(
+            s2c_aad(VERSION_AUDIO_PCM, 1),
+            s2c_aad(VERSION_AUDIO_OPUS, 1)
+        );
+        assert_ne!(
+            s2c_aad(VERSION_AUDIO_OPUS, 1),
+            s2c_aad(VERSION_AUDIO_OPUS, 2)
+        );
+    }
 }
 
 /// Protocol-version compatibility between a Toki client and server.
@@ -395,40 +424,6 @@ mod identity_tests {
     const GOLDEN_FP_ZERO_KEY: &str = "FLNIHQMB";
     const GOLDEN_MH_MACHINE_ID: &str =
         "2e58173453ce7646e8fa5691e192c918b94cc12f3377a21aa0cb420be896bcf3";
-}
-
-#[cfg(test)]
-mod wire_tests {
-    use super::wire::*;
-
-    #[test]
-    fn s2c_header_layout_is_29_bytes() {
-        // version(1) + sender_id(4) + seq(8) + tag(16)
-        assert_eq!(HEADER_LEN_S2C, 1 + 4 + 8 + 16);
-        assert_eq!(SENDER_ID_LEN, 4);
-        // The S2C PCM packet must still fit under the global ceiling.
-        assert!(HEADER_LEN_S2C + FRAME_BYTES <= MAX_AUDIO_PACKET);
-    }
-
-    #[test]
-    fn s2c_aad_round_trips_version_and_sender() {
-        let aad = s2c_aad(VERSION_AUDIO_OPUS, 0xDEAD_BEEF);
-        assert_eq!(aad[0], VERSION_AUDIO_OPUS);
-        assert_eq!(
-            u32::from_le_bytes([aad[1], aad[2], aad[3], aad[4]]),
-            0xDEAD_BEEF
-        );
-        // Distinct (version, sender) pairs yield distinct AAD, so a
-        // packet resealed for one stream can't be replayed as another.
-        assert_ne!(
-            s2c_aad(VERSION_AUDIO_PCM, 1),
-            s2c_aad(VERSION_AUDIO_OPUS, 1)
-        );
-        assert_ne!(
-            s2c_aad(VERSION_AUDIO_OPUS, 1),
-            s2c_aad(VERSION_AUDIO_OPUS, 2)
-        );
-    }
 }
 
 #[cfg(test)]

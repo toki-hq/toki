@@ -870,7 +870,10 @@ mod tests {
     fn relay_allowed_non_broadcaster(
         broadcast_active: Option<&str>,
         duplex: crate::state::DuplexMode,
-        sender_id: &str,
+        // The relay guard doesn't depend on sender identity; kept in the
+        // signature so call sites read self-documentingly ("is alice
+        // allowed?"). Underscored to silence the unused-var lint.
+        _sender_id: &str,
     ) -> bool {
         // Mirror the relay logic exactly as it appears in `run` (else branch):
         // guard first, then duplex check.

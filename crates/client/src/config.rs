@@ -509,6 +509,45 @@ mod tests {
     }
 
     #[test]
+    fn broadcast_ptt_defaults_unbound_and_absent_from_toml() {
+        let hk = HotkeyConfig::default();
+        // Default: unbound.
+        assert_eq!(hk.broadcast_ptt_input(), None);
+        // Not serialized when unset.
+        let s = toml::to_string(&hk).unwrap();
+        assert!(
+            !s.contains("broadcast_ptt"),
+            "absent key must not appear: {s}"
+        );
+
+        // A TOML file without broadcast_ptt still deserializes fine.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.hotkey.broadcast_ptt_input(), None);
+    }
+
+    #[test]
+    fn broadcast_ptt_round_trips() {
+        use crate::hotkey::Input;
+        use global_hotkey::hotkey::Code;
+        let mut hk = HotkeyConfig::default();
+        hk.set_broadcast_ptt(Some(Input::Key(Code::F9)));
+        assert_eq!(hk.broadcast_ptt_input(), Some(Input::Key(Code::F9)));
+
+        let s = toml::to_string(&hk).unwrap();
+        assert!(
+            s.contains("broadcast_ptt"),
+            "bound key must be serialized: {s}"
+        );
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.broadcast_ptt_input(), Some(Input::Key(Code::F9)));
+
+        // Clearing removes it again.
+        let mut back = back;
+        back.set_broadcast_ptt(None);
+        assert_eq!(back.broadcast_ptt_input(), None);
+    }
+
+    #[test]
     fn parse_legacy_server_accepts_bare_host_port() {
         assert_eq!(
             parse_legacy_server("127.0.0.1:50051"),
@@ -699,6 +738,13 @@ pub struct HotkeyConfig {
     pub freq_up: HotkeyBinding,
     #[serde(default)]
     pub freq_down: HotkeyBinding,
+    /// Optional dedicated global-broadcast PTT binding. When held, sends a
+    /// broadcast PTT (distinct from the normal PTT) that the server fans out
+    /// to every frequency room. Unbound by default; only effective once an
+    /// admin grants global-broadcast capability. Same peripheral support as
+    /// the normal PTT binding. Stored as a tagged token (e.g. `"key:F9"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_ptt: Option<String>,
 }
 
 /// One binding for any peripheral, used for the four memory-recall and
@@ -778,6 +824,7 @@ impl Default for HotkeyConfig {
             m4: HotkeyBinding::default(),
             freq_up: HotkeyBinding::default(),
             freq_down: HotkeyBinding::default(),
+            broadcast_ptt: None,
         }
     }
 }
@@ -849,6 +896,19 @@ impl HotkeyConfig {
     /// for seeding the poller at startup.
     pub fn freq_inputs(&self) -> [Option<crate::hotkey::Input>; 2] {
         [self.freq_up.to_input(), self.freq_down.to_input()]
+    }
+
+    /// Parsed global-broadcast PTT binding, or `None` when unbound.
+    /// Uses the same tagged-token resolution as the primary PTT binding;
+    /// an unparseable or absent token returns `None`.
+    pub fn broadcast_ptt_input(&self) -> Option<crate::hotkey::Input> {
+        crate::hotkey::Input::from_token(self.broadcast_ptt.as_deref()?)
+    }
+
+    /// Set (or clear, with `None`) the broadcast PTT binding. Called
+    /// from the Settings panel's BROADCAST PTT bind row.
+    pub fn set_broadcast_ptt(&mut self, input: Option<crate::hotkey::Input>) {
+        self.broadcast_ptt = input.map(|i| i.to_token());
     }
 }
 

@@ -82,10 +82,32 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
                 "idle timeout",
             );
 
+            // If this client held the global broadcast, tear it down and
+            // collect all remaining clients' senders for the fleet-wide
+            // broadcast-release notification.
+            let broadcast_release_txs: Vec<mpsc::Sender<Event>> =
+                if r.broadcast_active.as_deref() == Some(id.as_str()) {
+                    r.broadcast_active = None;
+                    r.clients
+                        .values()
+                        .filter_map(|c| c.events_tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
             // Pull them out of their frequency room (if any). Mirror
             // of `Signaling::leave`'s cleanup, minus the explicit RPC.
             let Some(frequency) = client.current_frequency.clone() else {
-                // Never joined a room — no one to notify.
+                // Never joined a room — but still need to send broadcast teardown.
+                broadcasts.push(EvictionBroadcast {
+                    client_id: id.clone(),
+                    display_name: client.display_name.clone(),
+                    frequency: String::new(),
+                    recipients: Vec::new(),
+                    was_holder: false,
+                    broadcast_release_txs,
+                });
                 continue;
             };
             let was_holder = if let Some(room) = r.rooms.get_mut(&frequency) {
@@ -121,6 +143,7 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
                 frequency,
                 recipients,
                 was_holder,
+                broadcast_release_txs,
             });
         }
         broadcasts
@@ -134,6 +157,30 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
             was_holder = b.was_holder,
             "evicted stale client",
         );
+
+        // If the evicted client was broadcasting, tell all remaining clients
+        // the broadcast is over so their UIs clear the broadcast indicator.
+        if !b.broadcast_release_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: b.client_id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                    display_name: String::new(),
+                })),
+            };
+            for tx in &b.broadcast_release_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
+
+        if b.frequency.is_empty() {
+            // Lobby client — no room events to send.
+            continue;
+        }
+
         let left = Event {
             event: Some(event::Event::Left(MemberLeft {
                 client_id: b.client_id.clone(),
@@ -145,6 +192,8 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
                 pressed: false,
                 sequence: 0,
                 priority: false,
+                broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in &b.recipients {
@@ -162,4 +211,8 @@ struct EvictionBroadcast {
     frequency: String,
     recipients: Vec<mpsc::Sender<Event>>,
     was_holder: bool,
+    /// Event senders for all remaining clients, populated when the evicted
+    /// client was holding the global broadcast — used to send the fleet-wide
+    /// broadcast-release notification after the registry lock is dropped.
+    broadcast_release_txs: Vec<mpsc::Sender<Event>>,
 }

@@ -243,6 +243,27 @@ pub const PRIORITY_ROGER: &[BeepStep] = &[
     },
 ];
 
+/// Three-step falling cue heard fleet-wide when a *global broadcast*
+/// begins — distinct from the two-tone PRIORITY_ROGER (rising G5→C6) and
+/// the PREEMPTED_BUMP (C6→C5). Signals "all-hands broadcast" to every
+/// listener regardless of their channel. C6 (80 ms) → G5 (80 ms) → C5
+/// (120 ms) gives an unmistakable descending three-note pattern that reads
+/// as "attention — all stations" without being confused for a priority cue.
+pub const BROADCAST_ROGER: &[BeepStep] = &[
+    BeepStep::Tone {
+        freq_hz: C6,
+        duration_ms: 80,
+    },
+    BeepStep::Tone {
+        freq_hz: G5,
+        duration_ms: 80,
+    },
+    BeepStep::Tone {
+        freq_hz: C5,
+        duration_ms: 120,
+    },
+];
+
 /// Short descending cue heard *only* by the speaker who was bumped off
 /// the floor by a priority preemption. Pairs with the "Preempted by
 /// <name>" log line so the cut-off operator gets both an audible and a
@@ -1619,5 +1640,39 @@ mod beep_tests {
         assert_eq!(bp.volume(), 0.25);
         bp.set_volume(0.75);
         assert_eq!(bp.volume(), 0.75);
+    }
+
+    #[test]
+    fn broadcast_roger_is_distinct_from_priority_roger() {
+        // BROADCAST_ROGER and PRIORITY_ROGER must sound different so
+        // listeners can distinguish "all-hands broadcast" from "priority
+        // speaker took the floor". Verify they differ in step count or
+        // in at least one step's frequency.
+        let br_len = BROADCAST_ROGER.len();
+        let pr_len = PRIORITY_ROGER.len();
+        let same_length = br_len == pr_len;
+        if same_length {
+            // If they happen to have the same step count, at least one
+            // step must differ so the two patterns are audibly distinct.
+            let all_match = BROADCAST_ROGER
+                .iter()
+                .zip(PRIORITY_ROGER.iter())
+                .all(|(b, p)| {
+                    matches!(
+                        (b, p),
+                        (
+                            BeepStep::Tone { freq_hz: bf, .. },
+                            BeepStep::Tone { freq_hz: pf, .. }
+                        ) if (bf - pf).abs() < 1e-3
+                    )
+                });
+            assert!(
+                !all_match,
+                "BROADCAST_ROGER and PRIORITY_ROGER must differ in at least one step"
+            );
+        } else {
+            // Different lengths → already distinct.
+            assert_ne!(br_len, pr_len);
+        }
     }
 }

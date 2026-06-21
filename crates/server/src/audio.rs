@@ -346,53 +346,85 @@ pub async fn run(
                 continue;
             }
 
-            let frequency = registry
-                .clients
-                .get(&sender_id)
-                .and_then(|c| c.current_frequency.clone());
-            let Some(freq) = frequency else { continue };
-
-            let member_ids: Vec<String> = {
-                let Some(room) = registry.rooms.get(&freq) else {
-                    continue;
-                };
-                // Forward if the sender currently holds the floor, or if
-                // they just released it and we're still inside the grace
-                // window (covers UDP tail frames that lag the reliable
-                // PttUp which already cleared the holder). See RELEASE_GRACE.
-                let allowed = should_relay(
-                    room.holder.as_deref(),
-                    room.last_released
-                        .as_ref()
-                        .map(|(id, at)| (id.as_str(), at.elapsed())),
-                    &sender_id,
-                    RELEASE_GRACE,
-                );
-                if !allowed {
-                    continue;
-                }
-                room.members
-                    .iter()
+            // ── Global-broadcast fan-out ──────────────────────────────────
+            // When this sender is the active broadcaster, deliver to every
+            // connected client (except themselves). The normal per-room relay
+            // path is skipped entirely: broadcast pierces all rooms and mutes.
+            let is_broadcaster = registry.broadcast_active.as_deref() == Some(sender_id.as_str());
+            if is_broadcaster {
+                let mut targets: Vec<PeerTarget> = Vec::with_capacity(registry.clients.len());
+                // Collect in client insertion order (deterministic enough for
+                // relay; no ordering guarantee needed). Excludes the sender.
+                let peer_ids: Vec<String> = registry
+                    .clients
+                    .keys()
                     .filter(|id| *id != &sender_id)
                     .cloned()
-                    .collect()
-            };
-
-            let mut targets: Vec<PeerTarget> = Vec::with_capacity(member_ids.len());
-            for id in member_ids {
-                if let Some(other) = registry.clients.get_mut(&id) {
-                    if let Some(addr) = other.audio_addr {
-                        let seq = other.audio_outbound_seq;
-                        other.audio_outbound_seq = seq.saturating_add(1);
-                        targets.push(PeerTarget {
-                            addr,
-                            key: other.audio_mac_key,
-                            seq,
-                        });
+                    .collect();
+                for id in peer_ids {
+                    if let Some(other) = registry.clients.get_mut(&id) {
+                        if let Some(addr) = other.audio_addr {
+                            let seq = other.audio_outbound_seq;
+                            other.audio_outbound_seq = seq.saturating_add(1);
+                            targets.push(PeerTarget {
+                                addr,
+                                key: other.audio_mac_key,
+                                seq,
+                            });
+                        }
                     }
                 }
+                Some((plaintext, targets))
+            } else {
+                // ── Normal per-room fan-out ───────────────────────────────
+                let frequency = registry
+                    .clients
+                    .get(&sender_id)
+                    .and_then(|c| c.current_frequency.clone());
+                let Some(freq) = frequency else { continue };
+
+                let member_ids: Vec<String> = {
+                    let Some(room) = registry.rooms.get(&freq) else {
+                        continue;
+                    };
+                    // Forward if the sender currently holds the floor, or if
+                    // they just released it and we're still inside the grace
+                    // window (covers UDP tail frames that lag the reliable
+                    // PttUp which already cleared the holder). See RELEASE_GRACE.
+                    let allowed = should_relay(
+                        room.holder.as_deref(),
+                        room.last_released
+                            .as_ref()
+                            .map(|(id, at)| (id.as_str(), at.elapsed())),
+                        &sender_id,
+                        RELEASE_GRACE,
+                    );
+                    if !allowed {
+                        continue;
+                    }
+                    room.members
+                        .iter()
+                        .filter(|id| *id != &sender_id)
+                        .cloned()
+                        .collect()
+                };
+
+                let mut targets: Vec<PeerTarget> = Vec::with_capacity(member_ids.len());
+                for id in member_ids {
+                    if let Some(other) = registry.clients.get_mut(&id) {
+                        if let Some(addr) = other.audio_addr {
+                            let seq = other.audio_outbound_seq;
+                            other.audio_outbound_seq = seq.saturating_add(1);
+                            targets.push(PeerTarget {
+                                addr,
+                                key: other.audio_mac_key,
+                                seq,
+                            });
+                        }
+                    }
+                }
+                Some((plaintext, targets))
             }
-            Some((plaintext, targets))
         };
 
         let Some((plaintext, targets)) = dispatch else {
@@ -599,5 +631,115 @@ mod tests {
             "a",
             G
         ));
+    }
+
+    // ── Broadcast fan-out selection ───────────────────────────────────
+
+    /// Helper that mirrors the broadcast target-collection logic from `run`:
+    /// when `broadcast_active == Some(sender_id)`, collect every peer ID
+    /// that has an `audio_addr` set, excluding the sender.
+    fn collect_broadcast_targets(
+        registry: &crate::state::Registry,
+        sender_id: &str,
+    ) -> Vec<String> {
+        let is_broadcaster = registry.broadcast_active.as_deref() == Some(sender_id);
+        if !is_broadcaster {
+            return Vec::new();
+        }
+        let peer_ids: Vec<String> = registry
+            .clients
+            .keys()
+            .filter(|id| id.as_str() != sender_id)
+            .cloned()
+            .collect();
+        peer_ids
+            .into_iter()
+            .filter(|id| {
+                registry
+                    .clients
+                    .get(id)
+                    .and_then(|c| c.audio_addr)
+                    .is_some()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn broadcast_fans_out_to_all_clients() {
+        use crate::state::{Client, Registry, Room, TOKEN_HASH_LEN};
+        use std::net::{Ipv4Addr, SocketAddr};
+        use std::time::Instant;
+
+        let addr_of = |b: u8| -> SocketAddr {
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(10, 0, 0, b)), 4000)
+        };
+
+        let mk = |id: &str, freq: &str, addr: Option<SocketAddr>| -> Client {
+            let mut c = Client {
+                id: id.to_string(),
+                display_name: id.to_string(),
+                audio_token_hash: [0u8; TOKEN_HASH_LEN],
+                audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
+                audio_last_seq: 0,
+                audio_outbound_seq: 1,
+                audio_addr: addr,
+                events_tx: None,
+                current_frequency: Some(freq.to_string()),
+                priority_freq: None,
+                last_seen: Instant::now(),
+                connected_at: Instant::now(),
+                expected_ip: None,
+                identity: None,
+                muted: false,
+                can_global_broadcast: false,
+                quality: None,
+            };
+            c.can_global_broadcast = id == "broadcaster";
+            c
+        };
+
+        let mut reg = Registry::default();
+
+        // Broadcaster in room "A".
+        reg.clients.insert(
+            "broadcaster".into(),
+            mk("broadcaster", "A", Some(addr_of(1))),
+        );
+
+        // Two clients in room "A".
+        reg.clients
+            .insert("alice".into(), mk("alice", "A", Some(addr_of(2))));
+        reg.clients
+            .insert("bob".into(), mk("bob", "A", Some(addr_of(3))));
+
+        // One client in a different room "B".
+        reg.clients
+            .insert("carol".into(), mk("carol", "B", Some(addr_of(4))));
+
+        // One client with no UDP addr yet (never sent a packet).
+        reg.clients.insert(
+            "dave".into(),
+            mk("dave", "B", None), // no audio_addr
+        );
+
+        // Set up rooms.
+        let mut room_a = Room::default();
+        room_a.members = vec!["broadcaster".into(), "alice".into(), "bob".into()];
+        reg.rooms.insert("A".into(), room_a);
+        let mut room_b = Room::default();
+        room_b.members = vec!["carol".into(), "dave".into()];
+        reg.rooms.insert("B".into(), room_b);
+
+        reg.broadcast_active = Some("broadcaster".into());
+
+        let mut targets = collect_broadcast_targets(&reg, "broadcaster");
+        targets.sort(); // HashMap iteration order is non-deterministic.
+
+        // Should reach alice, bob, carol (have audio_addr) but NOT broadcaster,
+        // NOT dave (no addr).
+        assert_eq!(targets, vec!["alice", "bob", "carol"]);
+
+        // Sanity: a non-broadcaster sender produces no broadcast targets.
+        assert!(collect_broadcast_targets(&reg, "alice").is_empty());
     }
 }

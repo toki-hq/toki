@@ -274,6 +274,10 @@ enum RecordTarget {
     /// The secondary/fallback push-to-talk trigger. PTT fires while
     /// either the primary or this is held.
     PttSecondary,
+    /// The dedicated global-broadcast trigger. Inert until an admin
+    /// grants the capability; when held (and granted) it transmits to
+    /// every frequency at once. Separate from the normal PTT.
+    BroadcastPtt,
     /// Memory-recall hotkey for preset slot `0..4`.
     Memory(usize),
     /// Tune one channel up.
@@ -381,6 +385,7 @@ impl TokiApp {
             config.hotkey.to_input_secondary(),
             config.hotkey.memory_inputs(),
             config.hotkey.freq_inputs(),
+            config.hotkey.broadcast_ptt_input(),
         );
 
         // Seed the channel index from the saved frequency. If the
@@ -465,7 +470,14 @@ impl TokiApp {
         let holder = s.holder.clone();
         let is_transmitting = self_id.is_some() && holder.as_deref() == self_id.as_deref();
         let holder_name = if let Some(h) = &holder {
-            s.members.get(h).cloned().unwrap_or_else(|| h.clone())
+            // For a global broadcast the talker is usually on another
+            // frequency (not in our roster), so prefer the callsign the
+            // server stamped on the event; otherwise resolve from roster.
+            s.broadcast_talker
+                .clone()
+                .filter(|_| s.broadcast_active)
+                .or_else(|| s.members.get(h).cloned())
+                .unwrap_or_else(|| h.clone())
         } else {
             String::new()
         };
@@ -474,6 +486,7 @@ impl TokiApp {
             holder,
             holder_name,
             is_transmitting,
+            broadcast_active: s.broadcast_active,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
             muted: s.locally_silenced(),
@@ -731,6 +744,10 @@ struct StateSnapshot {
     holder: Option<String>,
     holder_name: String,
     is_transmitting: bool,
+    /// `true` when the current floor activity is a global broadcast.
+    /// Drives the distinct light-blue talking indicator (and the
+    /// "BROADCAST" label) in the center display while it's live.
+    broadcast_active: bool,
     /// Our own live callsign. Mirrors `ClientState.display_name` and
     /// changes mid-session when the admin renames us — read by the
     /// topbar so the change is visible without a reconnect.
@@ -1501,6 +1518,14 @@ impl eframe::App for TokiApp {
                             self.config.save();
                         }
                     }
+                    RecordTarget::BroadcastPtt => {
+                        if let Err(e) = self.hotkey.rebind_broadcast_ptt(Some(input)) {
+                            tracing::warn!(error = %e, "broadcast PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_broadcast_ptt(Some(input));
+                            self.config.save();
+                        }
+                    }
                     RecordTarget::Memory(i) => {
                         self.hotkey.rebind_memory(i, Some(input));
                         self.config
@@ -1539,7 +1564,12 @@ impl eframe::App for TokiApp {
         }
 
         // ── TX timer ────────────────────────────────────────────────
-        if matches!(st, RadioState::Tx) {
+        // The 30 s cap applies to a normal transmission only. A global
+        // broadcast is governed by the operator holding the dedicated
+        // broadcast key (released via the broadcast path, not Cmd::PttUp),
+        // and an all-hands announcement shouldn't be force-cut at the
+        // per-transmission cap — so skip the timer while broadcasting.
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             if self.tx_start.is_none() {
                 self.tx_start = Some(Instant::now());
             }
@@ -1957,6 +1987,7 @@ impl TokiApp {
                 (pulsing, "CONN…", 1.0, T::INK_DIM)
             }
             _ if self.is_tuning() => (T::TX, "TUNING", 1.0, T::INK_DIM),
+            RadioState::Tx if snap.broadcast_active => (T::BROADCAST, "BCAST", 1.2, T::INK_DIM),
             RadioState::Tx => (T::TX, "TX", 1.2, T::INK_DIM),
             RadioState::Rx => (T::PRIMARY, "RX", 1.2, T::INK_DIM),
             RadioState::Busy => (T::WARN, "BUSY", 1.0, T::INK_DIM),
@@ -2090,7 +2121,7 @@ impl TokiApp {
             Pos2::new(left_rect.right() + T::GAP_ROW, rect.top()),
             rect.max,
         );
-        self.paint_oled_left(ui, painter, left_rect, st);
+        self.paint_oled_left(ui, painter, left_rect, st, snap.broadcast_active);
         self.paint_oled_center(painter, center_rect, snap, st);
     }
 
@@ -2100,6 +2131,7 @@ impl TokiApp {
         painter: &egui::Painter,
         rect: Rect,
         st: RadioState,
+        broadcasting: bool,
     ) {
         paint_panel(painter, rect, T::OLED, T::OLED_RIM, T::RADIUS_OLED, None);
         paint_scanlines(painter, rect, T::RADIUS_OLED);
@@ -2183,10 +2215,18 @@ impl TokiApp {
         } else {
             T::frequency_label(freq)
         };
+        // When *we* are the global broadcaster the frequency readout goes
+        // light blue (matching the rest of the broadcast cue) instead of
+        // the amber transmit colour.
+        let (tx_color, tx_glow) = if broadcasting {
+            (T::BROADCAST, T::BROADCAST_GLOW)
+        } else {
+            (T::TX, T::TX_GLOW)
+        };
         let active_color = if offline_view {
             T::INK_MUTE
         } else if matches!(st, RadioState::Tx) {
-            T::TX
+            tx_color
         } else {
             T::PRIMARY
         };
@@ -2196,7 +2236,7 @@ impl TokiApp {
             // skips them.
             Color32::TRANSPARENT
         } else if matches!(st, RadioState::Tx) {
-            T::TX_GLOW
+            tx_glow
         } else {
             T::PRIMARY_GLOW
         };
@@ -2610,7 +2650,7 @@ impl TokiApp {
             Pos2::new(rect.left() + pad_x, rect.top() + pad_y),
             Pos2::new(rect.right() - pad_x, rect.bottom() - status_h - pad_y),
         );
-        self.paint_waveform(painter, wave_rect, st);
+        self.paint_waveform(painter, wave_rect, st, snap.broadcast_active);
 
         // 1 px primary_ink divider between waveform and status row.
         let divider_y = rect.bottom() - status_h - 2.0;
@@ -2666,28 +2706,51 @@ impl TokiApp {
                 );
             }
             RadioState::Tx => {
-                glow_text(
-                    painter,
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "● TRANSMITTING",
-                    font_mono(10.0),
-                    T::TX,
-                    T::TX_GLOW,
-                    0.6,
-                );
-                let remaining = self
-                    .tx_start
-                    .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
-                    .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
-                    .max(0.0);
-                painter.text(
-                    Pos2::new(right_x, status_y),
-                    Align2::RIGHT_CENTER,
-                    format!("{:.1}s LEFT", remaining),
-                    font_mono(10.0),
-                    T::TX,
-                );
+                // When *we* are the global broadcaster, show the broadcast
+                // identity (light blue "BROADCASTING TO ALL") instead of the
+                // normal amber transmit label, matching what listeners see.
+                if snap.broadcast_active {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 BROADCASTING",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        0.6,
+                    );
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        "ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "● TRANSMITTING",
+                        font_mono(10.0),
+                        T::TX,
+                        T::TX_GLOW,
+                        0.6,
+                    );
+                    let remaining = self
+                        .tx_start
+                        .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
+                        .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
+                        .max(0.0);
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.1}s LEFT", remaining),
+                        font_mono(10.0),
+                        T::TX,
+                    );
+                }
             }
             RadioState::Rx => {
                 let peer_label = if snap.holder_name.is_empty() {
@@ -2695,32 +2758,67 @@ impl TokiApp {
                 } else {
                     snap.holder_name.to_uppercase()
                 };
+                // A global broadcast tints the talking indicator light
+                // blue (with the broadcast glow) and labels it BROADCAST,
+                // so a fleet-wide announcement is unmistakable at a glance.
+                let (label, fill, glow, right) = if snap.broadcast_active {
+                    (
+                        format!("📡 {peer_label}"),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        "BROADCAST",
+                    )
+                } else {
+                    (
+                        format!("◐ {peer_label}"),
+                        T::PRIMARY,
+                        T::PRIMARY_GLOW,
+                        "RECEIVING",
+                    )
+                };
                 glow_text(
                     painter,
                     Pos2::new(left_x, status_y),
                     Align2::LEFT_CENTER,
-                    &format!("◐ {peer_label}"),
+                    &label,
                     font_mono(10.0),
-                    T::PRIMARY,
-                    T::PRIMARY_GLOW,
+                    fill,
+                    glow,
                     0.6,
                 );
                 painter.text(
                     Pos2::new(right_x, status_y),
                     Align2::RIGHT_CENTER,
-                    "RECEIVING",
+                    right,
                     font_mono(10.0),
-                    T::INK_DIM,
+                    if snap.broadcast_active {
+                        T::BROADCAST
+                    } else {
+                        T::INK_DIM
+                    },
                 );
             }
             RadioState::Busy => {
-                painter.text(
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
-                    font_mono(10.0),
-                    T::WARN,
-                );
+                // While a broadcast is live, "busy" is informational, not a
+                // collision — show it as a broadcast (light blue), not the
+                // alarming red used for a normal floor clash.
+                if snap.broadcast_active {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 GLOBAL BROADCAST · ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
+                        font_mono(10.0),
+                        T::WARN,
+                    );
+                }
             }
         }
     }
@@ -2880,9 +2978,18 @@ impl TokiApp {
     /// We mirror the bars top + bottom so the panel reads like an
     /// audio analyzer rather than a one-sided meter — keeps visual
     /// weight in the center the same as the old waveform.
-    fn paint_waveform(&self, painter: &egui::Painter, rect: Rect, st: RadioState) {
+    fn paint_waveform(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        st: RadioState,
+        broadcasting: bool,
+    ) {
         let active = matches!(st, RadioState::Tx | RadioState::Rx);
         let color = match st {
+            // Our own broadcast transmit tints the analyzer light blue
+            // (matches the rest of the broadcast cue) instead of amber.
+            RadioState::Tx if broadcasting => T::BROADCAST,
             RadioState::Tx => T::TX,
             _ if active => T::PRIMARY,
             _ => T::PRIMARY_INK,
@@ -3671,6 +3778,18 @@ impl TokiApp {
             )
         } else {
             match st {
+                // We are the global broadcaster: light-blue "BROADCASTING"
+                // with the broadcast gradient + glow, so our own button
+                // matches the fleet-wide cue listeners see — no amber leak.
+                RadioState::Tx if snap.broadcast_active => (
+                    T::PTT_BCAST_TOP,
+                    T::PTT_BCAST_BOTTOM,
+                    "BROADCASTING",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    1.4,
+                ),
                 RadioState::Tx => (
                     T::PTT_TX_TOP,
                     T::PTT_TX_BOTTOM,
@@ -3679,6 +3798,18 @@ impl TokiApp {
                     T::TX,
                     T::TX,
                     1.4,
+                ),
+                // A live global broadcast holds every floor — show it as a
+                // broadcast (calm light-blue label/dot over the idle shell)
+                // rather than the alarming red of a normal floor collision.
+                RadioState::Busy if snap.broadcast_active => (
+                    T::PTT_IDLE_TOP,
+                    T::PTT_IDLE_BOTTOM,
+                    "GLOBAL BROADCAST",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::SHELL_EDGE,
+                    0.0,
                 ),
                 RadioState::Busy => (
                     T::PTT_BUSY_TOP,
@@ -3717,8 +3848,11 @@ impl TokiApp {
             StrokeKind::Inside,
         );
 
-        // TX progress underline.
-        if matches!(st, RadioState::Tx) {
+        // TX progress underline. Not drawn while broadcasting — a
+        // broadcast has no per-transmission time cap, so there's no
+        // progress to show (and it would be an amber bar under a blue
+        // button).
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             let progress = self
                 .tx_start
                 .map(|s| s.elapsed().as_millis() as f32 / T::TX_LIMIT_MS as f32)
@@ -3750,7 +3884,11 @@ impl TokiApp {
                 label,
                 font_ui(12.0, true),
                 label_color,
-                T::TX_GLOW,
+                if snap.broadcast_active {
+                    T::BROADCAST_GLOW
+                } else {
+                    T::TX_GLOW
+                },
                 0.6,
             );
         } else {
@@ -3921,6 +4059,7 @@ impl TokiApp {
         let current = match target {
             RecordTarget::Ptt => self.config.hotkey.to_input(),
             RecordTarget::PttSecondary => self.config.hotkey.to_input_secondary(),
+            RecordTarget::BroadcastPtt => self.config.hotkey.broadcast_ptt_input(),
             RecordTarget::Memory(i) => self.config.hotkey.memory(i).to_input(),
             RecordTarget::FreqUp => self.config.hotkey.freq_up.to_input(),
             RecordTarget::FreqDown => self.config.hotkey.freq_down.to_input(),
@@ -3965,6 +4104,10 @@ impl TokiApp {
                         RecordTarget::PttSecondary => {
                             let _ = self.hotkey.rebind_secondary(None);
                             self.config.hotkey.set_ptt_secondary(None);
+                        }
+                        RecordTarget::BroadcastPtt => {
+                            let _ = self.hotkey.rebind_broadcast_ptt(None);
+                            self.config.hotkey.set_broadcast_ptt(None);
                         }
                         RecordTarget::Memory(i) => {
                             self.hotkey.rebind_memory(i, None);
@@ -4046,6 +4189,10 @@ impl TokiApp {
         // keyboard key backing up a gamepad button). PTT fires while
         // either is held.
         self.bind_row(ui, "PTT (2ND)", RecordTarget::PttSecondary);
+        // Dedicated global-broadcast trigger. Inert until an admin grants
+        // the capability; when held it transmits to every frequency at
+        // once (separate from the normal PTT above).
+        self.bind_row(ui, "BROADCAST PTT", RecordTarget::BroadcastPtt);
 
         ui.add_space(14.0);
         section_header(ui, "MEMORY HOTKEYS");

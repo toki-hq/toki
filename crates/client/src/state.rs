@@ -28,6 +28,20 @@ pub struct ClientState {
     /// or `None` if the floor is free. Updated only from authoritative
     /// server broadcasts — the local press never sets this.
     pub holder: Option<String>,
+    /// `true` when the current floor activity is a *global broadcast*
+    /// (someone with the broadcast capability is keyed, reaching every
+    /// frequency at once). Set from the `broadcast` flag on the holder's
+    /// `PttEvent`; cleared when the floor frees. The UI reads this each
+    /// frame to tint the talking indicator a distinct broadcast colour
+    /// instead of the normal busy colour. Tracks `holder`: when `holder`
+    /// is `None` this is always `false`.
+    pub broadcast_active: bool,
+    /// The broadcaster's callsign while `broadcast_active`, taken from the
+    /// `display_name` the server stamps on the broadcast `PttEvent`. The
+    /// broadcaster reaches every frequency, so they're usually NOT in our
+    /// roster — this carries their name so the indicator shows the callsign
+    /// rather than a raw id. `None` when no broadcast is in flight.
+    pub broadcast_talker: Option<String>,
     /// client_ids an operator has server-side muted, for the roster
     /// badge. Populated from `MuteChanged` events; pruned when a member
     /// leaves. Our own id appears here when *we're* muted (the runtime
@@ -47,6 +61,14 @@ pub struct ClientState {
     /// even on a muted channel — so this *overrides* `channel_muted` in
     /// `locally_silenced` (but never an individual member-mute).
     pub channel_priority: bool,
+    /// `true` when an admin has granted us the global-broadcast capability
+    /// for this session. Set by `BroadcastCapabilityChanged`. The broadcast
+    /// PTT binding is inert until this is true. Session-scoped; re-asserted
+    /// by the server on join/change-frequency, so never cleared locally on
+    /// channel hop — let the server's `BroadcastCapabilityChanged` be the
+    /// source of truth. Does NOT affect `locally_silenced()` / normal-speak
+    /// gating.
+    pub can_broadcast: bool,
     /// Live connection-quality readout for the current session, published
     /// by the runtime's measurement task. `None` while disconnected; the
     /// UI strip reads it each frame for the signal-bars glyph. Not part of
@@ -115,6 +137,43 @@ pub fn shared() -> SharedState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn can_broadcast_defaults_false() {
+        let s = ClientState::default();
+        assert!(!s.can_broadcast);
+        // can_broadcast does not affect locally_silenced.
+        let mut s2 = ClientState {
+            self_id: Some("me".into()),
+            can_broadcast: true,
+            channel_muted: true,
+            ..Default::default()
+        };
+        // Channel-muted without priority → silenced regardless of can_broadcast.
+        assert!(s2.locally_silenced());
+        // Grant priority — priority unblocks us (not can_broadcast).
+        s2.channel_priority = true;
+        assert!(!s2.locally_silenced());
+    }
+
+    #[test]
+    fn broadcast_active_defaults_false_and_is_independent_of_speak_gate() {
+        let s = ClientState::default();
+        assert!(
+            !s.broadcast_active,
+            "no broadcast in flight on a fresh state"
+        );
+        // broadcast_active is a pure display flag — it must not feed the
+        // local speak gate (that's holder/mute/priority's job).
+        let s2 = ClientState {
+            broadcast_active: true,
+            ..Default::default()
+        };
+        assert!(
+            !s2.locally_silenced(),
+            "broadcast_active alone never silences us"
+        );
+    }
 
     #[test]
     fn mute_set_tracks_membership() {

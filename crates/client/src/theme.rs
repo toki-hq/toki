@@ -34,6 +34,15 @@ pub const WARN: Color32 = Color32::from_rgb(0xff, 0x5c, 0x5c);
 /// dark UI much more easily — at parity it reads as alarming.
 pub const WARN_GLOW: Color32 = Color32::from_rgba_premultiplied(0x39, 0x14, 0x14, 0x5a);
 
+/// `oklch(0.74 0.13 245)` — global-broadcast indicator (light blue).
+/// A deliberately cool, distinct hue: when a broadcast is live the
+/// talking indicator tints to this instead of the normal busy red, so
+/// "the whole net is being addressed" reads at a glance, paired with
+/// the distinct broadcast roger. Sibling of `TX` / `WARN`.
+pub const BROADCAST: Color32 = Color32::from_rgb(0x4d, 0xb8, 0xff);
+/// `broadcast` at 50% alpha — outer glow when a broadcast is active.
+pub const BROADCAST_GLOW: Color32 = Color32::from_rgba_premultiplied(0x27, 0x5c, 0x80, 0x80);
+
 // ── Hardware shell (theme-independent) ──────────────────────────────────
 pub const SHELL: Color32 = Color32::from_rgb(0x0a, 0x0b, 0x0a);
 pub const SHELL_TOP: Color32 = Color32::from_rgb(0x1a, 0x1c, 0x1e);
@@ -78,6 +87,12 @@ pub const PTT_IDLE_TOP: Color32 = Color32::from_rgb(0x23, 0x26, 0x27);
 pub const PTT_IDLE_BOTTOM: Color32 = Color32::from_rgb(0x13, 0x15, 0x16);
 pub const PTT_TX_TOP: Color32 = Color32::from_rgb(0x6b, 0x49, 0x1c);
 pub const PTT_TX_BOTTOM: Color32 = Color32::from_rgb(0x3f, 0x2a, 0x10);
+/// Broadcast transmit gradient — the cool counterpart of the amber TX
+/// stops above, at matching luminance, so when *we* are the global
+/// broadcaster the button reads light-blue end to end (background
+/// included) instead of amber.
+pub const PTT_BCAST_TOP: Color32 = Color32::from_rgb(0x1c, 0x4a, 0x6b);
+pub const PTT_BCAST_BOTTOM: Color32 = Color32::from_rgb(0x10, 0x29, 0x3f);
 pub const PTT_BUSY_TOP: Color32 = Color32::from_rgb(0x6b, 0x1f, 0x1f);
 pub const PTT_BUSY_BOTTOM: Color32 = Color32::from_rgb(0x3e, 0x12, 0x12);
 // Muted: the button is inert (we can't transmit — operator member-mute

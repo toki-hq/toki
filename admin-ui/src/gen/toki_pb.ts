@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxImcKF0Nvbm5lY3Rpb25RdWFsaXR5UmVwb3J0EhEKCWNsaWVudF9pZBgBIAEoCRIOCgZydHRfbXMYAiABKA0SEQoJaml0dGVyX21zGAMgASgNEhYKDmxvc3NfcGN0X2NlbnRpGAQgASgNIhYKFENvbm5lY3Rpb25RdWFsaXR5QWNrIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIr4BChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0SEAoIb3B1c19kdHgYByABKAgSFQoNb3B1c19mcmFtZV9tcxgIIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2Ui0wMKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSAASLAoMbXV0ZV9jaGFuZ2VkGAcgASgLMhQudG9raS52MS5NdXRlQ2hhbmdlZEgAEjsKFGNoYW5uZWxfbXV0ZV9jaGFuZ2VkGAggASgLMhsudG9raS52MS5DaGFubmVsTXV0ZUNoYW5nZWRIABI0ChBwcmlvcml0eV9jaGFuZ2VkGAkgASgLMhgudG9raS52MS5Qcmlvcml0eUNoYW5nZWRIAEIHCgVldmVudCI3CgxNZW1iZXJKb2luZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIfCgpNZW1iZXJMZWZ0EhEKCWNsaWVudF9pZBgBIAEoCSIlChBGcmVxdWVuY3lDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCSI9ChJEaXNwbGF5TmFtZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSI1ChJDaGFubmVsTmFtZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEgwKBG5hbWUYAiABKAkiLwoLTXV0ZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEg0KBW11dGVkGAIgASgIIjYKEkNoYW5uZWxNdXRlQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDQoFbXV0ZWQYAiABKAgiSAoPUHJpb3JpdHlDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkSDwoHZ3JhbnRlZBgDIAEoCCJSCghQdHRFdmVudBIRCgljbGllbnRfaWQYASABKAkSDwoHcHJlc3NlZBgCIAEoCBIQCghzZXF1ZW5jZRgDIAEoBBIQCghwcmlvcml0eRgEIAEoCCIICgZQdHRBY2sy9gMKCVNpZ25hbGluZxI/CghSZWdpc3RlchIYLnRva2kudjEuUmVnaXN0ZXJSZXF1ZXN0GhkudG9raS52MS5SZWdpc3RlclJlc3BvbnNlEi4KBEpvaW4SFC50b2tpLnYxLkpvaW5SZXF1ZXN0Gg4udG9raS52MS5FdmVudDABEjYKBUxlYXZlEhUudG9raS52MS5MZWF2ZVJlcXVlc3QaFi50b2tpLnYxLkxlYXZlUmVzcG9uc2USVAoPQ2hhbmdlRnJlcXVlbmN5Eh8udG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0GiAudG9raS52MS5DaGFuZ2VGcmVxdWVuY3lSZXNwb25zZRIyCgpQdXNoVG9UYWxrEhEudG9raS52MS5QdHRFdmVudBoPLnRva2kudjEuUHR0QWNrKAESWgoRSWRlbnRpdHlDaGFsbGVuZ2USIS50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdBoiLnRva2kudjEuSWRlbnRpdHlDaGFsbGVuZ2VSZXNwb25zZRJaChdSZXBvcnRDb25uZWN0aW9uUXVhbGl0eRIgLnRva2kudjEuQ29ubmVjdGlvblF1YWxpdHlSZXBvcnQaHS50b2tpLnYxLkNvbm5lY3Rpb25RdWFsaXR5QWNrYgZwcm90bzM");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxImcKF0Nvbm5lY3Rpb25RdWFsaXR5UmVwb3J0EhEKCWNsaWVudF9pZBgBIAEoCRIOCgZydHRfbXMYAiABKA0SEQoJaml0dGVyX21zGAMgASgNEhYKDmxvc3NfcGN0X2NlbnRpGAQgASgNIhYKFENvbm5lY3Rpb25RdWFsaXR5QWNrIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIr4BChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0SEAoIb3B1c19kdHgYByABKAgSFQoNb3B1c19mcmFtZV9tcxgIIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2UioAQKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSAASLAoMbXV0ZV9jaGFuZ2VkGAcgASgLMhQudG9raS52MS5NdXRlQ2hhbmdlZEgAEjsKFGNoYW5uZWxfbXV0ZV9jaGFuZ2VkGAggASgLMhsudG9raS52MS5DaGFubmVsTXV0ZUNoYW5nZWRIABI0ChBwcmlvcml0eV9jaGFuZ2VkGAkgASgLMhgudG9raS52MS5Qcmlvcml0eUNoYW5nZWRIABJLChxicm9hZGNhc3RfY2FwYWJpbGl0eV9jaGFuZ2VkGAogASgLMiMudG9raS52MS5Ccm9hZGNhc3RDYXBhYmlsaXR5Q2hhbmdlZEgAQgcKBWV2ZW50IjcKDE1lbWJlckpvaW5lZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIh8KCk1lbWJlckxlZnQSEQoJY2xpZW50X2lkGAEgASgJIiUKEEZyZXF1ZW5jeUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJIj0KEkRpc3BsYXlOYW1lQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjUKEkNoYW5uZWxOYW1lQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSIvCgtNdXRlQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSDQoFbXV0ZWQYAiABKAgiNgoSQ2hhbm5lbE11dGVDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCRINCgVtdXRlZBgCIAEoCCJICg9Qcmlvcml0eUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCRIPCgdncmFudGVkGAMgASgIIkAKGkJyb2FkY2FzdENhcGFiaWxpdHlDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIPCgdncmFudGVkGAIgASgIInsKCFB0dEV2ZW50EhEKCWNsaWVudF9pZBgBIAEoCRIPCgdwcmVzc2VkGAIgASgIEhAKCHNlcXVlbmNlGAMgASgEEhAKCHByaW9yaXR5GAQgASgIEhEKCWJyb2FkY2FzdBgFIAEoCBIUCgxkaXNwbGF5X25hbWUYBiABKAkiCAoGUHR0QWNrMvYDCglTaWduYWxpbmcSPwoIUmVnaXN0ZXISGC50b2tpLnYxLlJlZ2lzdGVyUmVxdWVzdBoZLnRva2kudjEuUmVnaXN0ZXJSZXNwb25zZRIuCgRKb2luEhQudG9raS52MS5Kb2luUmVxdWVzdBoOLnRva2kudjEuRXZlbnQwARI2CgVMZWF2ZRIVLnRva2kudjEuTGVhdmVSZXF1ZXN0GhYudG9raS52MS5MZWF2ZVJlc3BvbnNlElQKD0NoYW5nZUZyZXF1ZW5jeRIfLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBogLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2USMgoKUHVzaFRvVGFsaxIRLnRva2kudjEuUHR0RXZlbnQaDy50b2tpLnYxLlB0dEFjaygBEloKEUlkZW50aXR5Q2hhbGxlbmdlEiEudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlcXVlc3QaIi50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVzcG9uc2USWgoXUmVwb3J0Q29ubmVjdGlvblF1YWxpdHkSIC50b2tpLnYxLkNvbm5lY3Rpb25RdWFsaXR5UmVwb3J0Gh0udG9raS52MS5Db25uZWN0aW9uUXVhbGl0eUFja2IGcHJvdG8z");
 
 /**
  * One client-measured connection-quality sample. All three metrics are
@@ -475,6 +475,20 @@ export type Event = Message<"toki.v1.Event"> & {
      */
     value: PriorityChanged;
     case: "priorityChanged";
+  } | {
+    /**
+     * Sent to a client when an admin grants or revokes their *global
+     * broadcast* capability (Admin.SetGlobalBroadcast), and on Join /
+     * ChangeFrequency to deliver current standing. Addressed only to the
+     * subject. When granted, the client's dedicated broadcast PTT binding
+     * becomes active; when revoked it is silently disabled. If the client
+     * is mid-broadcast when revoked, the broadcast is torn down
+     * server-side before this event is delivered.
+     *
+     * @generated from field: toki.v1.BroadcastCapabilityChanged broadcast_capability_changed = 10;
+     */
+    value: BroadcastCapabilityChanged;
+    case: "broadcastCapabilityChanged";
   } | { case: undefined; value?: undefined };
 };
 
@@ -672,6 +686,33 @@ export const PriorityChangedSchema: GenMessage<PriorityChanged> = /*@__PURE__*/
   messageDesc(file_toki, 19);
 
 /**
+ * A member's global-broadcast capability changed (see Admin.SetGlobalBroadcast),
+ * or current standing delivered on Join / ChangeFrequency. Addressed to the
+ * subject only. When granted, the dedicated broadcast PTT binding becomes
+ * active; when revoked it is silently disabled.
+ *
+ * @generated from message toki.v1.BroadcastCapabilityChanged
+ */
+export type BroadcastCapabilityChanged = Message<"toki.v1.BroadcastCapabilityChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: bool granted = 2;
+   */
+  granted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.BroadcastCapabilityChanged.
+ * Use `create(BroadcastCapabilityChangedSchema)` to create a new message.
+ */
+export const BroadcastCapabilityChangedSchema: GenMessage<BroadcastCapabilityChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 20);
+
+/**
  * @generated from message toki.v1.PttEvent
  */
 export type PttEvent = Message<"toki.v1.PttEvent"> & {
@@ -703,6 +744,35 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
    * @generated from field: bool priority = 4;
    */
   priority: boolean;
+
+  /**
+   * True when this PTT event belongs to a *global broadcast* session —
+   * the broadcaster has simultaneously seized every frequency room.
+   * Set by the server on the fan-out to all listeners; always false on
+   * events sent client->server (the server is the sole arbiter, exactly
+   * like `priority`). Clients use this to play the distinct broadcast
+   * roger cue instead of the normal or priority roger. Always false on
+   * release (pressed = false is still flagged broadcast=true during a
+   * broadcast teardown so clients can clear the broadcast indicator).
+   *
+   * @generated from field: bool broadcast = 5;
+   */
+  broadcast: boolean;
+
+  /**
+   * The talker's callsign (display name) at the time of the event.
+   * Populated by the server primarily for *global broadcast* events
+   * (broadcast = true), where listeners on other frequencies don't have
+   * the broadcaster in their local roster and so can't resolve the name
+   * from client_id alone. Empty when the server didn't supply a name
+   * (e.g. ordinary per-room PTT, where every recipient already has the
+   * talker in roster); clients fall back to their roster lookup, then to
+   * the client_id, when this is empty. Additive/optional — older clients
+   * ignore it.
+   *
+   * @generated from field: string display_name = 6;
+   */
+  displayName: string;
 };
 
 /**
@@ -710,7 +780,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 20);
+  messageDesc(file_toki, 21);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -723,7 +793,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 21);
+  messageDesc(file_toki, 22);
 
 /**
  * Signaling service for the Toki walkie-talkie network.

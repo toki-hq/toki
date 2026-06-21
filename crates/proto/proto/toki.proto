@@ -232,6 +232,14 @@ message Event {
     // the granted-voice exception. `frequency` is the channel the grant
     // is bound to; `granted = false` clears it.
     PriorityChanged priority_changed = 9;
+    // Sent to a client when an admin grants or revokes their *global
+    // broadcast* capability (Admin.SetGlobalBroadcast), and on Join /
+    // ChangeFrequency to deliver current standing. Addressed only to the
+    // subject. When granted, the client's dedicated broadcast PTT binding
+    // becomes active; when revoked it is silently disabled. If the client
+    // is mid-broadcast when revoked, the broadcast is torn down
+    // server-side before this event is delivered.
+    BroadcastCapabilityChanged broadcast_capability_changed = 10;
   }
 }
 
@@ -285,6 +293,15 @@ message PriorityChanged {
   bool granted = 3;
 }
 
+// A member's global-broadcast capability changed (see Admin.SetGlobalBroadcast),
+// or current standing delivered on Join / ChangeFrequency. Addressed to the
+// subject only. When granted, the dedicated broadcast PTT binding becomes
+// active; when revoked it is silently disabled.
+message BroadcastCapabilityChanged {
+  string client_id = 1;
+  bool granted = 2;
+}
+
 message PttEvent {
   string client_id = 1;
   bool pressed = 2;
@@ -298,6 +315,25 @@ message PttEvent {
   // to false, so older clients simply treat priority traffic as a
   // normal take-floor.
   bool priority = 4;
+  // True when this PTT event belongs to a *global broadcast* session —
+  // the broadcaster has simultaneously seized every frequency room.
+  // Set by the server on the fan-out to all listeners; always false on
+  // events sent client->server (the server is the sole arbiter, exactly
+  // like `priority`). Clients use this to play the distinct broadcast
+  // roger cue instead of the normal or priority roger. Always false on
+  // release (pressed = false is still flagged broadcast=true during a
+  // broadcast teardown so clients can clear the broadcast indicator).
+  bool broadcast = 5;
+  // The talker's callsign (display name) at the time of the event.
+  // Populated by the server primarily for *global broadcast* events
+  // (broadcast = true), where listeners on other frequencies don't have
+  // the broadcaster in their local roster and so can't resolve the name
+  // from client_id alone. Empty when the server didn't supply a name
+  // (e.g. ordinary per-room PTT, where every recipient already has the
+  // talker in roster); clients fall back to their roster lookup, then to
+  // the client_id, when this is empty. Additive/optional — older clients
+  // ignore it.
+  string display_name = 6;
 }
 
 message PttAck {}

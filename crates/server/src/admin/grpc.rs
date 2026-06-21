@@ -26,8 +26,8 @@ use tonic::{Request, Response, Status};
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
-    MemberJoined, MemberLeft, MuteChanged, PriorityChanged, PttEvent,
+    event, BroadcastCapabilityChanged, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged,
+    Event, FrequencyChanged, MemberJoined, MemberLeft, MuteChanged, PriorityChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -122,12 +122,28 @@ impl AdminApi {
     /// id isn't connected. The caller does its own audit + snapshot.
     async fn remove_session(&self, id: &str) -> Result<(String, Option<String>), Status> {
         // Snapshot the work under the lock; broadcast after releasing it.
-        let (display_name, frequency, recipients, was_holder) = {
+        let (display_name, frequency, recipients, was_holder, bcast_teardown_txs) = {
             let mut registry = self.state.registry.lock().await;
             let Some(client) = registry.clients.remove(id) else {
                 return Err(Status::not_found("client not found"));
             };
             registry.tokens.remove(&client.audio_token_hash);
+
+            // FIX 1: if the removed client was the active broadcaster, clear the
+            // lock and collect all remaining clients' event senders so we can
+            // send them a broadcast-release notification after the lock drops.
+            // No .await under this lock — collect only, send after.
+            let bcast_teardown_txs: Vec<mpsc::Sender<Event>> =
+                if registry.broadcast_active.as_deref() == Some(id) {
+                    registry.broadcast_active = None;
+                    registry
+                        .clients
+                        .iter()
+                        .filter_map(|(_, c)| c.events_tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
 
             let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
             let mut was_holder = false;
@@ -160,8 +176,27 @@ impl AdminApi {
                 frequency,
                 recipients,
                 was_holder,
+                bcast_teardown_txs,
             )
-        };
+        }; // registry lock released here
+
+        // If the removed client was broadcasting, notify all remaining clients
+        // so their UIs clear the broadcast indicator (lock already dropped).
+        if !bcast_teardown_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: id.to_string(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                    display_name: String::new(),
+                })),
+            };
+            for tx in &bcast_teardown_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
 
         let left = Event {
             event: Some(event::Event::Left(MemberLeft {
@@ -174,6 +209,8 @@ impl AdminApi {
                 pressed: false,
                 sequence: 0,
                 priority: false,
+                broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in recipients {
@@ -777,6 +814,8 @@ impl Admin for AdminApi {
                                 pressed: true,
                                 sequence: 0,
                                 priority: false,
+                                broadcast: false,
+                                display_name: String::new(),
                             })),
                         })
                         .await;
@@ -953,6 +992,112 @@ impl Admin for AdminApi {
         Ok(Response::new(pb::SetPriorityResponse {}))
     }
 
+    async fn set_global_broadcast(
+        &self,
+        req: Request<pb::SetGlobalBroadcastRequest>,
+    ) -> Result<Response<pb::SetGlobalBroadcastResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetGlobalBroadcastRequest { id, grant } = req.into_inner();
+
+        // Collect the work under the registry lock; send events after.
+        let (subject_tx, bcast_teardown_txs) = {
+            let mut registry = self.state.registry.lock().await;
+            // Existence check first.
+            if !registry.clients.contains_key(&id) {
+                return Err(Status::not_found("client not found"));
+            }
+            if grant {
+                // Enforce the one-at-a-time invariant: if another client
+                // already holds the capability, reject. Check before mutating.
+                let conflict = registry
+                    .clients
+                    .iter()
+                    .any(|(cid, c)| cid != &id && c.can_global_broadcast);
+                if conflict {
+                    return Err(Status::failed_precondition(
+                        "another client already holds the global-broadcast capability",
+                    ));
+                }
+                let tx = registry.clients.get_mut(&id).and_then(|c| {
+                    c.can_global_broadcast = true;
+                    c.events_tx.clone()
+                });
+                (tx, Vec::new())
+            } else {
+                // On revoke: if this client is mid-broadcast, tear it down first.
+                // FIX 4: include the subject in the teardown-notify Vec so the
+                // broadcaster's own UI clears the broadcast indicator too.
+                let teardown_txs: Vec<mpsc::Sender<Event>> =
+                    if registry.broadcast_active.as_deref() == Some(id.as_str()) {
+                        registry.broadcast_active = None;
+                        registry
+                            .clients
+                            .iter()
+                            .filter_map(|(_, c)| c.events_tx.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let tx = registry.clients.get_mut(&id).and_then(|c| {
+                    c.can_global_broadcast = false;
+                    c.events_tx.clone()
+                });
+                (tx, teardown_txs)
+            }
+        };
+
+        // If we tore down an active broadcast, notify all other clients.
+        if !bcast_teardown_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                    display_name: String::new(),
+                })),
+            };
+            for tx in &bcast_teardown_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
+
+        // Notify the subject of their new capability standing.
+        if let Some(tx) = subject_tx {
+            let ev = Event {
+                event: Some(event::Event::BroadcastCapabilityChanged(
+                    BroadcastCapabilityChanged {
+                        client_id: id.clone(),
+                        granted: grant,
+                    },
+                )),
+            };
+            let _ = tx.send(ev).await;
+        }
+
+        match grant {
+            true => tracing::info!(
+                admin_user = %admin.0, target_id = %id,
+                "admin granted global-broadcast capability",
+            ),
+            false => tracing::info!(
+                admin_user = %admin.0, target_id = %id,
+                "admin revoked global-broadcast capability",
+            ),
+        }
+        audit::record(
+            &self.state.audit,
+            "global_broadcast",
+            &admin.0,
+            "",
+            if grant { "granted" } else { "revoked" },
+        );
+
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetGlobalBroadcastResponse {}))
+    }
+
     async fn set_mute(
         &self,
         req: Request<pb::SetMuteRequest>,
@@ -1024,6 +1169,8 @@ impl Admin for AdminApi {
                 pressed: false,
                 sequence: 0,
                 priority: false,
+                broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in recipients {
@@ -1143,6 +1290,8 @@ impl Admin for AdminApi {
                     pressed: false,
                     sequence: 0,
                     priority: false,
+                    broadcast: false,
+                    display_name: String::new(),
                 })),
             });
             for tx in recipients {
@@ -1535,6 +1684,7 @@ mod tests {
             priority_freq: None,
             expected_ip: None,
             muted: false,
+            can_global_broadcast: false,
             quality: None,
         }
     }

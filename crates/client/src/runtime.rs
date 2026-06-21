@@ -169,6 +169,10 @@ async fn run(
     // warm so a fresh transmission doesn't open with a settling burst).
     // Toggles arrive live through `dsp_params`; with both stages off,
     // `process` is a bit-exact passthrough.
+    // Keep a clone for the VOX controls — `Dsp::new` takes ownership
+    // of the params but they're Arc-backed so the clone is cheap and
+    // both sides see the same atomic values.
+    let vox_params = dsp_params.clone();
     let mut dsp = Dsp::new(dsp_params);
     // Radio FX (band-pass + saturation + static) is a *transmit-side*
     // effect: the sender dirties their own outgoing voice so every peer
@@ -187,6 +191,22 @@ async fn run(
     // continuously regardless of PTT, so a frame always arrives shortly
     // after release to carry the flush.
     let mut was_talking = false;
+
+    // ── VOX hysteresis state ──────────────────────────────────────────
+    // Whether the VOX gate is currently open (i.e. mic is transmitting
+    // via voice-activity, not PTT). Tracked separately from `ptt` so we
+    // can detect open→close edges and fire set_vox_transmitting(false).
+    let mut vox_open = false;
+    // Hangover counter: how many consecutive frames the VAD has been
+    // below the close threshold. When it reaches VOX_HANGOVER_FRAMES the
+    // gate closes. Resets to 0 on any frame where VAD ≥ open threshold.
+    // This prevents brief pauses between words from cutting the mic.
+    let mut vox_frames_below: usize = 0;
+    // VOX opens when `vad >= threshold` and closes only after the VAD
+    // has stayed below `(threshold - VOX_HYSTERESIS_MARGIN)` for
+    // VOX_HANGOVER_FRAMES consecutive frames (~300 ms at 10 ms/frame).
+    const VOX_HANGOVER_FRAMES: usize = 30; // 300 ms
+    const VOX_HYSTERESIS_MARGIN: f32 = 0.10;
 
     loop {
         tokio::select! {
@@ -245,10 +265,55 @@ async fn run(
                 }
 
                 if let Some(s) = &session {
-                    // Server-side mute is a hard local gate: even if a PTT
-                    // grant is somehow still set, a muted session uploads
-                    // nothing (the relay would drop it anyway). The
-                    // `was_talking` edge below then fires the encoder flush.
+                    // ── VOX decision (full-duplex channels only) ──────────
+                    // Reuses the VAD published by the capture DSP this frame.
+                    // The gate is hysteretic: opens eagerly on speech, stays
+                    // open through brief word-gap pauses (hangover), and only
+                    // closes after VOX_HANGOVER_FRAMES consecutive frames
+                    // below the close floor. Suppressed entirely when a global
+                    // broadcast is in flight (so VOX can't talk over it) or
+                    // when the channel is half-duplex.
+                    if s.full_duplex.load(Ordering::Relaxed)
+                        && vox_params.vox_enabled()
+                        && !s.broadcast_active.load(Ordering::Relaxed)
+                    {
+                        let vad = vox_params.vad();
+                        // Sensitivity [0,1] → threshold [0.15, 0.90]:
+                        // higher sensitivity = lower threshold = opens easier.
+                        let sensitivity = vox_params.vox_sensitivity();
+                        let threshold = (1.0 - sensitivity).clamp(0.15, 0.90);
+
+                        let (new_open, new_below) = vox_decision(
+                            vad,
+                            threshold,
+                            VOX_HYSTERESIS_MARGIN,
+                            VOX_HANGOVER_FRAMES,
+                            vox_open,
+                            vox_frames_below,
+                        );
+                        vox_frames_below = new_below;
+                        vox_open = new_open;
+                        // Drive the gate from the VOX decision. Call every
+                        // frame (not just on transitions) so the gate stays
+                        // correct if a physical PTT tap briefly took over the
+                        // `ptt` atomic while VOX was open — `set_vox_transmitting`
+                        // is idempotent (no-op + no PttEvent when `ptt` already
+                        // matches, or while the key is held), so steady state is
+                        // cheap and only real edges emit an event.
+                        s.set_vox_transmitting(vox_open).await;
+                    } else if vox_open {
+                        // VOX disabled, or non-FD channel, or broadcast active:
+                        // close the gate if it was open.
+                        vox_open = false;
+                        vox_frames_below = 0;
+                        s.set_vox_transmitting(false).await;
+                    }
+
+                    // ── Transmit gate ─────────────────────────────────────
+                    // PTT (ptt atomic) is set by either the user holding PTT
+                    // or by set_vox_transmitting above. Self-mute is a hard
+                    // override — uploads nothing the relay would drop anyway.
+                    // The `was_talking` edge fires flush_audio on release.
                     let talking = s.ptt.load(Ordering::Relaxed)
                         && !s.self_muted.load(Ordering::Relaxed);
                     if talking {
@@ -267,6 +332,11 @@ async fn run(
                     }
                     was_talking = talking;
                 } else {
+                    // No session — reset VOX state so a reconnect starts clean.
+                    if vox_open {
+                        vox_open = false;
+                        vox_frames_below = 0;
+                    }
                     was_talking = false;
                 }
             }
@@ -685,6 +755,13 @@ struct Session {
     /// uploading frames the relay will drop. The events task is the
     /// sole writer; the runtime mic loop reads it.
     self_muted: Arc<AtomicBool>,
+    /// `true` while a global broadcast is in flight (mirrors
+    /// `state.broadcast_active`, set for our own broadcast too — not just
+    /// someone else's). The events task is the sole writer; the mic loop
+    /// reads it to suppress VOX, so a broadcast can't be talked over: a
+    /// listener's VOX won't open over an incoming broadcast, and our own
+    /// VOX won't double-open while we're broadcasting via the broadcast PTT.
+    broadcast_active: Arc<AtomicBool>,
     tasks: Vec<JoinHandle<()>>,
 }
 
@@ -885,6 +962,12 @@ impl Session {
         // `MuteChanged` addressed to us; the mic loop reads it.
         let self_muted = Arc::new(AtomicBool::new(false));
         let self_muted_for_events = self_muted.clone();
+        // Broadcast-active flag for VOX suppression. Mirrors the state
+        // field but as an atomic so the mic loop can read it without
+        // taking the state lock on every frame. The events task is the
+        // sole writer; the mic loop reads it to gate VOX.
+        let broadcast_active_atomic = Arc::new(AtomicBool::new(false));
+        let broadcast_active_for_events = broadcast_active_atomic.clone();
         // The events task only emits roger beeps / cues, which go on the
         // effects ring (so the voice path's catch-up can't drop them).
         let effects_for_events = effects.clone();
@@ -912,6 +995,7 @@ impl Session {
                                 st.holder = None;
                                 st.broadcast_active = false;
                                 st.broadcast_talker = None;
+                                broadcast_active_for_events.store(false, Ordering::Relaxed);
                             }
                             // Full-duplex: also drop them from the talker set.
                             st.talkers.remove(&l.client_id);
@@ -971,6 +1055,11 @@ impl Session {
                                 // the UI can tint it distinctly. Set on a broadcast
                                 // press; always cleared when the floor frees.
                                 st.broadcast_active = new_holder.is_some() && p.broadcast;
+                                // Mirror to the atomic so the mic loop can read it
+                                // without taking the state lock on every frame. A
+                                // broadcast from someone else suppresses VOX.
+                                broadcast_active_for_events
+                                    .store(st.broadcast_active, Ordering::Relaxed);
                                 // Stash the broadcaster's callsign (server-stamped
                                 // on the event) so the indicator shows the name even
                                 // though they're not in our roster; cleared with the
@@ -1022,10 +1111,21 @@ impl Session {
                                 ptt_for_events.store(false, Ordering::Relaxed);
                             }
 
+                            // On a full-duplex channel, floor beeps make no
+                            // sense — multiple talkers can key simultaneously
+                            // so "acquired/released" events don't mark a single
+                            // speaker owning the channel. Suppress the normal
+                            // acquire, clear, and priority-roger cues on FD
+                            // channels; keep the preempted-bump (you were cut
+                            // off — still meaningful) and the broadcast-roger
+                            // (fleet-wide attention signal — channel-mode agnostic).
+                            let duplex_full = full_duplex_for_events.load(Ordering::Relaxed);
+
                             if self_preempted {
                                 // Distinct cue + message for the cut-off
                                 // speaker; suppress the priority roger for them
                                 // so they hear only the "you lost it" bump.
+                                // KEEP on full-duplex — preemption is meaningful.
                                 let tone = audio::beep_pattern(
                                     audio::PREEMPTED_BUMP,
                                     beeps_for_events.volume(),
@@ -1040,6 +1140,7 @@ impl Session {
                                 // play the distinct three-step falling cue
                                 // so listeners know this is fleet-wide.
                                 // Supersedes the priority roger check below.
+                                // KEEP on full-duplex — broadcasts are channel-agnostic.
                                 let tone = audio::beep_pattern(
                                     audio::BROADCAST_ROGER,
                                     beeps_for_events.volume(),
@@ -1049,10 +1150,11 @@ impl Session {
                                     .lock()
                                     .unwrap()
                                     .log(format!("📡 BROADCAST: {talker_name}"));
-                            } else if p.priority && (acquired || took_over) {
+                            } else if p.priority && (acquired || took_over) && !duplex_full {
                                 // A priority speaker took the floor (idle-grant
                                 // or preemption). Everyone still listening hears
                                 // the fixed two-tone priority roger.
+                                // SUPPRESS on full-duplex — no single-floor semantics.
                                 let tone = audio::beep_pattern(
                                     audio::PRIORITY_ROGER,
                                     beeps_for_events.volume(),
@@ -1062,11 +1164,9 @@ impl Session {
                                     .lock()
                                     .unwrap()
                                     .log(format!("⚡ {talker_name} took priority"));
-                            } else if acquired {
-                                // Look up the active preset live so a
-                                // change in Settings takes effect on
-                                // the very next take-floor event,
-                                // without a reconnect.
+                            } else if acquired && !duplex_full {
+                                // Normal acquire beep.
+                                // SUPPRESS on full-duplex — many talkers, no single floor.
                                 let preset = beeps_for_events.current_preset();
                                 let tone = audio::beep_pattern(
                                     preset.acquire.steps,
@@ -1077,12 +1177,13 @@ impl Session {
                                     .lock()
                                     .unwrap()
                                     .log(format!("🔒 {talker_name} took the floor"));
-                            } else if released && !p.broadcast {
+                            } else if released && !p.broadcast && !duplex_full {
                                 // Normal floor-clear cue. Suppressed when the
                                 // release belongs to a broadcast session
                                 // (`p.broadcast == true`) — the teardown is
                                 // silent on the listener side; only the
                                 // acquire deserves an audible signal.
+                                // SUPPRESS on full-duplex — no single floor to clear.
                                 let preset = beeps_for_events.current_preset();
                                 let tone = audio::beep_pattern(
                                     preset.release.steps,
@@ -1320,6 +1421,7 @@ impl Session {
             // stale `Session` and a reconnect is accepted (otherwise the
             // client is stuck on the offline screen until app restart).
             alive_for_events.store(false, Ordering::Relaxed);
+            broadcast_active_for_events.store(false, Ordering::Relaxed);
             let mut st = state_for_events.lock().unwrap();
             st.connection = crate::state::ConnState::Disconnected;
             st.members.clear();
@@ -1564,6 +1666,7 @@ impl Session {
             )),
             alive,
             self_muted,
+            broadcast_active: broadcast_active_atomic,
             tasks: vec![
                 events_task,
                 ptt_task,
@@ -1754,6 +1857,48 @@ impl Session {
         }
     }
 
+    /// VOX transmit gate: open or close our audio gate and notify the
+    /// server so peers' rosters light up.
+    ///
+    /// Unlike [`request_ptt`] this path has no spam-guard cooldown —
+    /// VOX edges are naturally debounced by the hangover counter in the
+    /// mic loop, so the cooldown would only fight valid re-opens after a
+    /// brief silence. We do still guard against redundant same-state
+    /// sends (open→open, close→close) using the `ptt` atomic itself.
+    async fn set_vox_transmitting(&self, pressed: bool) {
+        // Physical PTT owns the `ptt` gate while it's held. If the key is
+        // down, VOX must NOT touch `ptt` or emit a PttEvent: a VOX-close
+        // (e.g. a word gap past the hangover) would otherwise clobber
+        // `ptt = false` and cut the mic mid-sentence even though the key is
+        // still pressed, and a VOX-open would duplicate the key's own
+        // press. Both paths write the same `ptt` atomic + `ptt_tx`, so VOX
+        // yields to the physical key entirely. (On release the key's own
+        // PttEvent + `ptt = false` take over; VOX resumes on the next edge.)
+        if self.local_pressed.load(Ordering::Relaxed) {
+            return;
+        }
+        // Idempotent: skip if already in the requested state.
+        if self.ptt.load(Ordering::Relaxed) == pressed {
+            return;
+        }
+        // Open/close the local audio gate immediately (same as the
+        // full-duplex branch of request_ptt).
+        self.ptt.store(pressed, Ordering::Relaxed);
+
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let evt = PttEvent {
+            client_id: self.client_id.clone(),
+            pressed,
+            sequence: seq,
+            priority: false,
+            broadcast: false,
+            display_name: String::new(),
+        };
+        if let Err(e) = self.ptt_tx.send(evt).await {
+            warn!(error = %e, "vox ptt send failed");
+        }
+    }
+
     async fn send_audio(&self, samples: &[i16]) {
         // Encode under the lock (fast, no await), then seal + send each
         // resulting packet. Both codecs yield one packet per 10 ms mic
@@ -1863,6 +2008,59 @@ fn build_authenticated_packet(
     pkt.extend_from_slice(tag.as_slice());
     pkt.extend_from_slice(&ciphertext);
     pkt
+}
+
+/// Pure VOX gate step — called once per 10 ms mic frame.
+///
+/// # Arguments
+/// * `vad` — current VAD probability `[0.0, 1.0]` from [`DspParams::vad`].
+/// * `threshold` — VAD value at which the gate opens (`>= threshold`).
+///   Derived from sensitivity via `(1.0 - sensitivity).clamp(0.15, 0.90)`.
+/// * `hysteresis_margin` — gap below `threshold` before the hangover
+///   counter starts counting. Keeps the gate open through the hysteresis
+///   band (between `threshold - hysteresis_margin` and `threshold`) so
+///   minor fluctuations around the threshold don't chatter.
+/// * `hangover_frames` — number of consecutive frames the VAD must
+///   stay below the close floor before the gate closes.
+/// * `currently_open` — whether the gate is open at the start of this
+///   frame (i.e. the mic was active on the last frame).
+/// * `frames_below` — how many consecutive frames the VAD has already
+///   been below the close floor (carried from the last frame).
+///
+/// # Returns
+/// `(open, frames_below)` — the new gate state and the updated counter.
+/// The caller must call [`Session::set_vox_transmitting`] when `open`
+/// changes.
+fn vox_decision(
+    vad: f32,
+    threshold: f32,
+    hysteresis_margin: f32,
+    hangover_frames: usize,
+    currently_open: bool,
+    frames_below: usize,
+) -> (bool, usize) {
+    let close_floor = (threshold - hysteresis_margin).max(0.0);
+    if vad >= threshold {
+        // Above open threshold: open (or stay open) and reset hangover.
+        (true, 0)
+    } else if currently_open {
+        if vad < close_floor {
+            let new_below = frames_below + 1;
+            if new_below >= hangover_frames {
+                // Hangover expired → close.
+                (false, 0)
+            } else {
+                // Still in hangover.
+                (true, new_below)
+            }
+        } else {
+            // In the hysteresis band: don't count, stay open.
+            (true, 0)
+        }
+    } else {
+        // Already closed and below threshold: stay closed.
+        (false, 0)
+    }
 }
 
 /// Coerce whatever the user wrote in the Connect dialog into an
@@ -2540,5 +2738,88 @@ mod tests {
         assert_eq!(signaling_port("http://1.2.3.4:50051/x").unwrap(), 50051);
         assert!(signaling_port("https://host").is_err());
         assert!(signaling_port("https://host:notaport").is_err());
+    }
+
+    // ── VOX gate tests ──────────────────────────────────────────────────
+
+    const HANGOVER: usize = 5; // short, for test speed
+    const MARGIN: f32 = 0.10;
+
+    /// Loud speech (vad >= threshold) opens the gate immediately.
+    #[test]
+    fn vox_opens_on_speech_above_threshold() {
+        let (open, below) = vox_decision(0.8, 0.5, MARGIN, HANGOVER, false, 0);
+        assert!(open, "gate must open when vad >= threshold");
+        assert_eq!(below, 0, "hangover counter resets on open");
+    }
+
+    /// Silence (vad well below threshold) never opens a closed gate.
+    #[test]
+    fn vox_stays_closed_on_silence() {
+        let (open, below) = vox_decision(0.1, 0.5, MARGIN, HANGOVER, false, 0);
+        assert!(!open, "gate must stay closed when vad < threshold");
+        assert_eq!(below, 0);
+    }
+
+    /// Gate stays open during the hangover period (frames 1..HANGOVER-1).
+    #[test]
+    fn vox_hangover_keeps_gate_open_during_silence() {
+        // Open the gate first.
+        let (mut open, mut below) = vox_decision(0.9, 0.5, MARGIN, HANGOVER, false, 0);
+        assert!(open);
+        // Now drop below the close floor — gate must stay open for HANGOVER-1 frames.
+        for frame in 0..HANGOVER - 1 {
+            let (o, b) = vox_decision(0.05, 0.5, MARGIN, HANGOVER, open, below);
+            assert!(o, "gate must still be open at frame {frame}");
+            open = o;
+            below = b;
+        }
+        // One more frame tips it over HANGOVER → gate closes.
+        let (o, _) = vox_decision(0.05, 0.5, MARGIN, HANGOVER, open, below);
+        assert!(!o, "gate must close after {HANGOVER} frames of silence");
+    }
+
+    /// A brief pause (1 frame) in the hysteresis band does not increment
+    /// the hangover counter and does not close the gate.
+    #[test]
+    fn vox_hysteresis_band_resets_counter() {
+        // Open the gate.
+        let (open, _) = vox_decision(0.9, 0.5, MARGIN, HANGOVER, false, 0);
+        assert!(open);
+        // Drop to hysteresis band (between threshold-margin=0.40 and threshold=0.50).
+        let (o, b) = vox_decision(0.45, 0.5, MARGIN, HANGOVER, open, 3);
+        // Still open, counter reset (was in band, not below floor).
+        assert!(o, "gate must stay open in the hysteresis band");
+        assert_eq!(b, 0, "counter must reset in hysteresis band");
+    }
+
+    /// Re-opening: after closing, a new burst of speech opens it again.
+    #[test]
+    fn vox_reopens_after_close() {
+        // Simulate fully closing the gate.
+        let (closed, _) = vox_decision(0.0, 0.5, MARGIN, 1, true, 0);
+        assert!(!closed, "gate must close after 1 frame at zero vad");
+        // Fresh speech re-opens it.
+        let (open, _) = vox_decision(0.9, 0.5, MARGIN, HANGOVER, closed, 0);
+        assert!(open, "gate must re-open on new speech");
+    }
+
+    /// Threshold mapping sanity: sensitivity 1.0 → threshold 0.15 (lowest),
+    /// sensitivity 0.0 → threshold 0.90 (highest), sensitivity 0.5 → 0.5.
+    #[test]
+    fn vox_threshold_mapping() {
+        let threshold = |sens: f32| -> f32 { (1.0 - sens).clamp(0.15, 0.90) };
+        assert!(
+            (threshold(1.0) - 0.15).abs() < 1e-6,
+            "max sensitivity → min threshold"
+        );
+        assert!(
+            (threshold(0.0) - 0.90).abs() < 1e-6,
+            "min sensitivity → max threshold"
+        );
+        assert!(
+            (threshold(0.5) - 0.50).abs() < 1e-6,
+            "mid sensitivity → mid threshold"
+        );
     }
 }

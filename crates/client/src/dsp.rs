@@ -108,6 +108,16 @@ pub struct DspParams {
     /// probability when suppression is on; a coarse RMS-derived 0/1
     /// when it's off. Published every processed frame.
     vad: Arc<AtomicU32>,
+    /// VOX (voice-activated transmit) enable. When `true` and the
+    /// channel is full-duplex, the mic opens automatically when the
+    /// VAD crosses the threshold. On half-duplex this flag is ignored
+    /// (PTT works normally). Default: `false`.
+    vox_enabled: Arc<AtomicBool>,
+    /// VOX sensitivity in `[0.0, 1.0]`. Higher = more sensitive (opens
+    /// at a lower VAD probability). Mapped to a VAD threshold by the
+    /// mic loop via `threshold = 1.0 - sensitivity`, clamped to
+    /// `[0.15, 0.90]`. Default: `0.5` → threshold `0.5`.
+    vox_sensitivity: Arc<AtomicU32>,
 }
 
 impl DspParams {
@@ -116,6 +126,8 @@ impl DspParams {
             noise_suppression: Arc::new(AtomicBool::new(noise_suppression)),
             agc: Arc::new(AtomicBool::new(agc)),
             vad: Arc::new(AtomicU32::new(0)),
+            vox_enabled: Arc::new(AtomicBool::new(false)),
+            vox_sensitivity: Arc::new(AtomicU32::new(0.5_f32.to_bits())),
         }
     }
 
@@ -135,16 +147,32 @@ impl DspParams {
         self.agc.load(Ordering::Relaxed)
     }
 
-    /// Latest voice-activity estimate, `[0.0, 1.0]`. No UI consumer
-    /// yet — this is the hook a future VOX (voice-activated transmit)
-    /// threshold reads.
-    #[allow(dead_code)]
+    /// Latest voice-activity estimate, `[0.0, 1.0]`. Read by the VOX
+    /// gate in the mic loop each frame; also exposed for the Settings
+    /// UI live indicator.
     pub fn vad(&self) -> f32 {
         f32::from_bits(self.vad.load(Ordering::Relaxed))
     }
 
     fn set_vad(&self, v: f32) {
         self.vad.store(v.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_vox_enabled(&self, on: bool) {
+        self.vox_enabled.store(on, Ordering::Relaxed);
+    }
+
+    pub fn vox_enabled(&self) -> bool {
+        self.vox_enabled.load(Ordering::Relaxed)
+    }
+
+    pub fn set_vox_sensitivity(&self, s: f32) {
+        self.vox_sensitivity
+            .store(s.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn vox_sensitivity(&self) -> f32 {
+        f32::from_bits(self.vox_sensitivity.load(Ordering::Relaxed))
     }
 }
 
@@ -638,6 +666,40 @@ mod tests {
         p.set_agc(true);
         assert!(!p.noise_suppression());
         assert!(p.agc());
+    }
+
+    #[test]
+    fn vox_params_round_trip_and_defaults() {
+        // Newly-created DspParams must have VOX off and sensitivity 0.5.
+        let p = DspParams::new(true, true);
+        assert!(!p.vox_enabled(), "VOX must default off");
+        assert!(
+            (p.vox_sensitivity() - 0.5).abs() < 1e-6,
+            "VOX sensitivity must default to 0.5"
+        );
+
+        // Setters are visible immediately (same-Arc read).
+        p.set_vox_enabled(true);
+        assert!(p.vox_enabled());
+        p.set_vox_enabled(false);
+        assert!(!p.vox_enabled());
+
+        p.set_vox_sensitivity(0.9);
+        assert!((p.vox_sensitivity() - 0.9).abs() < 1e-6);
+
+        // Sensitivity is clamped to [0, 1].
+        p.set_vox_sensitivity(1.5);
+        assert_eq!(p.vox_sensitivity(), 1.0, "clamped at top");
+        p.set_vox_sensitivity(-0.5);
+        assert_eq!(p.vox_sensitivity(), 0.0, "clamped at bottom");
+
+        // Clone shares the same atomics.
+        let q = p.clone();
+        p.set_vox_sensitivity(0.7);
+        assert!(
+            (q.vox_sensitivity() - 0.7).abs() < 1e-6,
+            "clone must see writes through the Arc"
+        );
     }
 
     #[test]

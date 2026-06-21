@@ -131,6 +131,14 @@ pub struct ServerConfig {
     /// Advisory — the relay forwards opaque encrypted payloads; only the
     /// client encoder and decoder are affected.
     pub opus_frame_ms: u32,
+
+    /// Gate the per-channel **full-duplex** feature. When `false` (the
+    /// default), every channel is half-duplex regardless of any stored
+    /// `channel_modes`: the signaling service reports half + suppresses
+    /// the duplex event, the relay never goes full, `SetChannelMode` is
+    /// rejected, and the UIs hide all duplex controls/indicators. When
+    /// `true`, full-duplex channels behave as configured.
+    pub full_duplex_enabled: bool,
 }
 
 /// Map an [`ServerConfig::audio_quality`] level to the codec the client
@@ -175,6 +183,9 @@ impl Default for ServerConfig {
             // fresh deployment; operators can bump to 20 or 40 ms to
             // trade latency for reduced relay fan-out overhead.
             opus_frame_ms: 10,
+            // Off by default: a fresh deployment is pure half-duplex
+            // walkie-talkie until an operator opts in.
+            full_duplex_enabled: false,
         }
     }
 }
@@ -245,6 +256,7 @@ mod tests {
             unique_callsigns: false,
             opus_dtx: false,
             opus_frame_ms: 20,
+            full_duplex_enabled: true,
         };
         let json = serde_json::to_string(&original).unwrap();
         assert!(json.contains("\"serverName\":\"Singular Toki\""));
@@ -256,6 +268,7 @@ mod tests {
         assert!(json.contains("\"requireIdentity\":true"));
         assert!(json.contains("\"uniqueCallsigns\":false"));
         assert!(json.contains("\"opusFrameMs\":20"));
+        assert!(json.contains("\"fullDuplexEnabled\":true"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
         assert_eq!(parsed.max_peers, original.max_peers);

@@ -467,25 +467,55 @@ impl TokiApp {
     fn snapshot(&self) -> StateSnapshot {
         let s = self.state.lock().unwrap();
         let self_id = s.self_id.clone();
-        let holder = s.holder.clone();
-        let is_transmitting = self_id.is_some() && holder.as_deref() == self_id.as_deref();
-        let holder_name = if let Some(h) = &holder {
-            // For a global broadcast the talker is usually on another
-            // frequency (not in our roster), so prefer the callsign the
-            // server stamped on the event; otherwise resolve from roster.
-            s.broadcast_talker
-                .clone()
-                .filter(|_| s.broadcast_active)
-                .or_else(|| s.members.get(h).cloned())
-                .unwrap_or_else(|| h.clone())
+        // Half-duplex tracks a single `holder`; full-duplex tracks a set
+        // of `talkers`. Normalise both into the snapshot's holder/holder_
+        // name/is_transmitting fields so the radio-state + status rendering
+        // stay unchanged.
+        let (holder, holder_name, is_transmitting) = if s.duplex_full {
+            let self_talking = self_id
+                .as_ref()
+                .map(|id| s.talkers.contains(id))
+                .unwrap_or(false);
+            // Other people talking (excluding us) → show an Rx indicator.
+            let others: Vec<&String> = s
+                .talkers
+                .iter()
+                .filter(|id| Some(id.as_str()) != self_id.as_deref())
+                .collect();
+            let holder = others.first().map(|id| (*id).clone());
+            let name = match others.len() {
+                0 => String::new(),
+                1 => s
+                    .members
+                    .get(others[0])
+                    .cloned()
+                    .unwrap_or_else(|| others[0].clone()),
+                n => format!("{n} talking"),
+            };
+            (holder, name, self_talking)
         } else {
-            String::new()
+            let holder = s.holder.clone();
+            let is_tx = self_id.is_some() && holder.as_deref() == self_id.as_deref();
+            let name = if let Some(h) = &holder {
+                // For a global broadcast the talker is usually on another
+                // frequency (not in our roster), so prefer the callsign the
+                // server stamped on the event; otherwise resolve from roster.
+                s.broadcast_talker
+                    .clone()
+                    .filter(|_| s.broadcast_active)
+                    .or_else(|| s.members.get(h).cloned())
+                    .unwrap_or_else(|| h.clone())
+            } else {
+                String::new()
+            };
+            (holder, name, is_tx)
         };
         StateSnapshot {
             connection: s.connection.clone(),
             holder,
             holder_name,
             is_transmitting,
+            duplex_full: s.duplex_full,
             broadcast_active: s.broadcast_active,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
@@ -744,6 +774,11 @@ struct StateSnapshot {
     holder: Option<String>,
     holder_name: String,
     is_transmitting: bool,
+    /// Whether the current channel is full-duplex (everyone can talk at
+    /// once). Drives the multi-talker status text + the Rx label. (The
+    /// OLED duplex light reads `duplex_full`/`duplex_known` from state
+    /// directly.)
+    duplex_full: bool,
     /// `true` when the current floor activity is a global broadcast.
     /// Drives the distinct light-blue talking indicator (and the
     /// "BROADCAST" label) in the center display while it's live.
@@ -2158,7 +2193,14 @@ impl TokiApp {
             painter.circle_filled(Pos2::new(dot_x, dot_y), 3.0, T::INK_MUTE);
         }
         // Tiny "ACT" caption next to the light, on its left — gives
-        // the dot a label without crowding the corner.
+        // the dot a label without crowding the corner. The duplex
+        // (HALF/FULL) indicator now lives as a colored badge below the
+        // MHz readout (see the frequency block below) rather than up
+        // here, so this corner is just ACT again.
+        let (duplex_full, duplex_known) = {
+            let s = self.state.lock().unwrap();
+            (s.duplex_full, s.duplex_known)
+        };
         painter.text(
             Pos2::new(dot_x - 6.0, dot_y),
             Align2::RIGHT_CENTER,
@@ -2182,6 +2224,9 @@ impl TokiApp {
             if !name.is_empty() {
                 // Vertically centered on `dot_y` so the name's midline
                 // matches the ACT caption + activity dot on the right.
+                // Stop short of the ACT caption + dot so a long scrolling
+                // name never runs under them (the duplex indicator moved
+                // out of this corner to a badge below the readout).
                 let name_region = Rect::from_min_max(
                     Pos2::new(rect.left() + pad_x, dot_y - 6.0),
                     Pos2::new(dot_x - 26.0, dot_y + 6.0),
@@ -2242,8 +2287,26 @@ impl TokiApp {
         };
 
         // Available horizontal space between the panel pads, minus a
-        // bit of room for the " MHz" suffix.
+        // bit of room for the unit column (the "MHz" label and, beneath
+        // it, the duplex badge).
         let available_w = rect.width() - 2.0 * pad_x;
+
+        // Duplex (HALF/FULL) badge, shown to the right of the digits
+        // beneath the MHz label when the full-duplex feature is on and
+        // we're online. Lay it out first so the unit column can reserve
+        // the wider of "MHz" and the badge, keeping the block centered.
+        let show_duplex_badge = !offline_view && duplex_known;
+        let (badge_color, badge_label) = if duplex_full {
+            (T::PRIMARY, "FULL")
+        } else {
+            (T::TX, "HALF")
+        };
+        let badge_font = font_mono(9.0);
+        let badge_label_galley =
+            painter.layout_no_wrap(badge_label.to_string(), badge_font.clone(), badge_color);
+        let badge_w = badge_label_galley.size().x + 12.0;
+        let badge_h = 14.0;
+
         // Try a generous size; if the layout actually overflows we
         // step down. With the band's 3.2-digit numbers (e.g. "447.05")
         // 38 px fits the 200-px-wide regular OLED comfortably.
@@ -2251,7 +2314,15 @@ impl TokiApp {
         let unit_font = font_mono(12.0);
         let unit_galley =
             painter.layout_no_wrap("MHz".to_string(), unit_font.clone(), T::PRIMARY_DIM);
-        let unit_advance = unit_galley.size().x + 6.0; // gap to digits
+        // The unit column stacks "MHz" (top) over the duplex badge
+        // (below), so reserve the wider of the two to the right of the
+        // digits — neither should push past the panel pad.
+        let unit_col_w = if show_duplex_badge {
+            unit_galley.size().x.max(badge_w)
+        } else {
+            unit_galley.size().x
+        };
+        let unit_advance = unit_col_w + 6.0; // gap to digits
         loop {
             let g = painter.layout_no_wrap(freq_text.clone(), font_mono(font_size), active_color);
             if g.size().x + unit_advance <= available_w || font_size <= 22.0 {
@@ -2287,25 +2358,60 @@ impl TokiApp {
             active_glow,
             if offline_view { 0.0 } else { 1.0 },
         );
-        // "MHz" baseline-aligned to the digits. The digits' baseline
-        // sits roughly at (center + font_size * 0.30) for a mono font;
-        // good enough that the suffix tracks the readout cleanly.
-        // Suppressed in the offline view — the "—" placeholder
-        // doesn't need a unit.
-        let baseline_y = center_y + font_size * 0.30;
+        // Unit column to the right of the digits: "MHz" baseline-aligned
+        // to the digits, with the duplex badge stacked directly beneath
+        // it. The digits' baseline sits roughly at (center + font_size *
+        // 0.30) for a mono font; good enough that the suffix tracks the
+        // readout cleanly. Suppressed in the offline view — the "—"
+        // placeholder needs no unit.
+        let unit_x = freq_left + freq_galley.size().x + 7.0;
+        let baseline_y = center_y + font_size * 0.30 - 13.0;
         if !offline_view {
             painter.text(
-                Pos2::new(freq_left + freq_galley.size().x + 6.0, baseline_y),
+                Pos2::new(unit_x, baseline_y),
                 Align2::LEFT_BOTTOM,
                 "MHz",
                 unit_font,
                 T::PRIMARY_DIM,
             );
         }
-        // `baseline_y` is only relevant for the MHz suffix above; in
-        // the offline branch nothing reads it, so suppress the unused
-        // warning rather than reorder the block.
-        let _ = baseline_y;
+
+        // ── Duplex-mode badge (under the MHz label) ────────────────
+        // Styled like the M1–M4 memory presets: a rounded rect with a
+        // translucent color wash, a 1px colored border, and a centered
+        // colored label. Green "FULL" on a full-duplex channel, amber
+        // "HALF" on a half-duplex one. Only shown when the server
+        // reported a mode (full-duplex feature on) and we're online.
+        if show_duplex_badge {
+            let badge_rect = Rect::from_min_size(
+                Pos2::new(unit_x, baseline_y + 4.0),
+                Vec2::new(badge_w, badge_h),
+            );
+            let radius = CornerRadius::same(T::RADIUS_CHEVRON as u8);
+            // Translucent wash (alpha ~46, the same gentle tint the
+            // presets carry at rest) + a 1px border in the full color.
+            let fill = Color32::from_rgba_unmultiplied(
+                badge_color.r(),
+                badge_color.g(),
+                badge_color.b(),
+                46,
+            );
+            painter.rect_filled(badge_rect, radius, fill);
+            painter.rect(
+                badge_rect,
+                radius,
+                Color32::TRANSPARENT,
+                Stroke::new(1.0, badge_color),
+                StrokeKind::Inside,
+            );
+            painter.text(
+                badge_rect.center(),
+                Align2::CENTER_CENTER,
+                badge_label,
+                badge_font,
+                badge_color,
+            );
+        }
 
         // ── Chevron row (no label between them) ────────────────────
         let chev_w = 56.0;
@@ -2789,7 +2895,7 @@ impl TokiApp {
                 painter.text(
                     Pos2::new(right_x, status_y),
                     Align2::RIGHT_CENTER,
-                    right,
+                    if snap.duplex_full { "FDX · RX" } else { right },
                     font_mono(10.0),
                     if snap.broadcast_active {
                         T::BROADCAST

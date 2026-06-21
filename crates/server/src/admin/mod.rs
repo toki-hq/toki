@@ -63,7 +63,7 @@ use crate::audit::AuditSink;
 use crate::config::AdminConfig;
 use crate::metrics::{SharedByteCounters, SharedHealth, SharedLiveRate};
 use crate::server_config::SharedServerConfig;
-use crate::state::{SharedChannelNames, SharedRegistry};
+use crate::state::{DuplexMode, SharedChannelNames, SharedDuplexModes, SharedRegistry};
 use crate::throttle::IpThrottle;
 use crate::tls::TlsMaterial;
 
@@ -123,6 +123,12 @@ pub struct AppState {
     /// broadcaster folds it into each `Snapshot` so the panel can label
     /// every frequency — occupied or not.
     pub channel_names: SharedChannelNames,
+    /// Per-frequency duplex modes (frequency → [`DuplexMode`]). Shared
+    /// with the signaling service (the reader). `SetChannelMode` writes
+    /// this map, the `channel_modes` sqlite table, and any live room's
+    /// `Room.duplex` in lockstep; the broadcaster folds it into each
+    /// `Snapshot`.
+    pub duplex_modes: SharedDuplexModes,
     /// Channel-wide mutes (frequency set), shared with the signaling
     /// speak-gate. The `SetChannelMute` RPC writes the db and this set
     /// in lockstep so a channel mute takes effect on the next PTT press;
@@ -173,6 +179,7 @@ pub async fn run(
     tls_material: TlsMaterial,
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
+    duplex_modes: SharedDuplexModes,
     channel_mutes: crate::state::SharedChannelMutes,
     identities: crate::state::SharedIdentities,
     mut identity_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::state::IdentityRecord)>,
@@ -225,6 +232,20 @@ pub async fn run(
             .await
             .context("load channel_names from admin db")?;
         *channel_names.write().await = loaded;
+    }
+
+    // Same for the per-frequency duplex modes: hydrate from the
+    // `channel_modes` table so signaling sees the operator's choices
+    // from request #1 (the stored integer maps 0=half / 1=full).
+    {
+        let loaded = db
+            .load_channel_modes()
+            .await
+            .context("load channel_modes from admin db")?;
+        *duplex_modes.write().await = loaded
+            .into_iter()
+            .map(|(freq, m)| (freq, DuplexMode::from_u32(m)))
+            .collect();
     }
 
     // Same for channel mutes — the signaling speak-gate reads this set
@@ -286,6 +307,7 @@ pub async fn run(
         login_throttle: Arc::new(IpThrottle::new()),
         server_config,
         channel_names: channel_names.clone(),
+        duplex_modes: duplex_modes.clone(),
         channel_mutes: channel_mutes.clone(),
         bans,
         health: health.clone(),
@@ -330,6 +352,7 @@ pub async fn run(
     tokio::spawn(watch::run_broadcaster(
         registry,
         channel_names,
+        duplex_modes,
         channel_mutes,
         byte_counters,
         live_rate,

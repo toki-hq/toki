@@ -10,15 +10,17 @@ use toki_proto::v1::{
     event,
     signaling_server::{Signaling, SignalingServer},
     BroadcastCapabilityChanged, ChangeFrequencyRequest, ChangeFrequencyResponse,
-    ChannelMuteChanged, ChannelNameChanged, ConnectionQualityAck, ConnectionQualityReport, Event,
-    FrequencyChanged, IdentityChallengeRequest, IdentityChallengeResponse, JoinRequest,
-    LeaveRequest, LeaveResponse, MemberJoined, MemberLeft, PriorityChanged, PttAck, PttEvent,
-    RegisterRequest, RegisterResponse,
+    ChannelModeChanged, ChannelMuteChanged, ChannelNameChanged, ConnectionQualityAck,
+    ConnectionQualityReport, Event, FrequencyChanged, IdentityChallengeRequest,
+    IdentityChallengeResponse, JoinRequest, LeaveRequest, LeaveResponse, MemberJoined, MemberLeft,
+    PriorityChanged, PttAck, PttEvent, RegisterRequest, RegisterResponse,
 };
 
 use crate::audit::{self, AuditSink};
 use crate::server_config::SharedServerConfig;
-use crate::state::{hash_token, Client, Registry, SharedChannelNames, SharedRegistry};
+use crate::state::{
+    hash_token, Client, DuplexMode, Registry, SharedChannelNames, SharedDuplexModes, SharedRegistry,
+};
 use crate::throttle::{IpThrottle, ThrottleReject};
 use crate::validation;
 
@@ -51,6 +53,12 @@ pub struct SignalingSvc {
     /// `ChangeFrequency` to deliver the current name to the client —
     /// but only while `server_config.named_channels_enabled` is on.
     channel_names: SharedChannelNames,
+    /// Admin-assigned per-frequency duplex modes (frequency →
+    /// [`DuplexMode`]), shared with the admin panel which writes them.
+    /// Consulted on `Join` / `ChangeFrequency` to deliver the channel's
+    /// mode to the client and to seed a freshly-created room's
+    /// `Room.duplex`. Absent key = half-duplex.
+    duplex_modes: SharedDuplexModes,
     /// Channel-wide mutes (frequency set), shared with the admin panel
     /// which writes them. Consulted by the PTT speak-gate: a press on a
     /// muted channel is refused, so no one transmits there until it's
@@ -91,6 +99,7 @@ impl SignalingSvc {
         toml_password: Option<String>,
         server_config: SharedServerConfig,
         channel_names: SharedChannelNames,
+        duplex_modes: SharedDuplexModes,
         channel_mutes: crate::state::SharedChannelMutes,
         identities: crate::state::SharedIdentities,
         identity_tx: mpsc::UnboundedSender<(String, crate::state::IdentityRecord)>,
@@ -104,6 +113,7 @@ impl SignalingSvc {
             throttle: IpThrottle::new(),
             server_config,
             channel_names,
+            duplex_modes,
             channel_mutes,
             audit,
             identities,
@@ -181,6 +191,57 @@ impl SignalingSvc {
             event: Some(event::Event::ChannelNameChanged(ChannelNameChanged {
                 frequency: frequency.to_string(),
                 name,
+            })),
+        })
+    }
+
+    /// Sync helper: the effective duplex mode given an already-read
+    /// `full_duplex_enabled` flag and the per-frequency stored mode map.
+    /// Avoids taking the server-config lock a second time when the caller
+    /// already holds the flag (e.g. `channel_mode_event`).
+    async fn effective_duplex_with(
+        &self,
+        full_duplex_enabled: bool,
+        frequency: &str,
+    ) -> DuplexMode {
+        if !full_duplex_enabled {
+            return DuplexMode::Half;
+        }
+        self.duplex_modes
+            .read()
+            .await
+            .get(frequency)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The *effective* duplex mode of a frequency: the stored mode when
+    /// the full-duplex feature is enabled, else `Half` (the feature gate
+    /// forces every channel half-duplex regardless of stored modes).
+    async fn effective_duplex(&self, frequency: &str) -> DuplexMode {
+        let enabled = self.server_config.read().await.full_duplex_enabled;
+        self.effective_duplex_with(enabled, frequency).await
+    }
+
+    /// Build a `ChannelModeChanged` event for `frequency`, or `None` when
+    /// the full-duplex feature is disabled (so callers skip the send and
+    /// the client shows no duplex indicator at all). When enabled, carries
+    /// the channel's effective mode so the client picks the right PTT path.
+    /// Reads `full_duplex_enabled` exactly once, then delegates to
+    /// `effective_duplex_with` so the server-config lock is not acquired
+    /// a second time.
+    async fn channel_mode_event(&self, frequency: &str) -> Option<Event> {
+        let full_duplex_enabled = self.server_config.read().await.full_duplex_enabled;
+        if !full_duplex_enabled {
+            return None;
+        }
+        let mode = self
+            .effective_duplex_with(full_duplex_enabled, frequency)
+            .await;
+        Some(Event {
+            event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
+                frequency: frequency.to_string(),
+                mode: mode.as_u32() as i32,
             })),
         })
     }
@@ -512,7 +573,7 @@ impl Signaling for SignalingSvc {
         audio_mac_key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
         audio_mac_key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
 
-        let client = Client {
+        let mut client = Client {
             id: id.clone(),
             display_name: display_name.clone(),
             audio_token_hash: token_hash,
@@ -521,6 +582,8 @@ impl Signaling for SignalingSvc {
             // Start at 1 so the first outbound packet beats the
             // peer's playback-side starting cursor of 0.
             audio_outbound_seq: 1,
+            // Assigned from the registry counter under the lock below.
+            audio_id: 0,
             audio_addr: None,
             events_tx: None,
             current_frequency: None,
@@ -587,6 +650,9 @@ impl Signaling for SignalingSvc {
                 "callsign \"{display_name}\" is already in use on this server"
             )));
         }
+        // Stamp the per-session audio routing id used in the S2C header
+        // so receivers can demux concurrent talkers on full-duplex.
+        client.audio_id = registry.alloc_audio_id();
         registry.tokens.insert(token_hash, id.clone());
         registry.clients.insert(id.clone(), client);
         let total = registry.clients.len();
@@ -715,6 +781,12 @@ impl Signaling for SignalingSvc {
         let frequency = validation::frequency(&req.frequency)?;
         let (tx, rx) = mpsc::channel::<Event>(64);
 
+        // Read the channel's effective duplex mode (gated by the feature
+        // toggle) before taking the registry lock, so we can seed a
+        // freshly-created room's `duplex` without holding two locks across
+        // an await.
+        let duplex = self.effective_duplex(&frequency).await;
+
         // FIX 3: collect everything needed under the lock, then drop the
         // guard before any .await sends. A bounded channel (cap 64) that
         // fills will block send().await → blocks the registry lock →
@@ -745,6 +817,9 @@ impl Signaling for SignalingSvc {
             // Add to the room, snapshot the roster + holder for backfill.
             let (other_ids, current_holder, total_members) = {
                 let room = registry.rooms.entry(frequency.clone()).or_default();
+                // Seed/refresh the room's duplex mode from the shared map
+                // (self-healing if the room pre-existed and the mode changed).
+                room.duplex = duplex;
                 if !room.members.contains(&req.client_id) {
                     room.members.push(req.client_id.clone());
                 }
@@ -892,6 +967,13 @@ impl Signaling for SignalingSvc {
                 .await;
         }
 
+        // Deliver the channel's duplex mode (only when the feature is on)
+        // so the client picks the right PTT path. When off, no event is
+        // sent and the client shows no duplex indicator.
+        if let Some(mode_evt) = self.channel_mode_event(&frequency).await {
+            let _ = tx.send(mode_evt).await;
+        }
+
         // Announce the new joiner to existing members of this freq.
         for peer_tx in peer_announce_txs {
             let _ = peer_tx.send(join_event.clone()).await;
@@ -1036,6 +1118,10 @@ impl Signaling for SignalingSvc {
         // are rejected with INVALID_ARGUMENT.
         let new_freq = validation::frequency(&req.frequency)?;
 
+        // Duplex mode of the target channel, read before the registry
+        // lock so we can seed a freshly-created room without nesting locks.
+        let new_duplex = self.effective_duplex(&new_freq).await;
+
         let (
             old_recipients,
             old_left_event,
@@ -1084,6 +1170,7 @@ impl Signaling for SignalingSvc {
             // Add to new room.
             let (new_other_ids, new_holder, new_members) = {
                 let room = registry.rooms.entry(new_freq.clone()).or_default();
+                room.duplex = new_duplex;
                 if !room.members.contains(&req.client_id) {
                     room.members.push(req.client_id.clone());
                 }
@@ -1158,6 +1245,12 @@ impl Signaling for SignalingSvc {
             // it just confirmed it moved to.
             if let Some(name_evt) = self.channel_name_event(&new_freq).await {
                 let _ = tx.send(name_evt).await;
+            }
+            // Deliver the new channel's duplex mode (only when the feature
+            // is on) so the client switches PTT behaviour for the freq it
+            // just moved to.
+            if let Some(mode_evt) = self.channel_mode_event(&new_freq).await {
+                let _ = tx.send(mode_evt).await;
             }
             // And the new channel's mute state, so the PTT button updates
             // the instant the move confirms (clears a stale mute carried
@@ -1333,28 +1426,40 @@ impl Signaling for SignalingSvc {
                         } else {
                             registry.broadcast_active = Some(evt.client_id.clone());
 
-                            // Walk all rooms: cut any current holder and clear
-                            // the grace window so their residual UDP tail is NOT
-                            // forwarded (broadcast supersedes it).
-                            // Two-pass approach: first mutate rooms (mutable
-                            // borrow), then look up client senders (immutable
-                            // borrow) — can't mix them in the same loop.
+                            // Walk all rooms: cut any current holder AND
+                            // drain active_talkers (full-duplex channels),
+                            // clear the grace window so residual UDP tail
+                            // is NOT forwarded (broadcast supersedes all).
+                            // Two-pass: first mutate rooms (mutable borrow),
+                            // then look up client senders (immutable borrow).
+                            // cut_info carries (talker_id, room_members) for
+                            // both half-duplex holders and full-duplex
+                            // active talkers so each gets a PttEvent release.
                             let mut cut_info: Vec<(String, Vec<String>)> = Vec::new();
                             for (_, room) in registry.rooms.iter_mut() {
                                 if let Some(holder_id) = room.holder.take() {
                                     room.last_released = None;
                                     cut_info.push((holder_id, room.members.clone()));
                                 }
+                                // Full-duplex: drain every active talker so the
+                                // relay's `room.duplex.is_full()` gate stops
+                                // forwarding their frames once broadcast_active
+                                // is set. Each drained talker also gets a
+                                // PttEvent{pressed:false} so clients clear their
+                                // talking indicators — mirrors the holder cut above.
+                                for talker_id in room.active_talkers.drain() {
+                                    cut_info.push((talker_id, room.members.clone()));
+                                }
                             }
                             let mut cut_holders: Vec<(String, Vec<mpsc::Sender<Event>>)> =
                                 Vec::new();
-                            for (holder_id, member_ids) in cut_info {
+                            for (talker_id, member_ids) in cut_info {
                                 let room_txs: Vec<mpsc::Sender<Event>> = member_ids
                                     .iter()
                                     .filter_map(|id| registry.clients.get(id))
                                     .filter_map(|c| c.events_tx.clone())
                                     .collect();
-                                cut_holders.push((holder_id, room_txs));
+                                cut_holders.push((talker_id, room_txs));
                             }
 
                             // Collect ALL clients' event senders INCLUDING the
@@ -1559,10 +1664,28 @@ impl Signaling for SignalingSvc {
                     .and_then(|h| registry.clients.get(h))
                     .map(|c| c.priority_freq.as_deref() == Some(frequency.as_str()))
                     .unwrap_or(false);
+                let room_is_full = registry
+                    .rooms
+                    .get(&frequency)
+                    .map(|r| r.duplex.is_full())
+                    .unwrap_or(false);
 
                 // `action` is `(pressed, priority)` — the second flag
                 // tells recipients to play the two-tone priority roger.
-                let action: Option<(bool, bool)> = {
+                let action: Option<(bool, bool)> = if room_is_full {
+                    // Full-duplex: there's no floor. Track the talker set
+                    // (drives the multi-talker roster) and always broadcast
+                    // the press/release. The client self-gates audio (mic
+                    // hot only while PTT held) and the relay forwards every
+                    // member, so priority/grace don't apply here.
+                    let room = registry.rooms.entry(frequency.clone()).or_default();
+                    if evt.pressed {
+                        room.active_talkers.insert(evt.client_id.clone());
+                    } else {
+                        room.active_talkers.remove(&evt.client_id);
+                    }
+                    Some((evt.pressed, false))
+                } else {
                     let room = registry.rooms.entry(frequency.clone()).or_default();
                     let decision = ptt_decision(
                         room.holder.as_deref(),
@@ -1782,14 +1905,17 @@ pub(crate) fn remove_from_room(
     String,
     usize,
 ) {
-    let was_holder = if let Some(room) = registry.rooms.get_mut(frequency) {
+    // True if the leaver was transmitting — as the half-duplex floor
+    // holder, or as one of the full-duplex active talkers. Either way the
+    // remaining members get a Ptt release so their roster clears the badge.
+    let was_talking = if let Some(room) = registry.rooms.get_mut(frequency) {
         room.members.retain(|id| id != client_id);
-        if room.holder.as_deref() == Some(client_id) {
+        let was_active = room.active_talkers.remove(client_id);
+        let was_holder = room.holder.as_deref() == Some(client_id);
+        if was_holder {
             room.holder = None;
-            true
-        } else {
-            false
         }
+        was_holder || was_active
     } else {
         false
     };
@@ -1830,7 +1956,7 @@ pub(crate) fn remove_from_room(
         })),
     };
 
-    let release_event = if was_holder {
+    let release_event = if was_talking {
         Some(Event {
             event: Some(event::Event::Ptt(PttEvent {
                 client_id: client_id.to_string(),
@@ -1870,6 +1996,7 @@ mod tests {
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
             audio_last_seq: 0,
             audio_outbound_seq: 1,
+            audio_id: 0,
             audio_addr: None,
             events_tx: None,
             current_frequency: None,

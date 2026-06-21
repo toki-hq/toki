@@ -26,8 +26,24 @@ pub struct ClientState {
     pub members: HashMap<String, String>,
     /// Walkie-talkie lock: client_id of whoever is currently transmitting,
     /// or `None` if the floor is free. Updated only from authoritative
-    /// server broadcasts — the local press never sets this.
+    /// server broadcasts — the local press never sets this. **Half-duplex
+    /// only**; on a full-duplex channel use `talkers` instead.
     pub holder: Option<String>,
+    /// Whether the current channel is full-duplex. Delivered by the server
+    /// (`ChannelModeChanged`) on join / change-frequency and on live mode
+    /// changes. On full-duplex the client transmits the instant PTT is
+    /// pressed (no floor grant) and several members can talk at once.
+    pub duplex_full: bool,
+    /// Whether the server has told us this channel's duplex mode at all.
+    /// The server only emits `ChannelModeChanged` while the full-duplex
+    /// feature is enabled, so this stays `false` when the feature is off —
+    /// the UI then hides the duplex indicator entirely. Reset on every
+    /// frequency change / disconnect.
+    pub duplex_known: bool,
+    /// On a full-duplex channel, the set of client_ids currently keying
+    /// (from `Ptt` broadcasts). Drives the multi-talker roster. Empty on
+    /// half-duplex (use `holder` there).
+    pub talkers: HashSet<String>,
     /// `true` when the current floor activity is a *global broadcast*
     /// (someone with the broadcast capability is keyed, reaching every
     /// frequency at once). Set from the `broadcast` flag on the holder's
@@ -234,5 +250,57 @@ mod tests {
         // Lose priority on a still-muted channel → silenced once more.
         s.channel_priority = false;
         assert!(s.locally_silenced());
+    }
+
+    /// A global broadcast on a full-duplex channel must set `broadcast_active`
+    /// and `broadcast_talker` independently of `duplex_full` / `talkers`.
+    ///
+    /// The runtime's PttEvent handler now routes broadcast events (p.broadcast
+    /// == true) through the half-duplex arm regardless of channel mode, so the
+    /// broadcaster is never inserted into `talkers`. This test verifies the
+    /// state fields accept that combination without contradiction.
+    #[test]
+    fn broadcast_active_coexists_with_duplex_full_and_empty_talkers() {
+        let mut s = ClientState {
+            duplex_full: true,
+            ..Default::default()
+        };
+        // Simulate what the half-duplex (broadcast) arm writes on a
+        // broadcast-press event on a full-duplex channel: holder is set,
+        // broadcast_active is true, broadcast_talker carries the callsign,
+        // and talkers remains empty (the broadcaster is NOT a normal talker).
+        s.holder = Some("bc-client-id".into());
+        s.broadcast_active = true;
+        s.broadcast_talker = Some("DISPATCH".into());
+        assert!(s.duplex_full, "channel is still full-duplex");
+        assert!(s.broadcast_active, "broadcast indicator is set");
+        assert_eq!(
+            s.broadcast_talker.as_deref(),
+            Some("DISPATCH"),
+            "broadcaster callsign is stored"
+        );
+        assert!(
+            s.talkers.is_empty(),
+            "broadcaster must NOT appear in the talker set"
+        );
+
+        // Simulate broadcast release (pressed:false, broadcast:true):
+        // holder cleared, broadcast_active cleared, broadcast_talker cleared.
+        s.holder = None;
+        s.broadcast_active = false;
+        s.broadcast_talker = None;
+        assert!(s.duplex_full, "channel remains full-duplex after broadcast");
+        assert!(
+            !s.broadcast_active,
+            "broadcast indicator cleared on release"
+        );
+        assert!(
+            s.broadcast_talker.is_none(),
+            "broadcaster callsign cleared on release"
+        );
+        assert!(
+            s.talkers.is_empty(),
+            "talkers still empty after broadcast release"
+        );
     }
 }

@@ -94,6 +94,7 @@ function RuntimeConfig() {
   const [maxPeers, setMaxPeers] = useState("");
   const [idleKick, setIdleKick] = useState("");
   const [namedChannels, setNamedChannels] = useState(false);
+  const [fullDuplex, setFullDuplex] = useState(false);
   const [requireIdentity, setRequireIdentity] = useState(false);
   const [uniqueCallsigns, setUniqueCallsigns] = useState(true);
   const [audioQuality, setAudioQuality] = useState(2);
@@ -110,6 +111,7 @@ function RuntimeConfig() {
         setMaxPeers(String(c.maxPeers));
         setIdleKick(String(c.idleKickSecs));
         setNamedChannels(c.namedChannelsEnabled);
+        setFullDuplex(c.fullDuplexEnabled);
         setRequireIdentity(c.requireIdentity);
         setUniqueCallsigns(c.uniqueCallsigns);
         setAudioQuality(c.audioQuality);
@@ -125,6 +127,7 @@ function RuntimeConfig() {
       maxPeers !== String(cfg.maxPeers) ||
       idleKick !== String(cfg.idleKickSecs) ||
       namedChannels !== cfg.namedChannelsEnabled ||
+      fullDuplex !== cfg.fullDuplexEnabled ||
       requireIdentity !== cfg.requireIdentity ||
       uniqueCallsigns !== cfg.uniqueCallsigns ||
       audioQuality !== cfg.audioQuality ||
@@ -139,6 +142,7 @@ function RuntimeConfig() {
         maxPeers: Number(maxPeers),
         idleKickSecs: Number(idleKick),
         namedChannelsEnabled: namedChannels,
+        fullDuplexEnabled: fullDuplex,
         requireIdentity,
         uniqueCallsigns,
         audioQuality,
@@ -195,6 +199,20 @@ function RuntimeConfig() {
             checked={namedChannels}
             onCheckedChange={setNamedChannels}
             aria-label="Toggle named channels"
+          />
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Full duplex</span>
+            <span className="text-xs text-muted-foreground">
+              Allow channels to be set to full-duplex (everyone talks at
+              once). Off = every channel is half-duplex.
+            </span>
+          </div>
+          <Switch
+            checked={fullDuplex}
+            onCheckedChange={setFullDuplex}
+            aria-label="Toggle full duplex"
           />
         </div>
         <div className="flex items-center justify-between border-t border-border pt-3">

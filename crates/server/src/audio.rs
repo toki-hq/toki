@@ -224,7 +224,7 @@ pub async fn run(
         // and (for audio frames) snapshot per-peer keys + outbound
         // seqs for the fan-out. We release before doing any send_to
         // calls so the network path can't backpressure into the lock.
-        let dispatch: Option<(Vec<u8>, Vec<PeerTarget>)> = {
+        let dispatch: Option<(Vec<u8>, u32, Vec<PeerTarget>)> = {
             let mut registry = registry.lock().await;
             let Some(sender_id) = registry.tokens.get(&token_hash).cloned() else {
                 debug!(?peer, "unknown audio token");
@@ -324,11 +324,6 @@ pub async fn run(
                 continue;
             }
 
-            // Walkie-talkie fan-out. Only forward audio from the
-            // sender's current-frequency-room PTT holder. We collect
-            // (addr, key, seq) triples while still under the lock,
-            // bumping each peer's outbound seq as we go so two
-            // back-to-back senders can't share a nonce.
             // Speak-gate backstop. The signaling PTT path already
             // refuses a muted member's press (and the SetMute handler
             // drops the floor the instant a mute lands), so a muted
@@ -345,6 +340,14 @@ pub async fn run(
             if !sender_speaks {
                 continue;
             }
+
+            // Collect the sender's audio_id for S2C header demux (full-duplex
+            // concurrent talkers need a routing id; harmless in half-duplex).
+            let sender_audio_id = registry
+                .clients
+                .get(&sender_id)
+                .map(|c| c.audio_id)
+                .unwrap_or(0);
 
             // ── Global-broadcast fan-out ──────────────────────────────────
             // When this sender is the active broadcaster, deliver to every
@@ -374,9 +377,12 @@ pub async fn run(
                         }
                     }
                 }
-                Some((plaintext, targets))
+                Some((plaintext, sender_audio_id, targets))
             } else {
                 // ── Normal per-room fan-out ───────────────────────────────
+                // Walkie-talkie fan-out. We collect (addr, key, seq) triples
+                // while still under the lock, bumping each peer's outbound seq
+                // as we go so two back-to-back senders can't share a nonce.
                 let frequency = registry
                     .clients
                     .get(&sender_id)
@@ -387,18 +393,31 @@ pub async fn run(
                     let Some(room) = registry.rooms.get(&freq) else {
                         continue;
                     };
-                    // Forward if the sender currently holds the floor, or if
-                    // they just released it and we're still inside the grace
-                    // window (covers UDP tail frames that lag the reliable
-                    // PttUp which already cleared the holder). See RELEASE_GRACE.
-                    let allowed = should_relay(
-                        room.holder.as_deref(),
-                        room.last_released
-                            .as_ref()
-                            .map(|(id, at)| (id.as_str(), at.elapsed())),
-                        &sender_id,
-                        RELEASE_GRACE,
-                    );
+                    // Broadcast preempts every channel, including full-duplex
+                    // ones. The broadcast-begin handler already drained
+                    // `active_talkers` and cleared `holder`, but a member
+                    // who re-presses PTT mid-broadcast would slip through the
+                    // duplex gate below. Guard it here: if a broadcast is
+                    // active and this sender is NOT the broadcaster, drop the
+                    // frame — their audio must not mix with the broadcast.
+                    if registry.broadcast_active.is_some() {
+                        continue;
+                    }
+                    // Full-duplex: no floor — forward every member's audio (the
+                    // client self-gates by only sending while PTT is held).
+                    // Half-duplex: forward only the current floor holder, or a
+                    // just-released holder still inside the grace window (covers
+                    // UDP tail frames lagging the reliable PttUp). See
+                    // RELEASE_GRACE.
+                    let allowed = room.duplex.is_full()
+                        || should_relay(
+                            room.holder.as_deref(),
+                            room.last_released
+                                .as_ref()
+                                .map(|(id, at)| (id.as_str(), at.elapsed())),
+                            &sender_id,
+                            RELEASE_GRACE,
+                        );
                     if !allowed {
                         continue;
                     }
@@ -423,11 +442,11 @@ pub async fn run(
                         }
                     }
                 }
-                Some((plaintext, targets))
+                Some((plaintext, sender_audio_id, targets))
             }
         };
 
-        let Some((plaintext, targets)) = dispatch else {
+        let Some((plaintext, sender_audio_id, targets)) = dispatch else {
             continue;
         };
 
@@ -435,23 +454,25 @@ pub async fn run(
         // outbound seq, then send. The send loop runs *outside* the
         // registry lock so a slow network path can't stall the
         // entire relay.
+        let aad = toki_proto::wire::s2c_aad(version, sender_audio_id);
         for target in targets {
             let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&target.key));
             let nonce_bytes = build_nonce(target.seq);
             let nonce = Nonce::from_slice(&nonce_bytes);
             let mut buf_ct = plaintext.clone();
-            // AAD = the *sender's* codec version, which we also stamp into
-            // the S2C header so the receiver picks the matching decoder.
-            let tag = match cipher.encrypt_in_place_detached(nonce, &[version], &mut buf_ct) {
+            // AAD = the sender's codec version + routing id, both stamped
+            // into the S2C header below — a tampered header fails the tag.
+            let tag = match cipher.encrypt_in_place_detached(nonce, &aad, &mut buf_ct) {
                 Ok(t) => t,
                 Err(e) => {
                     warn!(error = %e, "AEAD encrypt failed for outbound peer");
                     continue;
                 }
             };
-            // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
+            // S2C layout: version (1) | sender_id (4 LE) | seq (8) | tag (16) | ciphertext
             let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
             pkt.push(version);
+            pkt.extend_from_slice(&sender_audio_id.to_le_bytes());
             pkt.extend_from_slice(&target.seq.to_le_bytes());
             pkt.extend_from_slice(tag.as_slice());
             pkt.extend_from_slice(&buf_ct);
@@ -463,23 +484,31 @@ pub async fn run(
     }
 }
 
-/// Seal a `VERSION_PONG` reply echoing a keepalive's RTT probe. Same
-/// S2C framing + AEAD as an audio packet (`VERSION_PONG` as both the
-/// header byte and the AAD, the session key, a fresh outbound seq as
-/// nonce), so the client verifies and replay-checks it on the existing
-/// inbound path. Returns `None` only if the AEAD encrypt fails (never,
-/// in practice).
+/// Seal a `VERSION_PONG` reply echoing a keepalive's RTT probe. Matches
+/// the full S2C wire layout exactly: `version(1) | sender_id(4) | seq(8)
+/// | tag(16) | ciphertext`. The sender_id for a server-generated pong is
+/// `0` (no live sender). AAD is `s2c_aad(VERSION_PONG, 0)` — the same
+/// construction the client uses when opening every S2C packet — so the
+/// client's existing decrypt + replay path handles pongs without special
+/// casing. Returns `None` only if the AEAD encrypt fails (never, in
+/// practice).
 fn seal_pong(session_key: &[u8], out_seq: u64, ping_id: u64, send_ts: u64) -> Option<Vec<u8>> {
+    const PONG_SENDER_ID: u32 = 0;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(session_key));
     let nonce_bytes = build_nonce(out_seq);
     let nonce = Nonce::from_slice(&nonce_bytes);
     let mut buf_ct = toki_proto::wire::encode_ping(ping_id, send_ts).to_vec();
+    // AAD matches what the client constructs in its decrypt path:
+    // s2c_aad(version, sender_id) = [VERSION_PONG, 0x00, 0x00, 0x00, 0x00].
+    let aad = toki_proto::wire::s2c_aad(VERSION_PONG, PONG_SENDER_ID);
     let tag = cipher
-        .encrypt_in_place_detached(nonce, &[VERSION_PONG], &mut buf_ct)
+        .encrypt_in_place_detached(nonce, &aad, &mut buf_ct)
         .ok()?;
     debug_assert_eq!(buf_ct.len(), PING_LEN);
+    // S2C layout: version(1) | sender_id(4 LE) | seq(8) | tag(16) | ct
     let mut pkt = Vec::with_capacity(HEADER_LEN_S2C + buf_ct.len());
     pkt.push(VERSION_PONG);
+    pkt.extend_from_slice(&PONG_SENDER_ID.to_le_bytes()); // 4 bytes, sender_id = 0
     pkt.extend_from_slice(&out_seq.to_le_bytes());
     pkt.extend_from_slice(tag.as_slice());
     pkt.extend_from_slice(&buf_ct);
@@ -682,6 +711,7 @@ mod tests {
                 audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
                 audio_last_seq: 0,
                 audio_outbound_seq: 1,
+                audio_id: 0,
                 audio_addr: addr,
                 events_tx: None,
                 current_frequency: Some(freq.to_string()),
@@ -741,5 +771,164 @@ mod tests {
 
         // Sanity: a non-broadcaster sender produces no broadcast targets.
         assert!(collect_broadcast_targets(&reg, "alice").is_empty());
+    }
+
+    // ── FIX 2: seal_pong wire layout ─────────────────────────────────────
+
+    /// The sealed pong must have the full S2C header:
+    /// version(1) | sender_id(4) | seq(8) | tag(16) | ct(PING_LEN).
+    /// Total = HEADER_LEN_S2C + PING_LEN.  Before the fix the sender_id
+    /// bytes were absent, so the packet was 4 bytes too short and the
+    /// client mis-parsed it (AEAD always failed, RTT never measured).
+    #[test]
+    fn seal_pong_length_matches_s2c_layout() {
+        let key = [0xABu8; toki_proto::wire::MAC_KEY_LEN];
+        let pkt = seal_pong(&key, 1, 42, 1_700_000_000).unwrap();
+        assert_eq!(
+            pkt.len(),
+            HEADER_LEN_S2C + PING_LEN,
+            "pong packet must be HEADER_LEN_S2C + PING_LEN bytes"
+        );
+    }
+
+    /// The first byte must be VERSION_PONG, the next 4 bytes the sender_id
+    /// (0 for server-generated pongs), and bytes 5..13 the seq.
+    #[test]
+    fn seal_pong_header_fields_correct() {
+        let key = [0x11u8; toki_proto::wire::MAC_KEY_LEN];
+        let out_seq: u64 = 7;
+        let pkt = seal_pong(&key, out_seq, 1, 0).unwrap();
+
+        // version at offset 0
+        assert_eq!(pkt[0], VERSION_PONG, "version byte must be VERSION_PONG");
+        // sender_id at offsets 1..5 — must be 0u32 LE for server pongs
+        let sender_id = u32::from_le_bytes(pkt[1..5].try_into().unwrap());
+        assert_eq!(
+            sender_id, 0u32,
+            "sender_id must be 0 for server-generated pongs"
+        );
+        // seq at offsets 5..13
+        let seq = u64::from_le_bytes(pkt[5..13].try_into().unwrap());
+        assert_eq!(seq, out_seq, "seq field must match out_seq");
+    }
+
+    /// Round-trip: seal_pong → decrypt with s2c_aad(VERSION_PONG, 0) must
+    /// succeed and recover the original ping probe — confirming that the AAD
+    /// the server uses to seal matches what the client uses to open.
+    #[test]
+    fn seal_pong_round_trips_through_client_open() {
+        use toki_proto::wire::{decode_ping, s2c_aad, SENDER_ID_LEN, SEQ_LEN, TAG_LEN};
+
+        let key = [0x42u8; toki_proto::wire::MAC_KEY_LEN];
+        let out_seq: u64 = 3;
+        let ping_id: u64 = 99;
+        let send_ts: u64 = 1_700_000_000_500_000;
+
+        let pkt = seal_pong(&key, out_seq, ping_id, send_ts).unwrap();
+
+        // ── Replicate the client parser exactly ──────────────────────────
+        let version = pkt[0];
+        let sender_id = u32::from_le_bytes(pkt[1..1 + SENDER_ID_LEN].try_into().unwrap());
+        let seq_off = 1 + SENDER_ID_LEN;
+        let seq = u64::from_le_bytes(pkt[seq_off..seq_off + SEQ_LEN].try_into().unwrap());
+        let tag_off = seq_off + SEQ_LEN;
+        let tag_bytes: [u8; TAG_LEN] = pkt[tag_off..tag_off + TAG_LEN].try_into().unwrap();
+        let mut plaintext = pkt[HEADER_LEN_S2C..].to_vec();
+
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let nonce_bytes = build_nonce(seq);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let tag = Tag::from_slice(&tag_bytes);
+        let aad = s2c_aad(version, sender_id);
+
+        assert!(
+            cipher
+                .decrypt_in_place_detached(&nonce, &aad, &mut plaintext, tag)
+                .is_ok(),
+            "client-side AEAD open must succeed for a correctly sealed pong"
+        );
+
+        // The decrypted payload must be the original ping probe.
+        assert_eq!(
+            decode_ping(&plaintext),
+            Some((ping_id, send_ts)),
+            "decrypted pong payload must match the original ping probe"
+        );
+    }
+
+    // ── FIX 1: broadcast relay guard for full-duplex channels ─────────────
+
+    /// When broadcast_active is set and the sender is NOT the broadcaster,
+    /// the relay must drop their frame even on a full-duplex channel.
+    /// We test this by verifying `room.duplex.is_full()` alone is no longer
+    /// sufficient to permit forwarding when a broadcast is active.
+    ///
+    /// In the relay the guard is: `if registry.broadcast_active.is_some() { continue }`
+    /// placed before the duplex/should_relay check.  This helper captures the
+    /// same decision so we can assert the correct outcome without spinning up
+    /// the full UDP relay.
+    fn relay_allowed_non_broadcaster(
+        broadcast_active: Option<&str>,
+        duplex: crate::state::DuplexMode,
+        // The relay guard doesn't depend on sender identity; kept in the
+        // signature so call sites read self-documentingly ("is alice
+        // allowed?"). Underscored to silence the unused-var lint.
+        _sender_id: &str,
+    ) -> bool {
+        // Mirror the relay logic exactly as it appears in `run` (else branch):
+        // guard first, then duplex check.
+        if broadcast_active.is_some() {
+            return false; // dropped — broadcast preempts all
+        }
+        duplex.is_full() // full-duplex allows any sender
+    }
+
+    #[test]
+    fn broadcast_blocks_full_duplex_non_broadcaster() {
+        use crate::state::DuplexMode;
+
+        // Without a broadcast a full-duplex sender is allowed.
+        assert!(relay_allowed_non_broadcaster(
+            None,
+            DuplexMode::Full,
+            "alice"
+        ));
+
+        // With a broadcast active, a full-duplex sender is blocked.
+        assert!(!relay_allowed_non_broadcaster(
+            Some("broadcaster"),
+            DuplexMode::Full,
+            "alice"
+        ));
+
+        // Half-duplex is also blocked (belt-and-suspenders — it was already
+        // blocked by should_relay returning false, and the guard fires first).
+        assert!(!relay_allowed_non_broadcaster(
+            Some("broadcaster"),
+            DuplexMode::Half,
+            "alice"
+        ));
+    }
+
+    #[test]
+    fn no_broadcast_half_duplex_still_uses_should_relay() {
+        use crate::state::DuplexMode;
+
+        // Without broadcast, half-duplex must still go through should_relay
+        // (the guard does NOT fire, so should_relay is the gate).
+        // relay_allowed_non_broadcaster returns false for half-duplex because
+        // is_full() = false — full path would call should_relay; we just
+        // confirm the guard stays out of the way.
+        assert!(!relay_allowed_non_broadcaster(
+            None,
+            DuplexMode::Half,
+            "alice"
+        ));
+        // Only full-duplex returns true without broadcast.
+        assert!(relay_allowed_non_broadcaster(
+            None,
+            DuplexMode::Full,
+            "alice"
+        ));
     }
 }

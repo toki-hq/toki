@@ -481,14 +481,25 @@ The client sends its version on `Register`. The server requires a matching
 mismatch with `FAILED_PRECONDITION` and a "please update" message, rather than
 letting an incompatible build half-connect into silent dead air.
 
-### Half-duplex behavior
+### Duplex modes (half / full)
 
-- One talker at a time per frequency. Pressing PTT while someone else is
-  transmitting puts the radio into a "busy" state — your audio is *not* sent,
-  unless you're an elected **priority speaker**, whose PTT preempts a
-  non-priority holder.
-- The 30-second TX cap prevents accidentally hot-mic'ing a channel forever.
-- The server enforces the same invariants regardless of client behavior.
+Full-duplex is gated by a **Settings toggle** (off by default). While off,
+every channel is half-duplex, channels can't be set to full, and the duplex
+controls + indicators are hidden everywhere. With it on, each channel is
+**half-duplex** by default or the operator can switch it to **full-duplex** in
+the admin panel (Channels view). The mode is pushed to clients on join /
+change-frequency and on live changes.
+
+- **Half-duplex** (classic walkie-talkie): one talker at a time per frequency.
+  Pressing PTT while someone else is transmitting puts the radio into a "busy"
+  state — your audio is *not* sent, unless you're an elected **priority
+  speaker**, whose PTT preempts a non-priority holder.
+- **Full-duplex**: no floor. PTT still gates *your* mic (press to talk, only
+  hot while held — feedback-safe), but you transmit the instant you press
+  (no waiting for a grant), several members can talk at once, and each client
+  **mixes** the concurrent streams. Priority speakers don't apply here.
+- The 30-second TX cap applies in both modes; the server enforces the same
+  invariants regardless of client behavior.
 
 ### The admin panel
 
@@ -518,7 +529,8 @@ Sections:
   (admin + client auth), and peer connect/disconnect. Filter, page, export
   JSONL. Retained 30 days.
 - **Channels** — assign human-readable names to frequencies (gated by the
-  named-channels toggle).
+  named-channels toggle), and set each channel's **duplex mode** (Half /
+  Full). Both persist independently of room occupancy.
 - **Server config** — edit `serverName`, `maxPeers`, `idleKickSecs`,
   `voiceQuality`, the named-channels toggle, the **require-identity** toggle
   (reject clients without a verified identity — makes bans airtight), and

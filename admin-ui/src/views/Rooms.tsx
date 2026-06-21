@@ -14,6 +14,7 @@ import {
   MicOff,
   Mic,
   Radio,
+  Users,
 } from "lucide-react";
 import { ConnectError } from "@connectrpc/connect";
 import type { Snapshot, Member, Room } from "@/gen/admin_pb";
@@ -54,6 +55,8 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   // named frequencies, occupied or not). Names persist even while the
   // feature is off, so the toggle is fetched separately to gate editing.
   const names = snapshot?.channelNames ?? {};
+  // Per-frequency duplex mode (0 = half, 1 = full); absent key = half.
+  const modes = snapshot?.channelModes ?? {};
   // Channel-wide mutes (all muted frequencies, occupied or not). Used to
   // flag synthetic empty rooms as muted too — you can mute an empty channel.
   const mutedChannels = useMemo(
@@ -61,6 +64,9 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
     [snapshot],
   );
   const [namedEnabled, setNamedEnabled] = useState(false);
+  // Gates all duplex UI (mode editor + badges). When off, full-duplex is
+  // hidden entirely and channels are half-only.
+  const [fdxEnabled, setFdxEnabled] = useState(false);
   const [filter, setFilter] = useState("");
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
@@ -72,7 +78,10 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
     // toggle flipped in Settings is reflected when you return here).
     admin
       .getServerConfig({})
-      .then((c) => setNamedEnabled(c.namedChannelsEnabled))
+      .then((c) => {
+        setNamedEnabled(c.namedChannelsEnabled);
+        setFdxEnabled(c.fullDuplexEnabled);
+      })
       .catch(() => setNamedEnabled(false));
   }, []);
 
@@ -151,6 +160,8 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
                 key={r.frequency}
                 room={r}
                 name={names[r.frequency]}
+                mode={modes[r.frequency] ?? 0}
+                showMode={fdxEnabled}
                 selected={current?.frequency === r.frequency}
                 onSelect={() => setSelected(r.frequency)}
               />
@@ -168,6 +179,8 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               room={current}
               name={names[current.frequency]}
               namedEnabled={namedEnabled}
+              mode={modes[current.frequency] ?? 0}
+              modeEnabled={fdxEnabled}
               onRename={setRenaming}
               onBan={setBanning}
             />
@@ -190,11 +203,15 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
 function ChannelRow({
   room,
   name,
+  mode,
+  showMode,
   selected,
   onSelect,
 }: {
   room: Room;
   name?: string;
+  mode: number;
+  showMode: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -210,7 +227,19 @@ function ChannelRow({
         {String(channelNumber(room.frequency)).padStart(2, "0")}
       </span>
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="font-mono text-sm tabular">{room.frequency}</span>
+        <span className="flex items-center gap-1.5 font-mono text-sm tabular">
+          {room.frequency}
+          {showMode &&
+            (mode === 1 ? (
+              <span className="rounded bg-primary/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-primary">
+                full
+              </span>
+            ) : (
+              <span className="rounded bg-warning/15 px-1 font-mono text-[9px] font-semibold uppercase tracking-wider text-warning">
+                half
+              </span>
+            ))}
+        </span>
         <span
           className={cn(
             "truncate text-xs",
@@ -232,12 +261,16 @@ function ChannelDetail({
   room,
   name,
   namedEnabled,
+  mode,
+  modeEnabled,
   onRename,
   onBan,
 }: {
   room: Room;
   name?: string;
   namedEnabled: boolean;
+  mode: number;
+  modeEnabled: boolean;
   onRename: (m: Member) => void;
   onBan: (m: Member) => void;
 }) {
@@ -262,6 +295,7 @@ function ChannelDetail({
         </span>
       </div>
       <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
+      {modeEnabled && <ModeEditor frequency={room.frequency} mode={mode} />}
       <div className="flex-1 overflow-y-auto">
         {room.members.length === 0 && (
           <p className="p-4 text-sm text-muted-foreground">No members on this frequency.</p>
@@ -444,16 +478,59 @@ function NameEditor({
   );
 }
 
-/// Keypair-identity badge for a member row. Shows the durable identity
-/// string (e.g. 7Q4XF9KB) next to the freely-chosen display name;
-/// hovering reveals the full public key, the machine-hash prefix, and
-/// when this identity was first seen by the server. Members that
-/// registered without an identity (pre-identity clients) render nothing.
-/// Compact connection-quality readout: RTT / jitter / loss as the client
-/// last reported them, colour-coded by a worst-of-three health score.
-/// Shows a dash until the client's first report lands (a just-connected
-/// member, or a client too old to report). Mirrors the client strip's
-/// signal score so operator and user see the same verdict.
+function ModeEditor({ frequency, mode }: { frequency: string; mode: number }) {
+  const [busy, setBusy] = useState(false);
+  const full = mode === 1;
+
+  async function set(next: number) {
+    if (next === mode || busy) return;
+    setBusy(true);
+    try {
+      await admin.setChannelMode({ frequency, mode: next });
+      toast.success(
+        next === 1
+          ? `${frequency} is now full-duplex`
+          : `${frequency} is now half-duplex`,
+      );
+    } catch (e) {
+      toast.error(`Mode change failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2 border-b border-border bg-card/40 p-3">
+      <Label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Radio className="size-3" /> Duplex mode
+      </Label>
+      <div className="flex items-center gap-2">
+        <Button
+          size="sm"
+          variant={full ? "outline" : "default"}
+          disabled={busy}
+          onClick={() => void set(0)}
+        >
+          <Radio /> Half
+        </Button>
+        <Button
+          size="sm"
+          variant={full ? "default" : "outline"}
+          disabled={busy}
+          onClick={() => void set(1)}
+        >
+          <Users /> Full
+        </Button>
+        <span className="text-xs text-muted-foreground">
+          {full
+            ? "Everyone can talk at once (clients mix)."
+            : "One talker at a time (push-to-talk floor)."}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function QualityReadout({ member }: { member: Member }) {
   if (!member.qualityFresh) {
     return <span className="font-mono text-xs text-muted-foreground/40 tabular">—</span>;

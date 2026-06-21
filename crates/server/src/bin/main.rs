@@ -96,6 +96,11 @@ async fn main() -> anyhow::Result<()> {
     // off by default, the signaling path never consults it anyway.
     let channel_names = state::shared_channel_names(std::collections::HashMap::new());
 
+    // Per-frequency duplex modes (half/full). Same bootstrap dance as
+    // channel names: starts empty (all-half), and the admin task loads
+    // the persisted `channel_modes` from sqlite right after it opens.
+    let duplex_modes = state::shared_duplex_modes(std::collections::HashMap::new());
+
     // Channel-wide mutes. Same bootstrap dance as channel_names: starts
     // empty, hydrated from the `channel_mutes` table by the admin task,
     // read by the signaling speak-gate on every PTT press.
@@ -182,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
         tls_material.clone(),
         server_config.clone(),
         channel_names.clone(),
+        duplex_modes.clone(),
         channel_mutes.clone(),
         identities.clone(),
         identity_rx,
@@ -215,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
                 password,
                 server_config.clone(),
                 channel_names,
+                duplex_modes,
                 channel_mutes,
                 identities,
                 identity_tx,

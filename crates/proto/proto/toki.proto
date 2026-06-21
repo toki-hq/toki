@@ -240,7 +240,24 @@ message Event {
     // is mid-broadcast when revoked, the broadcast is torn down
     // server-side before this event is delivered.
     BroadcastCapabilityChanged broadcast_capability_changed = 10;
+    // Sent when a frequency's duplex mode changes, or to deliver the
+    // current mode on Join / ChangeFrequency. HALF (the default) is the
+    // classic single-floor walkie-talkie; FULL lets several members
+    // transmit at once and clients mix the streams. The client compares
+    // `frequency` against its current tuning before applying. (Field 11:
+    // appended after the mute/priority/broadcast events that landed on
+    // main while this branch was in flight.)
+    ChannelModeChanged channel_mode_changed = 11;
   }
+}
+
+// Per-frequency duplex behaviour.
+enum DuplexMode {
+  // One talker at a time — the PTT floor (classic walkie-talkie). Default.
+  DUPLEX_MODE_HALF = 0;
+  // Many talkers at once — no floor; the client transmits the instant
+  // PTT is pressed and mixes every concurrent peer's audio.
+  DUPLEX_MODE_FULL = 1;
 }
 
 message MemberJoined {
@@ -300,6 +317,13 @@ message PriorityChanged {
 message BroadcastCapabilityChanged {
   string client_id = 1;
   bool granted = 2;
+}
+
+// The duplex mode of a frequency channel. Sent on Join/ChangeFrequency
+// backfill and whenever the admin changes a channel's mode.
+message ChannelModeChanged {
+  string frequency = 1;
+  DuplexMode mode = 2;
 }
 
 message PttEvent {

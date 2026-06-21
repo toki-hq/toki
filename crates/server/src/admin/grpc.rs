@@ -23,11 +23,13 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, StreamExt};
 use tonic::{Request, Response, Status};
 
+use crate::state::DuplexMode;
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, BroadcastCapabilityChanged, ChannelMuteChanged, ChannelNameChanged, DisplayNameChanged,
-    Event, FrequencyChanged, MemberJoined, MemberLeft, MuteChanged, PriorityChanged, PttEvent,
+    event, BroadcastCapabilityChanged, ChannelModeChanged, ChannelMuteChanged, ChannelNameChanged,
+    DisplayNameChanged, Event, FrequencyChanged, MemberJoined, MemberLeft, MuteChanged,
+    PriorityChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -107,6 +109,7 @@ impl AdminApi {
         let snap = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.duplex_modes,
             &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
@@ -114,6 +117,62 @@ impl AdminApi {
         )
         .await;
         let _ = self.state.broadcaster.send(snap);
+    }
+
+    /// Re-evaluate every live room's effective duplex mode after the
+    /// feature toggle flipped, update `Room.duplex`, and push a
+    /// `ChannelModeChanged` to each occupied room so clients flip
+    /// behaviour + indicators at once. When `enabled` is false every room
+    /// becomes half; when true each room takes its stored mode.
+    async fn resync_duplex_modes(&self, enabled: bool) {
+        let modes = self.state.duplex_modes.read().await.clone();
+        // Under the registry lock: set each room's effective `duplex` and
+        // collect (frequency, effective mode, recipients) for occupied
+        // rooms. Sends happen after the lock is dropped.
+        let updates: Vec<(String, i32, Vec<mpsc::Sender<Event>>)> = {
+            let mut reg = self.state.registry.lock().await;
+            let freqs: Vec<String> = reg.rooms.keys().cloned().collect();
+            let mut out = Vec::new();
+            for freq in freqs {
+                let eff = if enabled {
+                    modes.get(&freq).copied().unwrap_or_default()
+                } else {
+                    DuplexMode::Half
+                };
+                let members = match reg.rooms.get_mut(&freq) {
+                    Some(room) => {
+                        room.duplex = eff;
+                        if !eff.is_full() {
+                            room.active_talkers.clear();
+                        }
+                        room.members.clone()
+                    }
+                    None => continue,
+                };
+                if members.is_empty() {
+                    continue;
+                }
+                let txs: Vec<mpsc::Sender<Event>> = members
+                    .iter()
+                    .filter_map(|id| reg.clients.get(id))
+                    .filter_map(|c| c.events_tx.clone())
+                    .collect();
+                out.push((freq, eff.as_u32() as i32, txs));
+            }
+            out
+        };
+        for (frequency, mode, txs) in updates {
+            let evt = Event {
+                event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
+                    frequency,
+                    mode,
+                })),
+            };
+            for tx in txs {
+                let _ = tx.send(evt.clone()).await;
+            }
+        }
+        self.push_snapshot().await;
     }
 
     /// Remove a live session from the registry and notify its room —
@@ -255,6 +314,7 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         unique_callsigns: cfg.unique_callsigns,
         opus_dtx: cfg.opus_dtx,
         opus_frame_ms: cfg.opus_frame_ms,
+        full_duplex_enabled: cfg.full_duplex_enabled,
     }
 }
 
@@ -275,6 +335,7 @@ impl Admin for AdminApi {
         let first = watch::snapshot_now(
             &self.state.registry,
             &self.state.channel_names,
+            &self.state.duplex_modes,
             &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
@@ -333,20 +394,20 @@ impl Admin for AdminApi {
         }
 
         // Merge with the live config so we don't clobber grpc_password.
-        let merged = {
-            let current = self.state.server_config.read().await.clone();
-            ServerConfig {
-                server_name,
-                max_peers,
-                idle_kick_secs,
-                grpc_password: current.grpc_password,
-                named_channels_enabled: body.named_channels_enabled,
-                audio_quality: body.audio_quality,
-                require_identity: body.require_identity,
-                unique_callsigns: body.unique_callsigns,
-                opus_dtx: body.opus_dtx,
-                opus_frame_ms: body.opus_frame_ms,
-            }
+        let current = self.state.server_config.read().await.clone();
+        let full_duplex_toggled = body.full_duplex_enabled != current.full_duplex_enabled;
+        let merged = ServerConfig {
+            server_name,
+            max_peers,
+            idle_kick_secs,
+            grpc_password: current.grpc_password,
+            named_channels_enabled: body.named_channels_enabled,
+            audio_quality: body.audio_quality,
+            require_identity: body.require_identity,
+            unique_callsigns: body.unique_callsigns,
+            opus_dtx: body.opus_dtx,
+            opus_frame_ms: body.opus_frame_ms,
+            full_duplex_enabled: body.full_duplex_enabled,
         };
         self.state
             .db
@@ -354,6 +415,13 @@ impl Admin for AdminApi {
             .await
             .map_err(internal)?;
         *self.state.server_config.write().await = merged.clone();
+
+        // If the full-duplex feature was just toggled, re-evaluate every
+        // live room's effective mode (off ⇒ all half) and tell occupants
+        // so clients flip behaviour + indicators immediately.
+        if full_duplex_toggled {
+            self.resync_duplex_modes(merged.full_duplex_enabled).await;
+        }
 
         tracing::info!(
             admin_user = %admin.0,
@@ -1374,6 +1442,90 @@ impl Admin for AdminApi {
         Ok(Response::new(pb::SetChannelNameResponse {}))
     }
 
+    async fn set_channel_mode(
+        &self,
+        req: Request<pb::SetChannelModeRequest>,
+    ) -> Result<Response<pb::SetChannelModeResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        if !self.state.server_config.read().await.full_duplex_enabled {
+            return Err(Status::failed_precondition(
+                "full-duplex is disabled; enable it in server settings first",
+            ));
+        }
+        let pb::SetChannelModeRequest { frequency, mode } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+        if mode > 1 {
+            return Err(Status::invalid_argument("unknown duplex mode"));
+        }
+        let duplex = DuplexMode::from_u32(mode);
+
+        // Persist + update the shared map in lockstep. Half-duplex is the
+        // default, so we clear the row (absent = half) to keep the table +
+        // snapshot carrying only the non-default channels.
+        if duplex.is_full() {
+            self.state
+                .db
+                .set_channel_mode(&frequency, duplex.as_u32())
+                .await
+                .map_err(internal)?;
+            self.state
+                .duplex_modes
+                .write()
+                .await
+                .insert(frequency.clone(), duplex);
+        } else {
+            self.state
+                .db
+                .clear_channel_mode(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.duplex_modes.write().await.remove(&frequency);
+        }
+
+        // Hot-apply to a live room so the relay switches immediately
+        // without waiting for the next join.
+        if let Some(room) = self.state.registry.lock().await.rooms.get_mut(&frequency) {
+            room.duplex = duplex;
+            // Leaving full→half drops the floor-less talker set; the
+            // half-duplex path will re-establish a single holder.
+            if !duplex.is_full() {
+                room.active_talkers.clear();
+            }
+        }
+
+        tracing::info!(
+            admin_user = %admin.0,
+            frequency = %frequency,
+            mode = if duplex.is_full() { "full" } else { "half" },
+            "admin set channel duplex mode",
+        );
+        audit::record(
+            &self.state.audit,
+            "channel-mode",
+            &admin.0,
+            &frequency,
+            if duplex.is_full() {
+                "set the channel to full-duplex"
+            } else {
+                "set the channel to half-duplex"
+            },
+        );
+
+        // Tell occupants so their clients switch PTT behaviour live.
+        let evt = Event {
+            event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
+                frequency: frequency.clone(),
+                mode: duplex.as_u32() as i32,
+            })),
+        };
+        for tx in self.room_recipients(&frequency).await {
+            let _ = tx.send(evt.clone()).await;
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelModeResponse {}))
+    }
+
     async fn clear_all_channel_names(
         &self,
         req: Request<pb::ClearAllChannelNamesRequest>,
@@ -1639,6 +1791,7 @@ mod tests {
             login_throttle: Arc::new(IpThrottle::new()),
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
+            duplex_modes: crate::state::shared_duplex_modes(Default::default()),
             channel_mutes: crate::state::shared_channel_mutes(Default::default()),
             bans: crate::state::shared_bans(Default::default()),
             health: crate::metrics::shared_health(),
@@ -1676,6 +1829,7 @@ mod tests {
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
             audio_last_seq: 0,
             audio_outbound_seq: 1,
+            audio_id: 0,
             audio_addr: None,
             events_tx: None,
             current_frequency: freq.map(str::to_string),
@@ -1986,6 +2140,7 @@ mod tests {
                     unique_callsigns: true,
                     opus_dtx: true,
                     opus_frame_ms: 10,
+                    full_duplex_enabled: false,
                 },
                 &token,
             ))

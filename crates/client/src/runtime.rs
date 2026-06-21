@@ -24,13 +24,13 @@ use chacha20poly1305::{
     ChaCha20Poly1305, Key, KeyInit, Nonce, Tag,
 };
 use toki_proto::v1::{
-    event::Event as Ev, signaling_client::SignalingClient, ChangeFrequencyRequest,
+    event::Event as Ev, signaling_client::SignalingClient, ChangeFrequencyRequest, DuplexMode,
     IdentityChallengeRequest, JoinRequest, LeaveRequest, PttEvent, RegisterRequest,
 };
 use toki_proto::wire::{
-    build_nonce, decode_ping, encode_ping, HEADER_LEN_C2S, HEADER_LEN_S2C, MAX_AUDIO_PACKET,
-    MAX_OPUS_PAYLOAD, OPUS_FRAME_SAMPLES, PING_LEN, SEQ_LEN, TAG_LEN, VERSION_AUDIO_OPUS,
-    VERSION_AUDIO_PCM, VERSION_KEEPALIVE, VERSION_PONG,
+    build_nonce, decode_ping, encode_ping, s2c_aad, HEADER_LEN_C2S, HEADER_LEN_S2C,
+    MAX_AUDIO_PACKET, MAX_OPUS_PAYLOAD, OPUS_FRAME_SAMPLES, PING_LEN, SENDER_ID_LEN, SEQ_LEN,
+    TAG_LEN, VERSION_AUDIO_OPUS, VERSION_AUDIO_PCM, VERSION_KEEPALIVE, VERSION_PONG,
 };
 
 use crate::audio::{self, push_playback, push_voice, BeepParams, PlaybackBuf};
@@ -241,7 +241,7 @@ async fn run(
                     // post-DSP frame so the peer-bound `frame` stays clean.
                     let mut monitor_buf = monitor_raw.unwrap_or_else(|| frame.clone());
                     monitor_fx.process(&mut monitor_buf);
-                    push_voice(&playback, &monitor_buf);
+                    push_voice(&playback, audio::LOCAL_SENDER_ID, &monitor_buf);
                 }
 
                 if let Some(s) = &session {
@@ -354,6 +354,9 @@ async fn handle_cmd(
                 st.connection = ConnState::Disconnected;
                 st.members.clear();
                 st.holder = None;
+                st.talkers.clear();
+                st.duplex_full = false;
+                st.duplex_known = false;
                 st.broadcast_active = false;
                 st.broadcast_talker = None;
                 st.self_id = None;
@@ -646,6 +649,11 @@ struct Session {
     /// share ownership without inheriting the whole Session.
     udp_seq: Arc<AtomicU64>,
     ptt: Arc<AtomicBool>,
+    /// Whether the current channel is full-duplex. Shared with the
+    /// events_task (which sets it from `ChannelModeChanged`). On full-
+    /// duplex `request_ptt` opens the audio gate locally on press — there's
+    /// no floor grant to wait for — and several members talk at once.
+    full_duplex: Arc<AtomicBool>,
     seq: AtomicU64,
     ptt_tx: mpsc::Sender<PttEvent>,
     /// Client-side PTT-spam guard. `local_pressed` tracks whether
@@ -871,6 +879,8 @@ impl Session {
         let self_id_for_events = client_id.clone();
         let ptt_atomic = Arc::new(AtomicBool::new(false));
         let ptt_for_events = ptt_atomic.clone();
+        let full_duplex = Arc::new(AtomicBool::new(false));
+        let full_duplex_for_events = full_duplex.clone();
         // Server-side mute flag. The events task sets it from a
         // `MuteChanged` addressed to us; the mic loop reads it.
         let self_muted = Arc::new(AtomicBool::new(false));
@@ -903,9 +913,40 @@ impl Session {
                                 st.broadcast_active = false;
                                 st.broadcast_talker = None;
                             }
+                            // Full-duplex: also drop them from the talker set.
+                            st.talkers.remove(&l.client_id);
                             st.log(format!("← {name} left"));
                         }
                         Some(Ev::Ptt(p)) => {
+                            // Full-duplex: there's no floor. Track the talker
+                            // set (multi-talker roster) and flip our own gate;
+                            // skip the single-holder acquire/release/roger
+                            // machinery entirely.
+                            //
+                            // EXCEPTION: a global broadcast (`p.broadcast ==
+                            // true`) is a fleet-wide, floor-seizing event that
+                            // must be handled identically regardless of the
+                            // channel's duplex mode. It always falls through to
+                            // the half-duplex arm below so that
+                            // `broadcast_active`, `broadcast_talker`, the
+                            // BROADCAST_ROGER cue, and the mic gate are all set
+                            // correctly. The broadcaster is NOT added to
+                            // `st.talkers` (they hold the broadcast floor, not a
+                            // normal concurrent talker slot).
+                            if state_for_events.lock().unwrap().duplex_full && !p.broadcast {
+                                {
+                                    let mut st = state_for_events.lock().unwrap();
+                                    if p.pressed {
+                                        st.talkers.insert(p.client_id.clone());
+                                    } else {
+                                        st.talkers.remove(&p.client_id);
+                                    }
+                                }
+                                if p.client_id == self_id_for_events {
+                                    ptt_for_events.store(p.pressed, Ordering::Relaxed);
+                                }
+                                continue;
+                            }
                             // Update holder state and detect transitions in one
                             // critical section, then play beeps / flip the audio
                             // gate outside the lock.
@@ -1072,6 +1113,15 @@ impl Session {
                             // here is what makes "move away from a muted
                             // channel and you can talk again" feel instant.
                             st.channel_name = None;
+                            // Reset duplex state; the new room's
+                            // ChannelModeChanged lands right after this (and
+                            // only if the feature is on, so `duplex_known`
+                            // stays false on a feature-off server → no
+                            // indicator).
+                            st.talkers.clear();
+                            st.duplex_full = false;
+                            st.duplex_known = false;
+                            full_duplex_for_events.store(false, Ordering::Relaxed);
                             st.channel_muted = false;
                             // Priority is per-channel; the server re-asserts
                             // it for the new freq via PriorityChanged right
@@ -1125,6 +1175,30 @@ impl Session {
                                     None => st.log("🏷 channel name cleared"),
                                 }
                                 st.channel_name = name;
+                            }
+                        }
+                        Some(Ev::ChannelModeChanged(cmc)) => {
+                            // Switch the current channel's duplex behaviour.
+                            // Ignore stale events for a frequency we've left.
+                            let mut st = state_for_events.lock().unwrap();
+                            if st.frequency.as_deref() == Some(cmc.frequency.as_str()) {
+                                let full = cmc.mode == DuplexMode::Full as i32;
+                                full_duplex_for_events.store(full, Ordering::Relaxed);
+                                // Receiving any mode event means the feature
+                                // is on → show the indicator.
+                                st.duplex_known = true;
+                                if full != st.duplex_full {
+                                    st.duplex_full = full;
+                                    // Mode flip invalidates the floor/talker
+                                    // view; the server re-establishes it.
+                                    st.holder = None;
+                                    st.talkers.clear();
+                                    st.log(if full {
+                                        "🔀 full-duplex (everyone can talk)"
+                                    } else {
+                                        "🔁 half-duplex (one at a time)"
+                                    });
+                                }
                             }
                         }
                         Some(Ev::MuteChanged(mc)) => {
@@ -1250,6 +1324,11 @@ impl Session {
             st.connection = crate::state::ConnState::Disconnected;
             st.members.clear();
             st.holder = None;
+            st.talkers.clear();
+            st.duplex_full = false;
+            st.duplex_known = false;
+            st.broadcast_active = false;
+            st.broadcast_talker = None;
             st.frequency = None;
             st.channel_name = None;
             st.conn_quality = None;
@@ -1277,18 +1356,19 @@ impl Session {
         let recv_task = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_AUDIO_PACKET];
             let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_for_recv));
-            // One reusable Opus decoder for the inbound stream. Only one
-            // peer transmits per channel at a time, so a single decoder
-            // is fine; `None` if libopus init somehow fails (Opus frames
-            // are then dropped, PCM still plays).
-            let mut decoder = audiopus::coder::Decoder::new(
-                audiopus::SampleRate::Hz48000,
-                audiopus::Channels::Mono,
-            )
-            .ok();
+            // Per-sender Opus decoder, keyed by the S2C header's sender id.
+            // Opus decoder state is per-stream, so concurrent full-duplex
+            // talkers must never share one. `None` value = libopus init
+            // failed for that sender (its Opus frames drop; PCM still plays).
+            // Each entry carries a last-seen instant for idle eviction so
+            // the map doesn't grow one decoder per session ever heard.
+            type DecSlot = (Option<audiopus::coder::Decoder>, std::time::Instant);
+            let mut decoders: std::collections::HashMap<u32, DecSlot> =
+                std::collections::HashMap::new();
             // Server→peer seq counter for strict-monotonic replay
-            // protection on the inbound path. Server starts at 1,
-            // matching the client→server direction.
+            // protection on the inbound path. The seq is per-receiver
+            // (monotonic across all senders), so one counter is correct
+            // even with several concurrent talkers. Server starts at 1.
             let mut server_last_seq: u64 = 0;
             loop {
                 match udp_for_recv.recv(&mut buf).await {
@@ -1298,24 +1378,31 @@ impl Session {
                             warn!(n, "server packet too small, dropping");
                             continue;
                         }
-                        // S2C layout: version (1) | seq (8) | tag (16) | ciphertext
+                        // S2C layout: version(1) | sender_id(4) | seq(8) | tag(16) | ct
                         let version = buf[0];
-                        let seq_bytes: [u8; SEQ_LEN] = buf[1..1 + SEQ_LEN]
+                        let sender_id = u32::from_le_bytes(
+                            buf[1..1 + SENDER_ID_LEN]
+                                .try_into()
+                                .expect("slice has SENDER_ID_LEN bytes"),
+                        );
+                        let seq_off = 1 + SENDER_ID_LEN;
+                        let seq_bytes: [u8; SEQ_LEN] = buf[seq_off..seq_off + SEQ_LEN]
                             .try_into()
                             .expect("slice has SEQ_LEN bytes");
                         let seq = u64::from_le_bytes(seq_bytes);
-                        let tag_bytes: [u8; TAG_LEN] = buf[1 + SEQ_LEN..1 + SEQ_LEN + TAG_LEN]
+                        let tag_off = seq_off + SEQ_LEN;
+                        let tag_bytes: [u8; TAG_LEN] = buf[tag_off..tag_off + TAG_LEN]
                             .try_into()
                             .expect("slice has TAG_LEN bytes");
                         let mut plaintext = buf[HEADER_LEN_S2C..n].to_vec();
                         let nonce_bytes = build_nonce(seq);
                         let nonce = Nonce::from_slice(&nonce_bytes);
                         let tag = Tag::from_slice(&tag_bytes);
-                        // AAD is the relayed codec version (matches the
-                        // server's seal), so a tampered version byte fails
-                        // the tag check.
+                        // AAD = codec version + sender id (matches the
+                        // server's seal), so a tampered header fails the tag.
+                        let aad = s2c_aad(version, sender_id);
                         if cipher
-                            .decrypt_in_place_detached(nonce, &[version], &mut plaintext, tag)
+                            .decrypt_in_place_detached(nonce, &aad, &mut plaintext, tag)
                             .is_err()
                         {
                             warn!("server audio AEAD verify failed, dropping");
@@ -1342,25 +1429,48 @@ impl Session {
                             continue;
                         }
 
-                        // Decode per the codec the sender used. Radio FX is
-                        // *not* applied here — it's a transmit-side effect now,
-                        // baked into the audio by the sender, so incoming voice
-                        // already carries whatever FX the sender chose.
+                        // Decode per the codec the sender used, routing to
+                        // this sender's own decoder so concurrent Opus
+                        // streams don't corrupt each other. Radio FX is a
+                        // transmit-side effect (baked in by the sender), so
+                        // it's not applied here.
+                        let now = std::time::Instant::now();
                         let samples = match version {
                             VERSION_AUDIO_PCM => pcm_from_bytes(&plaintext),
-                            VERSION_AUDIO_OPUS => decode_opus(&mut decoder, &plaintext),
+                            VERSION_AUDIO_OPUS => {
+                                let slot = decoders.entry(sender_id).or_insert_with(|| {
+                                    (
+                                        audiopus::coder::Decoder::new(
+                                            audiopus::SampleRate::Hz48000,
+                                            audiopus::Channels::Mono,
+                                        )
+                                        .ok(),
+                                        now,
+                                    )
+                                });
+                                slot.1 = now;
+                                decode_opus(&mut slot.0, &plaintext)
+                            }
                             other => {
                                 debug!(version = other, "unknown audio codec, dropping");
                                 continue;
                             }
                         };
+                        // Evict decoders for talkers gone quiet so the map
+                        // stays bounded by concurrent speakers, not history.
+                        decoders.retain(|&id, (_, last)| {
+                            id == sender_id
+                                || now.duration_since(*last) < std::time::Duration::from_secs(3)
+                        });
                         // Feed the quality tracker: this seq advanced the
                         // S2C counter (loss = gaps) and arrived now
                         // (jitter = spacing deviation).
                         quality.on_audio(seq, Instant::now());
-                        // Latency-managed: keeps the voice backlog tight
-                        // so playback can't fall progressively behind.
-                        push_voice(&playback, &samples);
+                        // Latency-managed per sender; the mixer sums all
+                        // active senders in the output callback (full-
+                        // duplex: several concurrent talkers; half-duplex:
+                        // degrades to a single buffer).
+                        push_voice(&playback, sender_id, &samples);
                     }
                     Err(e) => {
                         warn!(error = %e, "udp recv error");
@@ -1437,6 +1547,7 @@ impl Session {
             // Shared with events_task — it's the only writer. Flipped to
             // `true` only when the server's broadcast confirms us as holder.
             ptt: ptt_atomic,
+            full_duplex,
             seq: AtomicU64::new(0),
             ptt_tx,
             local_pressed: AtomicBool::new(false),
@@ -1503,6 +1614,9 @@ impl Session {
         // will be released by the server, but our audio gate must not
         // leak between rooms.
         self.ptt.store(false, Ordering::Relaxed);
+        // Assume half-duplex until the new room's ChannelModeChanged says
+        // otherwise, so a stale full-duplex flag can't open the gate early.
+        self.full_duplex.store(false, Ordering::Relaxed);
         let mut signaling = self.signaling.clone();
         let req = ChangeFrequencyRequest {
             client_id: self.client_id.clone(),
@@ -1557,6 +1671,15 @@ impl Session {
             // Open the cooldown gate now so the *next* fresh press
             // has to wait at least `PTT_COOLDOWN`.
             *self.cooldown_until.lock().unwrap() = Some(Instant::now() + PTT_COOLDOWN);
+        }
+
+        // Full-duplex: no floor to wait for — open/close our own audio
+        // gate immediately on press/release. (Half-duplex keeps waiting
+        // for the server's grant broadcast, which sets `ptt` instead.)
+        // We still send the PttEvent below so the server relays our audio
+        // and peers' rosters light up.
+        if self.full_duplex.load(Ordering::Relaxed) {
+            self.ptt.store(pressed, Ordering::Relaxed);
         }
 
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);

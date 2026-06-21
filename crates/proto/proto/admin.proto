@@ -82,6 +82,12 @@ service Admin {
   // Clear every channel name in one shot.
   rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
 
+  // Set a frequency's duplex mode (0 = half, 1 = full). Persists
+  // independently of room occupancy; hot-applied to a live room and
+  // pushed to its occupants. INVALID_ARGUMENT for a bad frequency or
+  // an unknown mode value.
+  rpc SetChannelMode(SetChannelModeRequest) returns (SetChannelModeResponse);
+
   // ── Metrics / KPIs / audit ──────────────────────────────────────
   // Time-series of voice-relay bandwidth + peer count, persisted at
   // 1-minute resolution. Server downsamples to a bounded point count
@@ -117,6 +123,11 @@ message Snapshot {
   // the panel can flag an empty-but-muted frequency. Independent of the
   // named-channels feature — channel mute is always available.
   repeated string muted_channels = 8;
+  // Per-frequency duplex mode (0 = half, 1 = full), keyed by canonical
+  // frequency. Only non-default (full) channels appear; an absent key
+  // means half-duplex. Persists independently of room occupancy. (Field
+  // 9: appended after muted_channels, which took 8 on main.)
+  map<string, uint32> channel_modes = 9;
 }
 
 message Room {
@@ -220,6 +231,11 @@ message ServerConfig {
   // Opus frame duration the server advertises to clients: 10, 20, or 40 ms.
   // Default 10 ms (absent = legacy). See RegisterResponse.opus_frame_ms.
   uint32 opus_frame_ms = 11;
+  // Gate the per-channel full-duplex feature. When off, every channel is
+  // half-duplex and SetChannelMode is rejected; the UI hides duplex
+  // controls + indicators. (Field 12: appended after the identity/
+  // callsign/DTX/frame-size settings that landed on main.)
+  bool full_duplex_enabled = 12;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -242,6 +258,9 @@ message UpdateServerConfigRequest {
   bool opus_dtx = 8;
   // Opus frame size (see ServerConfig.opus_frame_ms).
   uint32 opus_frame_ms = 9;
+  // Gate the full-duplex feature (see ServerConfig.full_duplex_enabled).
+  // Field 10: appended after the settings that landed on main.
+  bool full_duplex_enabled = 10;
 }
 
 message SetServerPasswordRequest {
@@ -329,6 +348,12 @@ message SetChannelNameResponse {}
 
 message ClearAllChannelNamesRequest {}
 message ClearAllChannelNamesResponse {}
+
+message SetChannelModeRequest {
+  string frequency = 1;             // canonical "446.05"
+  uint32 mode = 2;                  // 0 = half-duplex, 1 = full-duplex
+}
+message SetChannelModeResponse {}
 
 // ── Metrics ───────────────────────────────────────────────────────
 

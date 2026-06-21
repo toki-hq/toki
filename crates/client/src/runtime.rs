@@ -922,7 +922,18 @@ impl Session {
                             // set (multi-talker roster) and flip our own gate;
                             // skip the single-holder acquire/release/roger
                             // machinery entirely.
-                            if state_for_events.lock().unwrap().duplex_full {
+                            //
+                            // EXCEPTION: a global broadcast (`p.broadcast ==
+                            // true`) is a fleet-wide, floor-seizing event that
+                            // must be handled identically regardless of the
+                            // channel's duplex mode. It always falls through to
+                            // the half-duplex arm below so that
+                            // `broadcast_active`, `broadcast_talker`, the
+                            // BROADCAST_ROGER cue, and the mic gate are all set
+                            // correctly. The broadcaster is NOT added to
+                            // `st.talkers` (they hold the broadcast floor, not a
+                            // normal concurrent talker slot).
+                            if state_for_events.lock().unwrap().duplex_full && !p.broadcast {
                                 {
                                     let mut st = state_for_events.lock().unwrap();
                                     if p.pressed {

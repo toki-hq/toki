@@ -195,11 +195,16 @@ impl SignalingSvc {
         })
     }
 
-    /// The *effective* duplex mode of a frequency: the stored mode when
-    /// the full-duplex feature is enabled, else `Half` (the feature gate
-    /// forces every channel half-duplex regardless of stored modes).
-    async fn effective_duplex(&self, frequency: &str) -> DuplexMode {
-        if !self.server_config.read().await.full_duplex_enabled {
+    /// Sync helper: the effective duplex mode given an already-read
+    /// `full_duplex_enabled` flag and the per-frequency stored mode map.
+    /// Avoids taking the server-config lock a second time when the caller
+    /// already holds the flag (e.g. `channel_mode_event`).
+    async fn effective_duplex_with(
+        &self,
+        full_duplex_enabled: bool,
+        frequency: &str,
+    ) -> DuplexMode {
+        if !full_duplex_enabled {
             return DuplexMode::Half;
         }
         self.duplex_modes
@@ -210,15 +215,29 @@ impl SignalingSvc {
             .unwrap_or_default()
     }
 
+    /// The *effective* duplex mode of a frequency: the stored mode when
+    /// the full-duplex feature is enabled, else `Half` (the feature gate
+    /// forces every channel half-duplex regardless of stored modes).
+    async fn effective_duplex(&self, frequency: &str) -> DuplexMode {
+        let enabled = self.server_config.read().await.full_duplex_enabled;
+        self.effective_duplex_with(enabled, frequency).await
+    }
+
     /// Build a `ChannelModeChanged` event for `frequency`, or `None` when
     /// the full-duplex feature is disabled (so callers skip the send and
     /// the client shows no duplex indicator at all). When enabled, carries
     /// the channel's effective mode so the client picks the right PTT path.
+    /// Reads `full_duplex_enabled` exactly once, then delegates to
+    /// `effective_duplex_with` so the server-config lock is not acquired
+    /// a second time.
     async fn channel_mode_event(&self, frequency: &str) -> Option<Event> {
-        if !self.server_config.read().await.full_duplex_enabled {
+        let full_duplex_enabled = self.server_config.read().await.full_duplex_enabled;
+        if !full_duplex_enabled {
             return None;
         }
-        let mode = self.effective_duplex(frequency).await;
+        let mode = self
+            .effective_duplex_with(full_duplex_enabled, frequency)
+            .await;
         Some(Event {
             event: Some(event::Event::ChannelModeChanged(ChannelModeChanged {
                 frequency: frequency.to_string(),
@@ -1407,28 +1426,40 @@ impl Signaling for SignalingSvc {
                         } else {
                             registry.broadcast_active = Some(evt.client_id.clone());
 
-                            // Walk all rooms: cut any current holder and clear
-                            // the grace window so their residual UDP tail is NOT
-                            // forwarded (broadcast supersedes it).
-                            // Two-pass approach: first mutate rooms (mutable
-                            // borrow), then look up client senders (immutable
-                            // borrow) — can't mix them in the same loop.
+                            // Walk all rooms: cut any current holder AND
+                            // drain active_talkers (full-duplex channels),
+                            // clear the grace window so residual UDP tail
+                            // is NOT forwarded (broadcast supersedes all).
+                            // Two-pass: first mutate rooms (mutable borrow),
+                            // then look up client senders (immutable borrow).
+                            // cut_info carries (talker_id, room_members) for
+                            // both half-duplex holders and full-duplex
+                            // active talkers so each gets a PttEvent release.
                             let mut cut_info: Vec<(String, Vec<String>)> = Vec::new();
                             for (_, room) in registry.rooms.iter_mut() {
                                 if let Some(holder_id) = room.holder.take() {
                                     room.last_released = None;
                                     cut_info.push((holder_id, room.members.clone()));
                                 }
+                                // Full-duplex: drain every active talker so the
+                                // relay's `room.duplex.is_full()` gate stops
+                                // forwarding their frames once broadcast_active
+                                // is set. Each drained talker also gets a
+                                // PttEvent{pressed:false} so clients clear their
+                                // talking indicators — mirrors the holder cut above.
+                                for talker_id in room.active_talkers.drain() {
+                                    cut_info.push((talker_id, room.members.clone()));
+                                }
                             }
                             let mut cut_holders: Vec<(String, Vec<mpsc::Sender<Event>>)> =
                                 Vec::new();
-                            for (holder_id, member_ids) in cut_info {
+                            for (talker_id, member_ids) in cut_info {
                                 let room_txs: Vec<mpsc::Sender<Event>> = member_ids
                                     .iter()
                                     .filter_map(|id| registry.clients.get(id))
                                     .filter_map(|c| c.events_tx.clone())
                                     .collect();
-                                cut_holders.push((holder_id, room_txs));
+                                cut_holders.push((talker_id, room_txs));
                             }
 
                             // Collect ALL clients' event senders INCLUDING the

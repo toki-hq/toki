@@ -251,4 +251,56 @@ mod tests {
         s.channel_priority = false;
         assert!(s.locally_silenced());
     }
+
+    /// A global broadcast on a full-duplex channel must set `broadcast_active`
+    /// and `broadcast_talker` independently of `duplex_full` / `talkers`.
+    ///
+    /// The runtime's PttEvent handler now routes broadcast events (p.broadcast
+    /// == true) through the half-duplex arm regardless of channel mode, so the
+    /// broadcaster is never inserted into `talkers`. This test verifies the
+    /// state fields accept that combination without contradiction.
+    #[test]
+    fn broadcast_active_coexists_with_duplex_full_and_empty_talkers() {
+        let mut s = ClientState {
+            duplex_full: true,
+            ..Default::default()
+        };
+        // Simulate what the half-duplex (broadcast) arm writes on a
+        // broadcast-press event on a full-duplex channel: holder is set,
+        // broadcast_active is true, broadcast_talker carries the callsign,
+        // and talkers remains empty (the broadcaster is NOT a normal talker).
+        s.holder = Some("bc-client-id".into());
+        s.broadcast_active = true;
+        s.broadcast_talker = Some("DISPATCH".into());
+        assert!(s.duplex_full, "channel is still full-duplex");
+        assert!(s.broadcast_active, "broadcast indicator is set");
+        assert_eq!(
+            s.broadcast_talker.as_deref(),
+            Some("DISPATCH"),
+            "broadcaster callsign is stored"
+        );
+        assert!(
+            s.talkers.is_empty(),
+            "broadcaster must NOT appear in the talker set"
+        );
+
+        // Simulate broadcast release (pressed:false, broadcast:true):
+        // holder cleared, broadcast_active cleared, broadcast_talker cleared.
+        s.holder = None;
+        s.broadcast_active = false;
+        s.broadcast_talker = None;
+        assert!(s.duplex_full, "channel remains full-duplex after broadcast");
+        assert!(
+            !s.broadcast_active,
+            "broadcast indicator cleared on release"
+        );
+        assert!(
+            s.broadcast_talker.is_none(),
+            "broadcaster callsign cleared on release"
+        );
+        assert!(
+            s.talkers.is_empty(),
+            "talkers still empty after broadcast release"
+        );
+    }
 }

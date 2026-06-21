@@ -1,5 +1,5 @@
 services:
-  toki-server:
+  server:
     build:
       context: .
       dockerfile: scripts/server.dockerfile
@@ -25,13 +25,13 @@ services:
   # TOKI_SERVER_GRPC_ENDPOINT, so the browser stays same-origin and the
   # admin session cookie round-trips. Browse https://localhost:5173.
   # (For production, build scripts/admin-ui.dockerfile → nginx instead.)
-  toki-admin-ui:
+  admin-ui:
     image: node:24-slim
     restart: unless-stopped
     working_dir: /app/admin-ui
     command: sh -c "npm install && npm run gen && npm run dev -- --host 0.0.0.0"
     environment:
-      - TOKI_SERVER_GRPC_ENDPOINT=https://toki-server:8000
+      - TOKI_SERVER_GRPC_ENDPOINT=https://server:8000
     ports:
       - "5173:5173"
     volumes:
@@ -40,7 +40,7 @@ services:
       # node_modules shadow it.
       - toki-ui-node-modules:/app/admin-ui/node_modules
     depends_on:
-      - toki-server
+      - server
 
   postgres:
     image: postgres:15

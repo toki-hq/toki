@@ -95,7 +95,11 @@ function RuntimeConfig() {
   const [idleKick, setIdleKick] = useState("");
   const [namedChannels, setNamedChannels] = useState(false);
   const [fullDuplex, setFullDuplex] = useState(false);
+  const [requireIdentity, setRequireIdentity] = useState(false);
+  const [uniqueCallsigns, setUniqueCallsigns] = useState(true);
   const [audioQuality, setAudioQuality] = useState(2);
+  const [opusFrameMs, setOpusFrameMs] = useState(10);
+  const [opusDtx, setOpusDtx] = useState(true);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -108,7 +112,11 @@ function RuntimeConfig() {
         setIdleKick(String(c.idleKickSecs));
         setNamedChannels(c.namedChannelsEnabled);
         setFullDuplex(c.fullDuplexEnabled);
+        setRequireIdentity(c.requireIdentity);
+        setUniqueCallsigns(c.uniqueCallsigns);
         setAudioQuality(c.audioQuality);
+        setOpusFrameMs(c.opusFrameMs);
+        setOpusDtx(c.opusDtx);
       })
       .catch((e) => toast.error(`Load config failed: ${err(e)}`));
   }, []);
@@ -120,7 +128,11 @@ function RuntimeConfig() {
       idleKick !== String(cfg.idleKickSecs) ||
       namedChannels !== cfg.namedChannelsEnabled ||
       fullDuplex !== cfg.fullDuplexEnabled ||
-      audioQuality !== cfg.audioQuality);
+      requireIdentity !== cfg.requireIdentity ||
+      uniqueCallsigns !== cfg.uniqueCallsigns ||
+      audioQuality !== cfg.audioQuality ||
+      opusFrameMs !== cfg.opusFrameMs ||
+      opusDtx !== cfg.opusDtx);
 
   async function save() {
     setBusy(true);
@@ -131,7 +143,11 @@ function RuntimeConfig() {
         idleKickSecs: Number(idleKick),
         namedChannelsEnabled: namedChannels,
         fullDuplexEnabled: fullDuplex,
+        requireIdentity,
+        uniqueCallsigns,
         audioQuality,
+        opusFrameMs,
+        opusDtx,
       });
       setCfg(updated);
       toast.success("Server config saved");
@@ -199,6 +215,32 @@ function RuntimeConfig() {
             aria-label="Toggle full duplex"
           />
         </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Require identity</span>
+            <span className="text-xs text-muted-foreground">
+              Reject clients without a verified keypair identity. Makes bans airtight.
+            </span>
+          </div>
+          <Switch
+            checked={requireIdentity}
+            onCheckedChange={setRequireIdentity}
+            aria-label="Toggle require identity"
+          />
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Unique callsigns</span>
+            <span className="text-xs text-muted-foreground">
+              Refuse a register or rename onto a callsign already in use (case-insensitive).
+            </span>
+          </div>
+          <Switch
+            checked={uniqueCallsigns}
+            onCheckedChange={setUniqueCallsigns}
+            aria-label="Toggle unique callsigns"
+          />
+        </div>
         <div className="flex flex-col gap-1.5 border-t border-border pt-3">
           <Label>Voice quality</Label>
           <div className="flex gap-1 rounded-md border border-border p-0.5">
@@ -226,6 +268,51 @@ function RuntimeConfig() {
               ? "Raw PCM — no compression (~768 kbps/stream)."
               : `Opus ~${audioQuality === 1 ? 16 : audioQuality === 3 ? 32 : 24} kbps — applied to clients on their next connect.`}
           </span>
+        </div>
+        <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+          <Label>Opus frame size</Label>
+          <div className="flex gap-1 rounded-md border border-border p-0.5">
+            {[
+              { v: 10, label: "10 ms" },
+              { v: 20, label: "20 ms" },
+              { v: 40, label: "40 ms" },
+            ].map((q) => (
+              <button
+                key={q.v}
+                onClick={() => setOpusFrameMs(q.v)}
+                disabled={audioQuality === 0}
+                className={`flex-1 rounded px-2 py-1 font-mono text-[11px] tracking-wider transition-colors ${
+                  audioQuality === 0
+                    ? "cursor-not-allowed text-muted-foreground/40"
+                    : opusFrameMs === q.v
+                      ? "bg-primary/15 text-primary"
+                      : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+          <span className="text-xs text-muted-foreground">
+            Opus frame size — larger frames cut relay egress during speech, at +10/+30 ms latency.
+            Clients older than this release can't decode 20/40 ms frames correctly — update all
+            clients first.
+          </span>
+        </div>
+        <div className="flex items-center justify-between border-t border-border pt-3">
+          <div className="flex flex-col gap-0.5">
+            <span className="text-sm">Opus DTX (silence suppression)</span>
+            <span className="text-xs text-muted-foreground">
+              Stop sending during silence — cuts relay egress, which scales with listeners per
+              frequency. No effect on Raw PCM. Leave on unless debugging.
+            </span>
+          </div>
+          <Switch
+            checked={opusDtx}
+            onCheckedChange={setOpusDtx}
+            disabled={audioQuality === 0}
+            aria-label="Toggle Opus DTX"
+          />
         </div>
         <Button className="mt-1 self-start" disabled={!dirty || busy} onClick={() => void save()}>
           {busy ? "Saving…" : "Save"}

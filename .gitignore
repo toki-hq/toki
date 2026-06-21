@@ -18,6 +18,11 @@
 # Local design / scratch assets — not part of the shipped codebase
 design/
 
+# Cross-compile build tree for the Windows mingw libopus, produced by
+# scripts/build-opus-mingw.sh. Large, generated, host-specific — never
+# version-controlled. Regenerate with the script when needed.
+/vendor/
+
 # Server-side runtime config (may contain the shared-secret password).
 # Each operator drops their own `config.toml` next to the binary or
 # points TOKI_CONFIG at one — it must not land in version control.
@@ -64,3 +69,6 @@ design/
 # Local Claude Code settings (per-operator permissions, not shared).
 # The shareable bits — the skills under .claude/skills/ — are tracked.
 .claude/settings.local.json
+
+# Graphify local knowledge-graph cache (generated; never commit)
+graphify-out/

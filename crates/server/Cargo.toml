@@ -34,6 +34,13 @@ toml = "0.8"
 # measurable cost on the audio hot path.
 blake3 = "1"
 chacha20poly1305 = { workspace = true }
+# Verifies the client-identity register signatures (the client signs a
+# challenge nonce with its self-generated keypair — same crate on both
+# ends, see `toki_proto::identity`). Pure Rust.
+ed25519-dalek = "2"
+# Per-boot key for the stateless register-challenge HMAC. Already in
+# the tree transitively (rustls/ring); a direct dep just for 32 bytes.
+getrandom = "0.2"
 # Self-signed cert + key generator. Used to keep gRPC TLS always-on
 # without forcing operators to provision a real cert for LAN
 # deployments — the server writes an rcgen-generated cert pair to

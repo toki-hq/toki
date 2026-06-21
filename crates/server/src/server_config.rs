@@ -94,6 +94,44 @@ pub struct ServerConfig {
     /// whatever a client sends and receivers decode per-packet.
     pub audio_quality: u32,
 
+    /// When `true`, identity-less registers are rejected — every member
+    /// must present a verified keypair identity, which makes identity
+    /// bans airtight (an evader can no longer connect anonymously).
+    /// `false` (the default) keeps the open/legacy behaviour: clients
+    /// without identity support, or whose identity handshake failed
+    /// transiently, still connect.
+    pub require_identity: bool,
+
+    /// When `true` (the default), callsigns (display names) must be
+    /// unique across connected members: a register with a name already
+    /// in use is rejected (`ALREADY_EXISTS`), and an admin can't rename
+    /// a member onto a name another live session holds. Comparison is
+    /// case-insensitive (`ECHO-1` ≈ `echo-1`) since callsigns are
+    /// uppercased client-side anyway. `false` restores the legacy
+    /// behaviour where duplicates are allowed. Scoped to *currently
+    /// connected* sessions — a name frees up the moment its holder
+    /// disconnects.
+    pub unique_callsigns: bool,
+
+    /// When `true` (the default), clients that use Opus enable **DTX**
+    /// (discontinuous transmission): during silence the encoder sends
+    /// tiny comfort-noise frames instead of full ~30-byte frames, which
+    /// cuts the talker's outbound — and therefore the entire per-listener
+    /// fan-out (egress scales with room size) — for the silent fraction
+    /// of a transmission. Advertised to the client in `RegisterResponse`;
+    /// no effect on the raw-PCM path. `false` only for debugging — DTX
+    /// has no audible cost on a half-duplex PTT channel.
+    pub opus_dtx: bool,
+
+    /// Opus frame duration advertised to clients: 10, 20, or 40 ms.
+    /// Maps to 480 / 960 / 1920 samples passed to the encoder. Default
+    /// 10 ms preserves the existing low-latency posture. 20 ms saves
+    /// roughly half the per-packet UDP overhead on the relay fan-out;
+    /// 40 ms saves ~3/4 of it at the cost of +30 ms mouth-to-ear latency.
+    /// Advisory — the relay forwards opaque encrypted payloads; only the
+    /// client encoder and decoder are affected.
+    pub opus_frame_ms: u32,
+
     /// Gate the per-channel **full-duplex** feature. When `false` (the
     /// default), every channel is half-duplex regardless of any stored
     /// `channel_modes`: the signaling service reports half + suppresses
@@ -130,6 +168,21 @@ impl Default for ServerConfig {
             // Standard Opus by default — a fresh deployment compresses
             // voice out of the box (the headline win of this feature).
             audio_quality: 2,
+            // Off by default: identity stays optional until the operator
+            // opts in (gated-feature posture, like named channels).
+            require_identity: false,
+            // On by default: unique callsigns are the expected radio
+            // behaviour ("there's only one ECHO-1"). Operators who want
+            // duplicates can turn it off.
+            unique_callsigns: true,
+            // On by default: DTX is a pure bandwidth win on a PTT channel
+            // (only affects silence, decodes transparently), so a fresh
+            // deployment gets the reduced fan-out for free.
+            opus_dtx: true,
+            // 10 ms: preserves the existing low-latency posture on a
+            // fresh deployment; operators can bump to 20 or 40 ms to
+            // trade latency for reduced relay fan-out overhead.
+            opus_frame_ms: 10,
             // Off by default: a fresh deployment is pure half-duplex
             // walkie-talkie until an operator opts in.
             full_duplex_enabled: false,
@@ -168,6 +221,15 @@ mod tests {
             "named channels off by default (gated feature)"
         );
         assert_eq!(d.audio_quality, 2, "Standard Opus by default");
+        assert!(
+            !d.require_identity,
+            "identity optional by default (gated feature)"
+        );
+        assert!(
+            d.unique_callsigns,
+            "unique callsigns on by default (radio behaviour)"
+        );
+        assert_eq!(d.opus_frame_ms, 10, "10 ms low-latency default");
     }
 
     #[test]
@@ -190,6 +252,10 @@ mod tests {
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
             audio_quality: 3,
+            require_identity: true,
+            unique_callsigns: false,
+            opus_dtx: false,
+            opus_frame_ms: 20,
             full_duplex_enabled: true,
         };
         let json = serde_json::to_string(&original).unwrap();
@@ -199,6 +265,9 @@ mod tests {
         assert!(json.contains("\"grpcPassword\":\"hunter2\""));
         assert!(json.contains("\"namedChannelsEnabled\":true"));
         assert!(json.contains("\"audioQuality\":3"));
+        assert!(json.contains("\"requireIdentity\":true"));
+        assert!(json.contains("\"uniqueCallsigns\":false"));
+        assert!(json.contains("\"opusFrameMs\":20"));
         assert!(json.contains("\"fullDuplexEnabled\":true"));
         let parsed: ServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.server_name, original.server_name);
@@ -210,5 +279,8 @@ mod tests {
             original.named_channels_enabled
         );
         assert_eq!(parsed.audio_quality, original.audio_quality);
+        assert_eq!(parsed.require_identity, original.require_identity);
+        assert_eq!(parsed.unique_callsigns, original.unique_callsigns);
+        assert_eq!(parsed.opus_frame_ms, 20, "opus_frame_ms round-trips");
     }
 }

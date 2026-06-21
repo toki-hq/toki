@@ -10,7 +10,101 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file toki.proto.
  */
 export const file_toki: GenFile = /*@__PURE__*/
-  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxIlEKD1JlZ2lzdGVyUmVxdWVzdBIUCgxkaXNwbGF5X25hbWUYASABKAkSEAoIcGFzc3dvcmQYAiABKAkSFgoOY2xpZW50X3ZlcnNpb24YAyABKAkilQEKEFJlZ2lzdGVyUmVzcG9uc2USEQoJY2xpZW50X2lkGAEgASgJEhMKC2F1ZGlvX3Rva2VuGAIgASgMEhYKDmF1ZGlvX2VuZHBvaW50GAMgASgJEhUKDWF1ZGlvX21hY19rZXkYBCABKAwSFAoMb3B1c19lbmFibGVkGAUgASgIEhQKDG9wdXNfYml0cmF0ZRgGIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2Ui7wIKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSAASOwoUY2hhbm5lbF9tb2RlX2NoYW5nZWQYByABKAsyGy50b2tpLnYxLkNoYW5uZWxNb2RlQ2hhbmdlZEgAQgcKBWV2ZW50IjcKDE1lbWJlckpvaW5lZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIh8KCk1lbWJlckxlZnQSEQoJY2xpZW50X2lkGAEgASgJIiUKEEZyZXF1ZW5jeUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJIj0KEkRpc3BsYXlOYW1lQ2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJIjUKEkNoYW5uZWxOYW1lQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSJKChJDaGFubmVsTW9kZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEiEKBG1vZGUYAiABKA4yEy50b2tpLnYxLkR1cGxleE1vZGUiUgoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiCAoGUHR0QWNrKjgKCkR1cGxleE1vZGUSFAoQRFVQTEVYX01PREVfSEFMRhAAEhQKEERVUExFWF9NT0RFX0ZVTEwQATK+AgoJU2lnbmFsaW5nEj8KCFJlZ2lzdGVyEhgudG9raS52MS5SZWdpc3RlclJlcXVlc3QaGS50b2tpLnYxLlJlZ2lzdGVyUmVzcG9uc2USLgoESm9pbhIULnRva2kudjEuSm9pblJlcXVlc3QaDi50b2tpLnYxLkV2ZW50MAESNgoFTGVhdmUSFS50b2tpLnYxLkxlYXZlUmVxdWVzdBoWLnRva2kudjEuTGVhdmVSZXNwb25zZRJUCg9DaGFuZ2VGcmVxdWVuY3kSHy50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlcXVlc3QaIC50b2tpLnYxLkNoYW5nZUZyZXF1ZW5jeVJlc3BvbnNlEjIKClB1c2hUb1RhbGsSES50b2tpLnYxLlB0dEV2ZW50Gg8udG9raS52MS5QdHRBY2soAWIGcHJvdG8z");
+  fileDesc("Cgp0b2tpLnByb3RvEgd0b2tpLnYxImcKF0Nvbm5lY3Rpb25RdWFsaXR5UmVwb3J0EhEKCWNsaWVudF9pZBgBIAEoCRIOCgZydHRfbXMYAiABKA0SEQoJaml0dGVyX21zGAMgASgNEhYKDmxvc3NfcGN0X2NlbnRpGAQgASgNIhYKFENvbm5lY3Rpb25RdWFsaXR5QWNrIhoKGElkZW50aXR5Q2hhbGxlbmdlUmVxdWVzdCIqChlJZGVudGl0eUNoYWxsZW5nZVJlc3BvbnNlEg0KBW5vbmNlGAEgASgMIs8BCg9SZWdpc3RlclJlcXVlc3QSFAoMZGlzcGxheV9uYW1lGAEgASgJEhAKCHBhc3N3b3JkGAIgASgJEhYKDmNsaWVudF92ZXJzaW9uGAMgASgJEhcKD2lkZW50aXR5X3B1YmtleRgEIAEoDBIXCg9jaGFsbGVuZ2Vfbm9uY2UYBSABKAwSGgoSaWRlbnRpdHlfc2lnbmF0dXJlGAYgASgMEhQKDG1hY2hpbmVfaGFzaBgHIAEoCRIYChBvcmlnaW5fY2xpZW50X2lkGAggASgJIr4BChBSZWdpc3RlclJlc3BvbnNlEhEKCWNsaWVudF9pZBgBIAEoCRITCgthdWRpb190b2tlbhgCIAEoDBIWCg5hdWRpb19lbmRwb2ludBgDIAEoCRIVCg1hdWRpb19tYWNfa2V5GAQgASgMEhQKDG9wdXNfZW5hYmxlZBgFIAEoCBIUCgxvcHVzX2JpdHJhdGUYBiABKA0SEAoIb3B1c19kdHgYByABKAgSFQoNb3B1c19mcmFtZV9tcxgIIAEoDSIzCgtKb2luUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIiEKDExlYXZlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkiDwoNTGVhdmVSZXNwb25zZSI+ChZDaGFuZ2VGcmVxdWVuY3lSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkiGQoXQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2Ui3QQKBUV2ZW50EicKBmpvaW5lZBgBIAEoCzIVLnRva2kudjEuTWVtYmVySm9pbmVkSAASIwoEbGVmdBgCIAEoCzITLnRva2kudjEuTWVtYmVyTGVmdEgAEiAKA3B0dBgDIAEoCzIRLnRva2kudjEuUHR0RXZlbnRIABI2ChFmcmVxdWVuY3lfY2hhbmdlZBgEIAEoCzIZLnRva2kudjEuRnJlcXVlbmN5Q2hhbmdlZEgAEjsKFGRpc3BsYXlfbmFtZV9jaGFuZ2VkGAUgASgLMhsudG9raS52MS5EaXNwbGF5TmFtZUNoYW5nZWRIABI7ChRjaGFubmVsX25hbWVfY2hhbmdlZBgGIAEoCzIbLnRva2kudjEuQ2hhbm5lbE5hbWVDaGFuZ2VkSAASLAoMbXV0ZV9jaGFuZ2VkGAcgASgLMhQudG9raS52MS5NdXRlQ2hhbmdlZEgAEjsKFGNoYW5uZWxfbXV0ZV9jaGFuZ2VkGAggASgLMhsudG9raS52MS5DaGFubmVsTXV0ZUNoYW5nZWRIABI0ChBwcmlvcml0eV9jaGFuZ2VkGAkgASgLMhgudG9raS52MS5Qcmlvcml0eUNoYW5nZWRIABJLChxicm9hZGNhc3RfY2FwYWJpbGl0eV9jaGFuZ2VkGAogASgLMiMudG9raS52MS5Ccm9hZGNhc3RDYXBhYmlsaXR5Q2hhbmdlZEgAEjsKFGNoYW5uZWxfbW9kZV9jaGFuZ2VkGAsgASgLMhsudG9raS52MS5DaGFubmVsTW9kZUNoYW5nZWRIAEIHCgVldmVudCI3CgxNZW1iZXJKb2luZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIfCgpNZW1iZXJMZWZ0EhEKCWNsaWVudF9pZBgBIAEoCSIlChBGcmVxdWVuY3lDaGFuZ2VkEhEKCWZyZXF1ZW5jeRgBIAEoCSI9ChJEaXNwbGF5TmFtZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSI1ChJDaGFubmVsTmFtZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEgwKBG5hbWUYAiABKAkiLwoLTXV0ZUNoYW5nZWQSEQoJY2xpZW50X2lkGAEgASgJEg0KBW11dGVkGAIgASgIIjYKEkNoYW5uZWxNdXRlQ2hhbmdlZBIRCglmcmVxdWVuY3kYASABKAkSDQoFbXV0ZWQYAiABKAgiSAoPUHJpb3JpdHlDaGFuZ2VkEhEKCWNsaWVudF9pZBgBIAEoCRIRCglmcmVxdWVuY3kYAiABKAkSDwoHZ3JhbnRlZBgDIAEoCCJAChpCcm9hZGNhc3RDYXBhYmlsaXR5Q2hhbmdlZBIRCgljbGllbnRfaWQYASABKAkSDwoHZ3JhbnRlZBgCIAEoCCJKChJDaGFubmVsTW9kZUNoYW5nZWQSEQoJZnJlcXVlbmN5GAEgASgJEiEKBG1vZGUYAiABKA4yEy50b2tpLnYxLkR1cGxleE1vZGUiewoIUHR0RXZlbnQSEQoJY2xpZW50X2lkGAEgASgJEg8KB3ByZXNzZWQYAiABKAgSEAoIc2VxdWVuY2UYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgSEQoJYnJvYWRjYXN0GAUgASgIEhQKDGRpc3BsYXlfbmFtZRgGIAEoCSIICgZQdHRBY2sqOAoKRHVwbGV4TW9kZRIUChBEVVBMRVhfTU9ERV9IQUxGEAASFAoQRFVQTEVYX01PREVfRlVMTBABMvYDCglTaWduYWxpbmcSPwoIUmVnaXN0ZXISGC50b2tpLnYxLlJlZ2lzdGVyUmVxdWVzdBoZLnRva2kudjEuUmVnaXN0ZXJSZXNwb25zZRIuCgRKb2luEhQudG9raS52MS5Kb2luUmVxdWVzdBoOLnRva2kudjEuRXZlbnQwARI2CgVMZWF2ZRIVLnRva2kudjEuTGVhdmVSZXF1ZXN0GhYudG9raS52MS5MZWF2ZVJlc3BvbnNlElQKD0NoYW5nZUZyZXF1ZW5jeRIfLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVxdWVzdBogLnRva2kudjEuQ2hhbmdlRnJlcXVlbmN5UmVzcG9uc2USMgoKUHVzaFRvVGFsaxIRLnRva2kudjEuUHR0RXZlbnQaDy50b2tpLnYxLlB0dEFjaygBEloKEUlkZW50aXR5Q2hhbGxlbmdlEiEudG9raS52MS5JZGVudGl0eUNoYWxsZW5nZVJlcXVlc3QaIi50b2tpLnYxLklkZW50aXR5Q2hhbGxlbmdlUmVzcG9uc2USWgoXUmVwb3J0Q29ubmVjdGlvblF1YWxpdHkSIC50b2tpLnYxLkNvbm5lY3Rpb25RdWFsaXR5UmVwb3J0Gh0udG9raS52MS5Db25uZWN0aW9uUXVhbGl0eUFja2IGcHJvdG8z");
+
+/**
+ * One client-measured connection-quality sample. All three metrics are
+ * computed on the client over a short sliding window and reported as of
+ * "now"; absent/zero means "not yet measured" (e.g. RTT before the
+ * first pong, loss before enough packets have arrived to estimate it).
+ *
+ * @generated from message toki.v1.ConnectionQualityReport
+ */
+export type ConnectionQualityReport = Message<"toki.v1.ConnectionQualityReport"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * Smoothed round-trip time in milliseconds, from the keepalive/pong
+   * probe. 0 until the first pong lands.
+   *
+   * @generated from field: uint32 rtt_ms = 2;
+   */
+  rttMs: number;
+
+  /**
+   * Inter-arrival jitter in milliseconds (mean deviation of S2C packet
+   * spacing from the nominal 10 ms cadence).
+   *
+   * @generated from field: uint32 jitter_ms = 3;
+   */
+  jitterMs: number;
+
+  /**
+   * Inbound packet-loss percentage over the window, 0–100, ×100 for two
+   * decimals of resolution (e.g. 250 = 2.50%). Derived from S2C seq gaps.
+   *
+   * @generated from field: uint32 loss_pct_centi = 4;
+   */
+  lossPctCenti: number;
+};
+
+/**
+ * Describes the message toki.v1.ConnectionQualityReport.
+ * Use `create(ConnectionQualityReportSchema)` to create a new message.
+ */
+export const ConnectionQualityReportSchema: GenMessage<ConnectionQualityReport> = /*@__PURE__*/
+  messageDesc(file_toki, 0);
+
+/**
+ * @generated from message toki.v1.ConnectionQualityAck
+ */
+export type ConnectionQualityAck = Message<"toki.v1.ConnectionQualityAck"> & {
+};
+
+/**
+ * Describes the message toki.v1.ConnectionQualityAck.
+ * Use `create(ConnectionQualityAckSchema)` to create a new message.
+ */
+export const ConnectionQualityAckSchema: GenMessage<ConnectionQualityAck> = /*@__PURE__*/
+  messageDesc(file_toki, 1);
+
+/**
+ * @generated from message toki.v1.IdentityChallengeRequest
+ */
+export type IdentityChallengeRequest = Message<"toki.v1.IdentityChallengeRequest"> & {
+};
+
+/**
+ * Describes the message toki.v1.IdentityChallengeRequest.
+ * Use `create(IdentityChallengeRequestSchema)` to create a new message.
+ */
+export const IdentityChallengeRequestSchema: GenMessage<IdentityChallengeRequest> = /*@__PURE__*/
+  messageDesc(file_toki, 2);
+
+/**
+ * @generated from message toki.v1.IdentityChallengeResponse
+ */
+export type IdentityChallengeResponse = Message<"toki.v1.IdentityChallengeResponse"> & {
+  /**
+   * Opaque challenge blob. Stateless on the server side (it embeds a
+   * timestamp + HMAC, so no per-nonce table is kept); the client signs
+   * the domain-separated payload `"toki-register-v1" || nonce` and
+   * sends both the nonce and the signature in `Register`.
+   *
+   * @generated from field: bytes nonce = 1;
+   */
+  nonce: Uint8Array;
+};
+
+/**
+ * Describes the message toki.v1.IdentityChallengeResponse.
+ * Use `create(IdentityChallengeResponseSchema)` to create a new message.
+ */
+export const IdentityChallengeResponseSchema: GenMessage<IdentityChallengeResponse> = /*@__PURE__*/
+  messageDesc(file_toki, 3);
 
 /**
  * @generated from message toki.v1.RegisterRequest
@@ -44,6 +138,52 @@ export type RegisterRequest = Message<"toki.v1.RegisterRequest"> & {
    * @generated from field: string client_version = 3;
    */
   clientVersion: string;
+
+  /**
+   * 32-byte ed25519 public key. This *is* the identity — everything
+   * else (display string, attributes) derives from or attaches to it.
+   *
+   * @generated from field: bytes identity_pubkey = 4;
+   */
+  identityPubkey: Uint8Array;
+
+  /**
+   * The nonce obtained from `IdentityChallenge`, echoed verbatim.
+   *
+   * @generated from field: bytes challenge_nonce = 5;
+   */
+  challengeNonce: Uint8Array;
+
+  /**
+   * 64-byte ed25519 signature over `"toki-register-v1" || nonce`
+   * (domain-separated so a register signature can't be replayed in
+   * any other future signing context).
+   *
+   * @generated from field: bytes identity_signature = 6;
+   */
+  identitySignature: Uint8Array;
+
+  /**
+   * Salted hash of the machine identifier, as lowercase hex:
+   * BLAKE3("toki-machine-fp-v1" || machine_id) where machine_id is the
+   * OS machine id (falling back to a primary MAC). Never the raw
+   * value. Travels alongside the key — NOT inside its derivation — so
+   * the identity survives moving the key file to a new machine, while
+   * a config wipe yields a fresh identity but the *same* machine hash
+   * (ban-evasion correlation). Claimed, not provable.
+   *
+   * @generated from field: string machine_hash = 7;
+   */
+  machineHash: string;
+
+  /**
+   * The first session client_id this identity was ever assigned by any
+   * server, recorded at identity generation. Informational/claimed —
+   * a provenance breadcrumb, not an authenticated fact.
+   *
+   * @generated from field: string origin_client_id = 8;
+   */
+  originClientId: string;
 };
 
 /**
@@ -51,7 +191,7 @@ export type RegisterRequest = Message<"toki.v1.RegisterRequest"> & {
  * Use `create(RegisterRequestSchema)` to create a new message.
  */
 export const RegisterRequestSchema: GenMessage<RegisterRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 0);
+  messageDesc(file_toki, 4);
 
 /**
  * @generated from message toki.v1.RegisterResponse
@@ -106,6 +246,29 @@ export type RegisterResponse = Message<"toki.v1.RegisterResponse"> & {
    * @generated from field: uint32 opus_bitrate = 6;
    */
   opusBitrate: number;
+
+  /**
+   * When true (and opus_enabled), the client turns on Opus DTX
+   * (discontinuous transmission): during silence the encoder emits tiny
+   * comfort-noise frames instead of full ~30-byte frames, which cuts the
+   * talker's outbound — and therefore the whole per-listener fan-out —
+   * for the silent fraction of a transmission. Decodes transparently on
+   * the existing path; no effect on the raw-PCM path. Advisory like the
+   * other codec fields.
+   *
+   * @generated from field: bool opus_dtx = 7;
+   */
+  opusDtx: boolean;
+
+  /**
+   * Opus frame size the server wants clients to use: 10, 20, or 40 ms.
+   * Maps directly to the number of 48 kHz samples passed to the encoder
+   * (480 / 960 / 1920). Absent (0) means 10 ms — legacy behaviour.
+   * Larger frames reduce relay egress but add mouth-to-ear latency.
+   *
+   * @generated from field: uint32 opus_frame_ms = 8;
+   */
+  opusFrameMs: number;
 };
 
 /**
@@ -113,7 +276,7 @@ export type RegisterResponse = Message<"toki.v1.RegisterResponse"> & {
  * Use `create(RegisterResponseSchema)` to create a new message.
  */
 export const RegisterResponseSchema: GenMessage<RegisterResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 1);
+  messageDesc(file_toki, 5);
 
 /**
  * @generated from message toki.v1.JoinRequest
@@ -137,7 +300,7 @@ export type JoinRequest = Message<"toki.v1.JoinRequest"> & {
  * Use `create(JoinRequestSchema)` to create a new message.
  */
 export const JoinRequestSchema: GenMessage<JoinRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 2);
+  messageDesc(file_toki, 6);
 
 /**
  * @generated from message toki.v1.LeaveRequest
@@ -154,7 +317,7 @@ export type LeaveRequest = Message<"toki.v1.LeaveRequest"> & {
  * Use `create(LeaveRequestSchema)` to create a new message.
  */
 export const LeaveRequestSchema: GenMessage<LeaveRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 3);
+  messageDesc(file_toki, 7);
 
 /**
  * @generated from message toki.v1.LeaveResponse
@@ -167,7 +330,7 @@ export type LeaveResponse = Message<"toki.v1.LeaveResponse"> & {
  * Use `create(LeaveResponseSchema)` to create a new message.
  */
 export const LeaveResponseSchema: GenMessage<LeaveResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 4);
+  messageDesc(file_toki, 8);
 
 /**
  * Move the client from their current frequency room to a new one. The
@@ -194,7 +357,7 @@ export type ChangeFrequencyRequest = Message<"toki.v1.ChangeFrequencyRequest"> &
  * Use `create(ChangeFrequencyRequestSchema)` to create a new message.
  */
 export const ChangeFrequencyRequestSchema: GenMessage<ChangeFrequencyRequest> = /*@__PURE__*/
-  messageDesc(file_toki, 5);
+  messageDesc(file_toki, 9);
 
 /**
  * @generated from message toki.v1.ChangeFrequencyResponse
@@ -207,7 +370,7 @@ export type ChangeFrequencyResponse = Message<"toki.v1.ChangeFrequencyResponse">
  * Use `create(ChangeFrequencyResponseSchema)` to create a new message.
  */
 export const ChangeFrequencyResponseSchema: GenMessage<ChangeFrequencyResponse> = /*@__PURE__*/
-  messageDesc(file_toki, 6);
+  messageDesc(file_toki, 10);
 
 /**
  * @generated from message toki.v1.Event
@@ -272,13 +435,71 @@ export type Event = Message<"toki.v1.Event"> & {
     case: "channelNameChanged";
   } | {
     /**
+     * Sent when an admin mutes or unmutes a member (see Admin.SetMute).
+     * Broadcast to every member of the subject's current room *and* to
+     * the subject's own stream. The subject compares `client_id` against
+     * its own id: when it's the subject and `muted` is true, the client
+     * suppresses its own PTT/mic locally (so it doesn't keep firing
+     * futile presses the server will drop) and shows a "muted by
+     * operator" cue; other members light a muted badge on that member.
+     *
+     * @generated from field: toki.v1.MuteChanged mute_changed = 7;
+     */
+    value: MuteChanged;
+    case: "muteChanged";
+  } | {
+    /**
+     * Sent when an admin mutes/unmutes a whole channel (see
+     * Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+     * the current channel's mute state. Broadcast to every member of the
+     * affected frequency. The client compares `frequency` against its
+     * current tuning: while its channel is muted it can't transmit and
+     * the PTT button shows the disabled "unable to talk" cue.
+     *
+     * @generated from field: toki.v1.ChannelMuteChanged channel_mute_changed = 8;
+     */
+    value: ChannelMuteChanged;
+    case: "channelMuteChanged";
+  } | {
+    /**
+     * Sent to a member when an admin grants or revokes their *priority
+     * speaker* standing (see Admin.SetPriority), and on Join /
+     * ChangeFrequency to deliver current standing. Addressed only to the
+     * subject (priority is a per-session, per-channel grant). The client
+     * tracks it so a priority speaker on a muted (No-Talk) channel keeps
+     * a live PTT button instead of the "unable to talk" cue — they are
+     * the granted-voice exception. `frequency` is the channel the grant
+     * is bound to; `granted = false` clears it.
+     *
+     * @generated from field: toki.v1.PriorityChanged priority_changed = 9;
+     */
+    value: PriorityChanged;
+    case: "priorityChanged";
+  } | {
+    /**
+     * Sent to a client when an admin grants or revokes their *global
+     * broadcast* capability (Admin.SetGlobalBroadcast), and on Join /
+     * ChangeFrequency to deliver current standing. Addressed only to the
+     * subject. When granted, the client's dedicated broadcast PTT binding
+     * becomes active; when revoked it is silently disabled. If the client
+     * is mid-broadcast when revoked, the broadcast is torn down
+     * server-side before this event is delivered.
+     *
+     * @generated from field: toki.v1.BroadcastCapabilityChanged broadcast_capability_changed = 10;
+     */
+    value: BroadcastCapabilityChanged;
+    case: "broadcastCapabilityChanged";
+  } | {
+    /**
      * Sent when a frequency's duplex mode changes, or to deliver the
      * current mode on Join / ChangeFrequency. HALF (the default) is the
      * classic single-floor walkie-talkie; FULL lets several members
      * transmit at once and clients mix the streams. The client compares
-     * `frequency` against its current tuning before applying.
+     * `frequency` against its current tuning before applying. (Field 11:
+     * appended after the mute/priority/broadcast events that landed on
+     * main while this branch was in flight.)
      *
-     * @generated from field: toki.v1.ChannelModeChanged channel_mode_changed = 7;
+     * @generated from field: toki.v1.ChannelModeChanged channel_mode_changed = 11;
      */
     value: ChannelModeChanged;
     case: "channelModeChanged";
@@ -290,7 +511,7 @@ export type Event = Message<"toki.v1.Event"> & {
  * Use `create(EventSchema)` to create a new message.
  */
 export const EventSchema: GenMessage<Event> = /*@__PURE__*/
-  messageDesc(file_toki, 7);
+  messageDesc(file_toki, 11);
 
 /**
  * @generated from message toki.v1.MemberJoined
@@ -312,7 +533,7 @@ export type MemberJoined = Message<"toki.v1.MemberJoined"> & {
  * Use `create(MemberJoinedSchema)` to create a new message.
  */
 export const MemberJoinedSchema: GenMessage<MemberJoined> = /*@__PURE__*/
-  messageDesc(file_toki, 8);
+  messageDesc(file_toki, 12);
 
 /**
  * @generated from message toki.v1.MemberLeft
@@ -329,7 +550,7 @@ export type MemberLeft = Message<"toki.v1.MemberLeft"> & {
  * Use `create(MemberLeftSchema)` to create a new message.
  */
 export const MemberLeftSchema: GenMessage<MemberLeft> = /*@__PURE__*/
-  messageDesc(file_toki, 9);
+  messageDesc(file_toki, 13);
 
 /**
  * @generated from message toki.v1.FrequencyChanged
@@ -346,7 +567,7 @@ export type FrequencyChanged = Message<"toki.v1.FrequencyChanged"> & {
  * Use `create(FrequencyChangedSchema)` to create a new message.
  */
 export const FrequencyChangedSchema: GenMessage<FrequencyChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 10);
+  messageDesc(file_toki, 14);
 
 /**
  * @generated from message toki.v1.DisplayNameChanged
@@ -368,7 +589,7 @@ export type DisplayNameChanged = Message<"toki.v1.DisplayNameChanged"> & {
  * Use `create(DisplayNameChangedSchema)` to create a new message.
  */
 export const DisplayNameChangedSchema: GenMessage<DisplayNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 11);
+  messageDesc(file_toki, 15);
 
 /**
  * The admin-assigned name of a frequency channel (≤16 chars). An empty
@@ -395,7 +616,115 @@ export type ChannelNameChanged = Message<"toki.v1.ChannelNameChanged"> & {
  * Use `create(ChannelNameChangedSchema)` to create a new message.
  */
 export const ChannelNameChangedSchema: GenMessage<ChannelNameChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 12);
+  messageDesc(file_toki, 16);
+
+/**
+ * A member's server-side mute state changed (see Admin.SetMute).
+ *
+ * @generated from message toki.v1.MuteChanged
+ */
+export type MuteChanged = Message<"toki.v1.MuteChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.MuteChanged.
+ * Use `create(MuteChangedSchema)` to create a new message.
+ */
+export const MuteChangedSchema: GenMessage<MuteChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 17);
+
+/**
+ * A channel's mute state changed (see Admin.SetChannelMute), or the
+ * current state delivered on Join / ChangeFrequency.
+ *
+ * @generated from message toki.v1.ChannelMuteChanged
+ */
+export type ChannelMuteChanged = Message<"toki.v1.ChannelMuteChanged"> & {
+  /**
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.ChannelMuteChanged.
+ * Use `create(ChannelMuteChangedSchema)` to create a new message.
+ */
+export const ChannelMuteChangedSchema: GenMessage<ChannelMuteChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 18);
+
+/**
+ * A member's priority-speaker standing changed (see Admin.SetPriority),
+ * or current standing delivered on Join / ChangeFrequency. Addressed to
+ * the subject only. `frequency` is the channel the grant is bound to
+ * (empty when revoked).
+ *
+ * @generated from message toki.v1.PriorityChanged
+ */
+export type PriorityChanged = Message<"toki.v1.PriorityChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: string frequency = 2;
+   */
+  frequency: string;
+
+  /**
+   * @generated from field: bool granted = 3;
+   */
+  granted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.PriorityChanged.
+ * Use `create(PriorityChangedSchema)` to create a new message.
+ */
+export const PriorityChangedSchema: GenMessage<PriorityChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 19);
+
+/**
+ * A member's global-broadcast capability changed (see Admin.SetGlobalBroadcast),
+ * or current standing delivered on Join / ChangeFrequency. Addressed to the
+ * subject only. When granted, the dedicated broadcast PTT binding becomes
+ * active; when revoked it is silently disabled.
+ *
+ * @generated from message toki.v1.BroadcastCapabilityChanged
+ */
+export type BroadcastCapabilityChanged = Message<"toki.v1.BroadcastCapabilityChanged"> & {
+  /**
+   * @generated from field: string client_id = 1;
+   */
+  clientId: string;
+
+  /**
+   * @generated from field: bool granted = 2;
+   */
+  granted: boolean;
+};
+
+/**
+ * Describes the message toki.v1.BroadcastCapabilityChanged.
+ * Use `create(BroadcastCapabilityChangedSchema)` to create a new message.
+ */
+export const BroadcastCapabilityChangedSchema: GenMessage<BroadcastCapabilityChanged> = /*@__PURE__*/
+  messageDesc(file_toki, 20);
 
 /**
  * The duplex mode of a frequency channel. Sent on Join/ChangeFrequency
@@ -420,7 +749,7 @@ export type ChannelModeChanged = Message<"toki.v1.ChannelModeChanged"> & {
  * Use `create(ChannelModeChangedSchema)` to create a new message.
  */
 export const ChannelModeChangedSchema: GenMessage<ChannelModeChanged> = /*@__PURE__*/
-  messageDesc(file_toki, 13);
+  messageDesc(file_toki, 21);
 
 /**
  * @generated from message toki.v1.PttEvent
@@ -454,6 +783,35 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
    * @generated from field: bool priority = 4;
    */
   priority: boolean;
+
+  /**
+   * True when this PTT event belongs to a *global broadcast* session —
+   * the broadcaster has simultaneously seized every frequency room.
+   * Set by the server on the fan-out to all listeners; always false on
+   * events sent client->server (the server is the sole arbiter, exactly
+   * like `priority`). Clients use this to play the distinct broadcast
+   * roger cue instead of the normal or priority roger. Always false on
+   * release (pressed = false is still flagged broadcast=true during a
+   * broadcast teardown so clients can clear the broadcast indicator).
+   *
+   * @generated from field: bool broadcast = 5;
+   */
+  broadcast: boolean;
+
+  /**
+   * The talker's callsign (display name) at the time of the event.
+   * Populated by the server primarily for *global broadcast* events
+   * (broadcast = true), where listeners on other frequencies don't have
+   * the broadcaster in their local roster and so can't resolve the name
+   * from client_id alone. Empty when the server didn't supply a name
+   * (e.g. ordinary per-room PTT, where every recipient already has the
+   * talker in roster); clients fall back to their roster lookup, then to
+   * the client_id, when this is empty. Additive/optional — older clients
+   * ignore it.
+   *
+   * @generated from field: string display_name = 6;
+   */
+  displayName: string;
 };
 
 /**
@@ -461,7 +819,7 @@ export type PttEvent = Message<"toki.v1.PttEvent"> & {
  * Use `create(PttEventSchema)` to create a new message.
  */
 export const PttEventSchema: GenMessage<PttEvent> = /*@__PURE__*/
-  messageDesc(file_toki, 14);
+  messageDesc(file_toki, 22);
 
 /**
  * @generated from message toki.v1.PttAck
@@ -474,7 +832,7 @@ export type PttAck = Message<"toki.v1.PttAck"> & {
  * Use `create(PttAckSchema)` to create a new message.
  */
 export const PttAckSchema: GenMessage<PttAck> = /*@__PURE__*/
-  messageDesc(file_toki, 15);
+  messageDesc(file_toki, 23);
 
 /**
  * Per-frequency duplex behaviour.
@@ -560,6 +918,43 @@ export const Signaling: GenService<{
     methodKind: "client_streaming";
     input: typeof PttEventSchema;
     output: typeof PttAckSchema;
+  },
+  /**
+   * Fetch a short-lived challenge nonce to sign in the subsequent
+   * `Register` call. Part of the optional client-identity handshake:
+   * the client proves possession of its ed25519 private key by signing
+   * the nonce (see `RegisterRequest.identity_signature`), which stops
+   * anyone who merely *sees* an identity string (admin panel, audit
+   * log) from impersonating it. The nonce is opaque to the client —
+   * echo it back verbatim. It expires after ~60 s; on a stale-nonce
+   * rejection from Register, fetch a fresh one and retry.
+   * Identity-less clients never call this.
+   *
+   * @generated from rpc toki.v1.Signaling.IdentityChallenge
+   */
+  identityChallenge: {
+    methodKind: "unary";
+    input: typeof IdentityChallengeRequestSchema;
+    output: typeof IdentityChallengeResponseSchema;
+  },
+  /**
+   * Periodic client→server report of the connection quality the client
+   * is *measuring locally* on the inbound audio path: round-trip time
+   * (from the UDP keepalive/pong probe), inter-arrival jitter, and
+   * packet-loss rate (from gaps in the server→client sequence numbers).
+   * The server can't compute these itself — only the receiver sees its
+   * own loss/jitter, and RTT is a client-stamped round trip — so the
+   * client pushes them up roughly every few seconds for the admin
+   * dashboard. Best-effort and advisory: dropping a report only delays
+   * the panel's next refresh. Sent on a fire-and-forget cadence; the
+   * unary response is empty.
+   *
+   * @generated from rpc toki.v1.Signaling.ReportConnectionQuality
+   */
+  reportConnectionQuality: {
+    methodKind: "unary";
+    input: typeof ConnectionQualityReportSchema;
+    output: typeof ConnectionQualityAckSchema;
   },
 }> = /*@__PURE__*/
   serviceDesc(file_toki, 0);

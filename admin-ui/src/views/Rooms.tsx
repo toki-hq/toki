@@ -9,6 +9,10 @@ import {
   Tag,
   Eraser,
   Check,
+  Fingerprint,
+  Ban,
+  MicOff,
+  Mic,
   Radio,
   Users,
 } from "lucide-react";
@@ -19,6 +23,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input, Label } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import {
   Dialog,
   DialogContent,
@@ -52,6 +57,12 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   const names = snapshot?.channelNames ?? {};
   // Per-frequency duplex mode (0 = half, 1 = full); absent key = half.
   const modes = snapshot?.channelModes ?? {};
+  // Channel-wide mutes (all muted frequencies, occupied or not). Used to
+  // flag synthetic empty rooms as muted too — you can mute an empty channel.
+  const mutedChannels = useMemo(
+    () => new Set(snapshot?.mutedChannels ?? []),
+    [snapshot],
+  );
   const [namedEnabled, setNamedEnabled] = useState(false);
   // Gates all duplex UI (mode editor + badges). When off, full-duplex is
   // hidden entirely and channels are half-only.
@@ -60,6 +71,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
   const [activeOnly, setActiveOnly] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<Member | null>(null);
+  const [banning, setBanning] = useState<Member | null>(null);
 
   useEffect(() => {
     // One-shot on mount (the section remounts on each visit, so a
@@ -92,9 +104,14 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
     return ALL_FREQUENCIES.map(
       (f) =>
         byFreq.get(f) ??
-        ({ $typeName: "toki.admin.v1.Room", frequency: f, members: [] } as Room),
+        ({
+          $typeName: "toki.admin.v1.Room",
+          frequency: f,
+          members: [],
+          muted: mutedChannels.has(f),
+        } as Room),
     );
-  }, [rooms, activeOnly]);
+  }, [rooms, activeOnly, mutedChannels]);
 
   const visible = allRooms.filter((r) => {
     if (activeOnly && r.members.length === 0) return false;
@@ -165,6 +182,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
               mode={modes[current.frequency] ?? 0}
               modeEnabled={fdxEnabled}
               onRename={setRenaming}
+              onBan={setBanning}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-sm text-muted-foreground">
@@ -177,6 +195,7 @@ export function Rooms({ snapshot }: { snapshot: Snapshot | null }) {
       {renaming && (
         <RenameDialog member={renaming} onClose={() => setRenaming(null)} />
       )}
+      {banning && <BanDialog member={banning} onClose={() => setBanning(null)} />}
     </div>
   );
 }
@@ -245,6 +264,7 @@ function ChannelDetail({
   mode,
   modeEnabled,
   onRename,
+  onBan,
 }: {
   room: Room;
   name?: string;
@@ -252,6 +272,7 @@ function ChannelDetail({
   mode: number;
   modeEnabled: boolean;
   onRename: (m: Member) => void;
+  onBan: (m: Member) => void;
 }) {
   return (
     <>
@@ -261,8 +282,16 @@ function ChannelDetail({
         </span>
         <span className="text-xs text-muted-foreground">MHz · CH {channelNumber(room.frequency)}</span>
         {name && <span className="font-mono text-sm text-primary/90">“{name}”</span>}
-        <span className="ml-auto font-mono text-sm text-muted-foreground tabular">
-          {room.members.length} members
+        {room.muted && (
+          <Badge variant="destructive">
+            <MicOff className="size-2.5" /> MUTED
+          </Badge>
+        )}
+        <span className="ml-auto flex items-center gap-3">
+          <ChannelMuteToggle frequency={room.frequency} muted={room.muted} />
+          <span className="font-mono text-sm text-muted-foreground tabular">
+            {room.members.length} members
+          </span>
         </span>
       </div>
       <NameEditor frequency={room.frequency} name={name} enabled={namedEnabled} />
@@ -296,6 +325,17 @@ function ChannelDetail({
                     <Zap className="size-2.5" /> PRIO
                   </Badge>
                 )}
+                {m.canGlobalBroadcast && (
+                  <Badge variant="warning">
+                    <Radio className="size-2.5" /> BCAST
+                  </Badge>
+                )}
+                {m.muted && (
+                  <Badge variant="destructive">
+                    <MicOff className="size-2.5" /> MUTED
+                  </Badge>
+                )}
+                <IdentityBadge member={m} />
               </span>
               <span
                 className={cn(
@@ -308,15 +348,42 @@ function ChannelDetail({
               <span className="font-mono text-xs text-muted-foreground tabular">
                 {formatDuration(Number(m.connectedSecs))}
               </span>
+              <QualityReadout member={m} />
               <span className="ml-auto truncate font-mono text-xs text-muted-foreground/60">
                 {m.id.slice(0, 8)}
               </span>
-              <MemberMenu member={m} onRename={() => onRename(m)} />
+              <MemberMenu member={m} onRename={() => onRename(m)} onBan={() => onBan(m)} />
             </div>
           );
         })}
       </div>
     </>
+  );
+}
+
+function ChannelMuteToggle({ frequency, muted }: { frequency: string; muted: boolean }) {
+  const [busy, setBusy] = useState(false);
+  async function toggle() {
+    setBusy(true);
+    try {
+      await admin.setChannelMute({ frequency, muted: !muted });
+      toast.success(muted ? `Unmuted ${frequency}` : `Muted ${frequency}`);
+    } catch (e) {
+      toast.error(`Channel mute failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Button
+      variant={muted ? "default" : "ghost"}
+      size="sm"
+      disabled={busy}
+      onClick={() => void toggle()}
+      title={muted ? "Allow transmission on this channel" : "Silence all transmission on this channel"}
+    >
+      {muted ? <Mic /> : <MicOff />} {muted ? "Unmute channel" : "Mute channel"}
+    </Button>
   );
 }
 
@@ -464,7 +531,73 @@ function ModeEditor({ frequency, mode }: { frequency: string; mode: number }) {
   );
 }
 
-function MemberMenu({ member, onRename }: { member: Member; onRename: () => void }) {
+function QualityReadout({ member }: { member: Member }) {
+  if (!member.qualityFresh) {
+    return <span className="font-mono text-xs text-muted-foreground/40 tabular">—</span>;
+  }
+  const rtt = member.rttMs;
+  const jit = member.jitterMs;
+  const lossPct = member.lossPctCenti / 100;
+  // Worst-of-three → colour, matching the client's bar thresholds.
+  const bad = rtt >= 250 || jit >= 50 || member.lossPctCenti >= 500;
+  const marginal = rtt >= 150 || jit >= 25 || member.lossPctCenti >= 200;
+  const tone = bad ? "text-destructive" : marginal ? "text-warning" : "text-primary/80";
+  return (
+    <span
+      className={cn("font-mono text-xs tabular", tone)}
+      title={`Round-trip ${rtt} ms · jitter ${jit} ms · packet loss ${lossPct.toFixed(2)}%`}
+    >
+      {rtt}ms · {lossPct.toFixed(1)}%
+    </span>
+  );
+}
+
+function IdentityBadge({ member }: { member: Member }) {
+  if (!member.identity) return null;
+  const firstSeen =
+    member.identityFirstSeenUnix > 0n
+      ? new Date(Number(member.identityFirstSeenUnix) * 1000).toLocaleString()
+      : "—";
+  return (
+    <span className="group relative inline-flex">
+      <Badge variant="primary" className="cursor-default">
+        <Fingerprint className="size-2.5" />
+        {member.identity}
+      </Badge>
+      <div className="absolute left-0 top-full z-50 mt-1 hidden w-80 rounded-md border border-border bg-popover p-3 text-popover-foreground shadow-xl group-hover:block">
+        <p className="mb-2 font-mono text-xs font-semibold">{member.identity}</p>
+        <dl className="space-y-1.5 text-[10px]">
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">Public key</dt>
+            <dd className="break-all font-mono text-foreground/80">{member.identityPubkey}</dd>
+          </div>
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">Machine</dt>
+            <dd className="font-mono text-foreground/80">
+              {member.identityMachineHash
+                ? `${member.identityMachineHash.slice(0, 16)}…`
+                : "not reported"}
+            </dd>
+          </div>
+          <div>
+            <dt className="uppercase tracking-wider text-muted-foreground">First seen</dt>
+            <dd className="font-mono text-foreground/80">{firstSeen}</dd>
+          </div>
+        </dl>
+      </div>
+    </span>
+  );
+}
+
+function MemberMenu({
+  member,
+  onRename,
+  onBan,
+}: {
+  member: Member;
+  onRename: () => void;
+  onBan: () => void;
+}) {
   async function move(frequency: string) {
     try {
       await admin.moveClient({ id: member.id, frequency });
@@ -481,6 +614,28 @@ function MemberMenu({ member, onRename }: { member: Member; onRename: () => void
       );
     } catch (e) {
       toast.error(`Priority change failed: ${err(e)}`);
+    }
+  }
+  async function toggleBroadcast() {
+    try {
+      await admin.setGlobalBroadcast({ id: member.id, grant: !member.canGlobalBroadcast });
+      toast.success(
+        member.canGlobalBroadcast
+          ? `Global broadcast revoked from ${member.displayName}`
+          : `${member.displayName} granted global broadcast`,
+      );
+    } catch (e) {
+      toast.error(`Broadcast capability change failed: ${err(e)}`);
+    }
+  }
+  async function toggleMute() {
+    try {
+      await admin.setMute({ id: member.id, muted: !member.muted });
+      toast.success(
+        member.muted ? `${member.displayName} unmuted` : `${member.displayName} muted`,
+      );
+    } catch (e) {
+      toast.error(`Mute change failed: ${err(e)}`);
     }
   }
   async function kick() {
@@ -521,9 +676,22 @@ function MemberMenu({ member, onRename }: { member: Member; onRename: () => void
         <DropdownMenuItem onSelect={() => void togglePriority()}>
           <Zap /> {member.priority ? "Revoke priority" : "Promote to priority"}
         </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void toggleBroadcast()}>
+          <Radio /> {member.canGlobalBroadcast ? "Revoke broadcast" : "Grant broadcast"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void toggleMute()}>
+          {member.muted ? <Mic /> : <MicOff />} {member.muted ? "Unmute" : "Mute (silence)"}
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void kick()} className="text-warning">
           <Power /> Kick (disconnect)
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={onBan}
+          disabled={!member.identity}
+          className="text-destructive"
+        >
+          <Ban /> {member.identity ? "Ban identity\u2026" : "Ban (no identity)"}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -568,6 +736,76 @@ function RenameDialog({ member, onClose }: { member: Member; onClose: () => void
               {busy ? "Saving…" : "Rename"}
             </Button>
           </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/// Confirm-and-reason dialog for banning a member's identity. Only
+/// reachable for members with a verified identity (the menu item is
+/// disabled otherwise). The machine toggle appears only when the
+/// session reported a machine hash.
+function BanDialog({ member, onClose }: { member: Member; onClose: () => void }) {
+  const [reason, setReason] = useState("");
+  const [banMachine, setBanMachine] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  async function ban() {
+    setBusy(true);
+    try {
+      await admin.banClient({ id: member.id, reason, banMachine });
+      toast.warning(`Banned ${member.displayName} (${member.identity})`);
+      onClose();
+    } catch (e) {
+      toast.error(`Ban failed: ${err(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>
+            Ban {member.displayName}{" "}
+            <span className="font-mono text-sm text-muted-foreground">({member.identity})</span>
+          </DialogTitle>
+        </DialogHeader>
+        <p className="text-sm text-muted-foreground">
+          The session is kicked immediately and this identity can no longer register. Display
+          names don&apos;t matter — the ban follows the key.
+        </p>
+        <div className="space-y-1.5">
+          <Label htmlFor="ban-reason">Reason (shown to the banned client)</Label>
+          <Input
+            id="ban-reason"
+            value={reason}
+            maxLength={256}
+            placeholder="optional"
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </div>
+        {member.identityMachineHash && (
+          <label className="flex items-center justify-between gap-3 text-sm">
+            <span>
+              Also ban this machine
+              <span className="block text-xs text-muted-foreground">
+                A wiped config gets a fresh identity but keeps the machine hash — this closes
+                that path.
+              </span>
+            </span>
+            <Switch checked={banMachine} onCheckedChange={setBanMachine} />
+          </label>
+        )}
+        <div className="flex justify-end gap-2">
+          <DialogClose asChild>
+            <Button variant="ghost">Cancel</Button>
+          </DialogClose>
+          <Button variant="destructive" disabled={busy} onClick={() => void ban()}>
+            <Ban /> Ban
+          </Button>
         </div>
       </DialogContent>
     </Dialog>

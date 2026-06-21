@@ -14,9 +14,12 @@
 mod app;
 mod audio;
 mod config;
+mod dsp;
 mod hotkey;
+mod identity;
 mod runtime;
 mod state;
+mod telemetry;
 mod theme;
 mod update;
 
@@ -46,10 +49,15 @@ fn main() -> eframe::Result<()> {
     // borderless chassis with hand-drawn traffic-light dots is in the
     // spec as a follow-up; this gets the look right first, then we can
     // strip the decorations later.
+    // Height is no longer fixed: the sound drawer folds open/closed and
+    // the app drives the OS window taller/shorter to match (see
+    // `theme::window_h` + `TokiApp::update`). Start folded; allow the
+    // height band to span folded..open so the resize commands take. Width
+    // stays bounded as before.
     let mut viewport = egui::ViewportBuilder::default()
-        .with_inner_size([theme::WIDGET_W, theme::WIDGET_H])
-        .with_min_inner_size([480.0, theme::WIDGET_H])
-        .with_max_inner_size([760.0, theme::WIDGET_H])
+        .with_inner_size([theme::WIDGET_W, theme::window_h(false)])
+        .with_min_inner_size([480.0, theme::window_h(false)])
+        .with_max_inner_size([760.0, theme::window_h(true)])
         .with_resizable(true)
         .with_title("Toki");
     if let Some(icon) = load_window_icon() {

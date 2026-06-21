@@ -65,6 +65,23 @@ cpal = "0.15"
 audiopus = "0.2"
 global-hotkey = "0.6"
 device_query = "4"
+# Game controllers / joysticks. Passive and non-exclusive (a focused
+# game still receives the input), `Gilrs` is `Send` with a non-blocking
+# `next_event`, so it polls happily from our background input thread.
+# Covers anything the OS exposes as a gamepad/joystick on mac/win/linux.
+gilrs = "0.11"
+# Stream Deck (Elgato VID 0x0fd9) + arbitrary USB HID buttons. The
+# `macos-shared-device` feature is MANDATORY: without it, opening a HID
+# device on macOS grabs it exclusively and the OS / vendor software stop
+# seeing it. hidapi vendors a small C lib (needs a C toolchain at build
+# time — already required by `audiopus_sys`).
+#
+# `default-features = false` is required to add `macos-shared-device`,
+# but it also strips the default Linux backend, so we re-add it in the
+# per-target table below. Windows needs no feature — hidapi's build.rs
+# compiles its C backend and links setupapi unconditionally; macOS only
+# needs `macos-shared-device`.
+hidapi = { version = "2", default-features = false, features = ["macos-shared-device"] }
 rustfft = "6"
 serde = { workspace = true }
 toml = "0.8"
@@ -101,3 +118,29 @@ serde_json = "1"
 # Pure-Rust semver comparison for the version check (handles pre-release
 # / build metadata correctly, unlike a naive string/tuple compare).
 semver = "1"
+# Keypair-backed client identity: the identity IS an ed25519 public key
+# (see `toki_proto::identity` for the shared derivation contract). Pure
+# Rust, no C deps; the server verifies with the same crate.
+ed25519-dalek = "2"
+# OS-entropy seed for identity keygen. Already in the tree transitively
+# (rustls/ring pull it); a direct dep just for the 32 seed bytes —
+# lighter than adding `rand` for one call.
+getrandom = "0.2"
+# RNNoise-derived voice denoiser, pure Rust (no C deps). Its native
+# frame shape — 480 samples of 48 kHz mono, f32 in i16 range — is
+# exactly our wire frame, so the capture path feeds it directly with
+# no rebuffering. `default-features = false` drops the crate's CLI
+# binary dependencies (clap, hound, dasp); we only link the library.
+nnnoiseless = { version = "0.5", default-features = false }
+
+# hidapi's Linux build requires exactly one backend feature; because we
+# turned default-features off (to get `macos-shared-device`), we re-add
+# the default hidraw backend here so Linux builds. `linux-static-hidraw`
+# links libudev statically — its dev headers must be present at build
+# time (CI already installs them for other crates). No effect on
+# mac/win builds.
+[target.'cfg(target_os = "linux")'.dependencies]
+hidapi = { version = "2", default-features = false, features = [
+    "macos-shared-device",
+    "linux-static-hidraw",
+] }

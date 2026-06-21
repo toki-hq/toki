@@ -22,7 +22,28 @@ use tonic::Status;
 use toki_proto::admin::v1 as pb;
 
 use crate::metrics::{SharedByteCounters, SharedLiveRate};
-use crate::state::{SharedChannelNames, SharedDuplexModes, SharedRegistry};
+use crate::state::{Client, SharedChannelNames, SharedDuplexModes, SharedRegistry};
+
+/// Copy a session's non-trivial state (verified identity, if any, and
+/// the server-side mute flag) onto the wire member. Identity-less
+/// sessions keep the proto identity defaults (empty/0) — the UI reads
+/// that as "no identity".
+fn fill_member_identity(m: &mut pb::Member, c: &Client) {
+    if let Some(identity) = &c.identity {
+        m.identity = identity.display_id.clone();
+        m.identity_pubkey = identity.pubkey_hex.clone();
+        m.identity_machine_hash = identity.machine_hash.clone();
+        m.identity_first_seen_unix = identity.first_seen.max(0) as u64;
+    }
+    m.muted = c.muted;
+    m.can_global_broadcast = c.can_global_broadcast;
+    if let Some(q) = &c.quality {
+        m.rtt_ms = q.rtt_ms;
+        m.jitter_ms = q.jitter_ms;
+        m.loss_pct_centi = q.loss_pct_centi;
+        m.quality_fresh = true;
+    }
+}
 
 /// How often the broadcaster wakes, snapshots the registry, and fans the
 /// result out to `Watch` subscribers. 1 Hz is plenty for an admin
@@ -37,6 +58,7 @@ pub async fn run_broadcaster(
     registry: SharedRegistry,
     channel_names: SharedChannelNames,
     duplex_modes: SharedDuplexModes,
+    channel_mutes: crate::state::SharedChannelMutes,
     counters: SharedByteCounters,
     live_rate: SharedLiveRate,
     tx: Sender<pb::Snapshot>,
@@ -71,6 +93,7 @@ pub async fn run_broadcaster(
             &registry,
             &channel_names,
             &duplex_modes,
+            &channel_mutes,
             &live_rate,
             next_generation(),
             started_at,
@@ -94,12 +117,13 @@ pub async fn snapshot_now(
     registry: &SharedRegistry,
     channel_names: &SharedChannelNames,
     duplex_modes: &SharedDuplexModes,
+    channel_mutes: &crate::state::SharedChannelMutes,
     live_rate: &SharedLiveRate,
     generation: u64,
     started_at: Instant,
 ) -> pb::Snapshot {
-    // Snapshot the name + mode maps up front (their own locks, held only
-    // here) so the registry lock below never overlaps them.
+    // Snapshot the name + mode maps + mute set up front (each their own lock,
+    // held only here) so the registry lock below never overlaps them.
     let names = channel_names.read().await.clone();
     let modes: std::collections::HashMap<String, u32> = duplex_modes
         .read()
@@ -107,6 +131,7 @@ pub async fn snapshot_now(
         .iter()
         .map(|(freq, m)| (freq.clone(), m.as_u32()))
         .collect();
+    let mutes = channel_mutes.read().await.clone();
     let r = registry.lock().await;
     let now = Instant::now();
 
@@ -120,19 +145,25 @@ pub async fn snapshot_now(
                 .members
                 .iter()
                 .filter_map(|id| r.clients.get(id))
-                .map(|c| pb::Member {
-                    id: c.id.clone(),
-                    display_name: c.display_name.clone(),
-                    connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
-                    // Priority is per-channel: priority only if the elected
-                    // frequency is the room we're listing them under.
-                    priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                .map(|c| {
+                    let mut m = pb::Member {
+                        id: c.id.clone(),
+                        display_name: c.display_name.clone(),
+                        connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                        // Priority is per-channel: priority only if the elected
+                        // frequency is the room we're listing them under.
+                        priority: c.priority_freq.as_deref() == Some(freq.as_str()),
+                        ..Default::default()
+                    };
+                    fill_member_identity(&mut m, c);
+                    m
                 })
                 .collect();
             pb::Room {
                 frequency: freq.clone(),
                 holder: room.holder.clone(),
                 members,
+                muted: mutes.contains(freq),
             }
         })
         .collect();
@@ -143,11 +174,16 @@ pub async fn snapshot_now(
         .clients
         .values()
         .filter(|c| c.current_frequency.is_none())
-        .map(|c| pb::Member {
-            id: c.id.clone(),
-            display_name: c.display_name.clone(),
-            connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
-            priority: false,
+        .map(|c| {
+            let mut m = pb::Member {
+                id: c.id.clone(),
+                display_name: c.display_name.clone(),
+                connected_secs: now.saturating_duration_since(c.connected_at).as_secs(),
+                priority: false,
+                ..Default::default()
+            };
+            fill_member_identity(&mut m, c);
+            m
         })
         .collect();
 
@@ -165,6 +201,13 @@ pub async fn snapshot_now(
         // Latest 1 Hz throughput, for the dashboard's live bandwidth trace.
         rx_bytes_per_sec: live_rate.rx.load(Ordering::Relaxed),
         tx_bytes_per_sec: live_rate.tx.load(Ordering::Relaxed),
+        // Every muted channel regardless of occupancy, so the panel can
+        // flag an empty-but-muted frequency (mirrors channel_names).
+        muted_channels: {
+            let mut v: Vec<String> = mutes.into_iter().collect();
+            v.sort();
+            v
+        },
         // Only the non-default (full-duplex) frequencies; absent = half.
         channel_modes: modes,
     }
@@ -191,6 +234,7 @@ mod tests {
     fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         Client {
             id: id.to_string(),
+            identity: None,
             display_name: name.to_string(),
             audio_token_hash: [0u8; crate::state::TOKEN_HASH_LEN],
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
@@ -204,6 +248,9 @@ mod tests {
             connected_at: Instant::now(),
             priority_freq: None,
             expected_ip: None,
+            muted: false,
+            can_global_broadcast: false,
+            quality: None,
         }
     }
 
@@ -226,11 +273,13 @@ mod tests {
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
         let names = crate::state::shared_channel_names(Default::default());
         let lr = crate::metrics::shared_live_rate();
+        let mutes = crate::state::shared_channel_mutes(Default::default());
 
         let snap = snapshot_now(
             &registry,
             &names,
             &crate::state::shared_duplex_modes(Default::default()),
+            &mutes,
             &lr,
             7,
             Instant::now(),
@@ -243,6 +292,43 @@ mod tests {
         assert_eq!(snap.rooms[0].members.len(), 2);
         assert_eq!(snap.lobby.len(), 1);
         assert_eq!(snap.lobby[0].id, "c");
+    }
+
+    #[tokio::test]
+    async fn snapshot_carries_muted_flag() {
+        let mut reg = crate::state::Registry::default();
+        let mut alice = mk_client("a", "Alice", Some("446.05"));
+        alice.muted = true;
+        reg.clients.insert("a".into(), alice);
+        reg.clients
+            .insert("b".into(), mk_client("b", "Bob", Some("446.05")));
+        reg.rooms.insert(
+            "446.05".into(),
+            Room {
+                members: vec!["a".into(), "b".into()],
+                ..Default::default()
+            },
+        );
+        let registry: SharedRegistry = Arc::new(Mutex::new(reg));
+        let names = crate::state::shared_channel_names(Default::default());
+        let lr = crate::metrics::shared_live_rate();
+        let mutes = crate::state::shared_channel_mutes(Default::default());
+
+        let snap = snapshot_now(
+            &registry,
+            &names,
+            &crate::state::shared_duplex_modes(Default::default()),
+            &mutes,
+            &lr,
+            1,
+            Instant::now(),
+        )
+        .await;
+        let members = &snap.rooms[0].members;
+        let alice = members.iter().find(|m| m.id == "a").unwrap();
+        let bob = members.iter().find(|m| m.id == "b").unwrap();
+        assert!(alice.muted, "muted session must surface muted=true");
+        assert!(!bob.muted, "un-muted session must surface muted=false");
     }
 
     #[tokio::test]
@@ -265,11 +351,13 @@ mod tests {
         let registry: SharedRegistry = Arc::new(Mutex::new(reg));
         let names = crate::state::shared_channel_names(Default::default());
         let lr = crate::metrics::shared_live_rate();
+        let mutes = crate::state::shared_channel_mutes(Default::default());
 
         let snap = snapshot_now(
             &registry,
             &names,
             &crate::state::shared_duplex_modes(Default::default()),
+            &mutes,
             &lr,
             1,
             Instant::now(),
@@ -305,11 +393,13 @@ mod tests {
         seed.insert("447.00".to_string(), "Backup".to_string());
         let names = crate::state::shared_channel_names(seed);
         let lr = crate::metrics::shared_live_rate();
+        let mutes = crate::state::shared_channel_mutes(Default::default());
 
         let snap = snapshot_now(
             &registry,
             &names,
             &crate::state::shared_duplex_modes(Default::default()),
+            &mutes,
             &lr,
             1,
             Instant::now(),

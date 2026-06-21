@@ -20,6 +20,58 @@ service Signaling {
   // Server multicasts these as Events to every other member of
   // the sender's current frequency room.
   rpc PushToTalk(stream PttEvent) returns (PttAck);
+
+  // Fetch a short-lived challenge nonce to sign in the subsequent
+  // `Register` call. Part of the optional client-identity handshake:
+  // the client proves possession of its ed25519 private key by signing
+  // the nonce (see `RegisterRequest.identity_signature`), which stops
+  // anyone who merely *sees* an identity string (admin panel, audit
+  // log) from impersonating it. The nonce is opaque to the client —
+  // echo it back verbatim. It expires after ~60 s; on a stale-nonce
+  // rejection from Register, fetch a fresh one and retry.
+  // Identity-less clients never call this.
+  rpc IdentityChallenge(IdentityChallengeRequest) returns (IdentityChallengeResponse);
+
+  // Periodic client→server report of the connection quality the client
+  // is *measuring locally* on the inbound audio path: round-trip time
+  // (from the UDP keepalive/pong probe), inter-arrival jitter, and
+  // packet-loss rate (from gaps in the server→client sequence numbers).
+  // The server can't compute these itself — only the receiver sees its
+  // own loss/jitter, and RTT is a client-stamped round trip — so the
+  // client pushes them up roughly every few seconds for the admin
+  // dashboard. Best-effort and advisory: dropping a report only delays
+  // the panel's next refresh. Sent on a fire-and-forget cadence; the
+  // unary response is empty.
+  rpc ReportConnectionQuality(ConnectionQualityReport) returns (ConnectionQualityAck);
+}
+
+// One client-measured connection-quality sample. All three metrics are
+// computed on the client over a short sliding window and reported as of
+// "now"; absent/zero means "not yet measured" (e.g. RTT before the
+// first pong, loss before enough packets have arrived to estimate it).
+message ConnectionQualityReport {
+  string client_id = 1;
+  // Smoothed round-trip time in milliseconds, from the keepalive/pong
+  // probe. 0 until the first pong lands.
+  uint32 rtt_ms = 2;
+  // Inter-arrival jitter in milliseconds (mean deviation of S2C packet
+  // spacing from the nominal 10 ms cadence).
+  uint32 jitter_ms = 3;
+  // Inbound packet-loss percentage over the window, 0–100, ×100 for two
+  // decimals of resolution (e.g. 250 = 2.50%). Derived from S2C seq gaps.
+  uint32 loss_pct_centi = 4;
+}
+
+message ConnectionQualityAck {}
+
+message IdentityChallengeRequest {}
+
+message IdentityChallengeResponse {
+  // Opaque challenge blob. Stateless on the server side (it embeds a
+  // timestamp + HMAC, so no per-nonce table is kept); the client signs
+  // the domain-separated payload `"toki-register-v1" || nonce` and
+  // sends both the nonce and the signature in `Register`.
+  bytes nonce = 1;
 }
 
 message RegisterRequest {
@@ -38,6 +90,37 @@ message RegisterRequest {
   // change across minor versions). Empty / unparseable is treated as
   // incompatible (pre-gate clients predate the matching wire format).
   string client_version = 3;
+
+  // ── Optional client identity ──────────────────────────────────────
+  // A self-generated, keypair-backed identity (see notes in the repo's
+  // identity spec). All five fields are either present together or all
+  // absent; an absent identity (empty `identity_pubkey`) is accepted —
+  // the session simply has no identity. A *present but invalid* one
+  // (bad signature, stale nonce, malformed key) is rejected with
+  // `UNAUTHENTICATED` rather than silently downgraded, so an
+  // impersonation attempt never lands as "anonymous but connected".
+
+  // 32-byte ed25519 public key. This *is* the identity — everything
+  // else (display string, attributes) derives from or attaches to it.
+  bytes identity_pubkey = 4;
+  // The nonce obtained from `IdentityChallenge`, echoed verbatim.
+  bytes challenge_nonce = 5;
+  // 64-byte ed25519 signature over `"toki-register-v1" || nonce`
+  // (domain-separated so a register signature can't be replayed in
+  // any other future signing context).
+  bytes identity_signature = 6;
+  // Salted hash of the machine identifier, as lowercase hex:
+  // BLAKE3("toki-machine-fp-v1" || machine_id) where machine_id is the
+  // OS machine id (falling back to a primary MAC). Never the raw
+  // value. Travels alongside the key — NOT inside its derivation — so
+  // the identity survives moving the key file to a new machine, while
+  // a config wipe yields a fresh identity but the *same* machine hash
+  // (ban-evasion correlation). Claimed, not provable.
+  string machine_hash = 7;
+  // The first session client_id this identity was ever assigned by any
+  // server, recorded at identity generation. Informational/claimed —
+  // a provenance breadcrumb, not an authenticated fact.
+  string origin_client_id = 8;
 }
 
 message RegisterResponse {
@@ -64,6 +147,19 @@ message RegisterResponse {
   // lets the operator trade bandwidth for quality server-wide.
   bool opus_enabled = 5;
   uint32 opus_bitrate = 6;
+  // When true (and opus_enabled), the client turns on Opus DTX
+  // (discontinuous transmission): during silence the encoder emits tiny
+  // comfort-noise frames instead of full ~30-byte frames, which cuts the
+  // talker's outbound — and therefore the whole per-listener fan-out —
+  // for the silent fraction of a transmission. Decodes transparently on
+  // the existing path; no effect on the raw-PCM path. Advisory like the
+  // other codec fields.
+  bool opus_dtx = 7;
+  // Opus frame size the server wants clients to use: 10, 20, or 40 ms.
+  // Maps directly to the number of 48 kHz samples passed to the encoder
+  // (480 / 960 / 1920). Absent (0) means 10 ms — legacy behaviour.
+  // Larger frames reduce relay egress but add mouth-to-ear latency.
+  uint32 opus_frame_ms = 8;
 }
 
 message JoinRequest {
@@ -112,12 +208,46 @@ message Event {
     // client compares `frequency` against its current tuning before
     // applying. See `ChannelNameChanged`.
     ChannelNameChanged channel_name_changed = 6;
+    // Sent when an admin mutes or unmutes a member (see Admin.SetMute).
+    // Broadcast to every member of the subject's current room *and* to
+    // the subject's own stream. The subject compares `client_id` against
+    // its own id: when it's the subject and `muted` is true, the client
+    // suppresses its own PTT/mic locally (so it doesn't keep firing
+    // futile presses the server will drop) and shows a "muted by
+    // operator" cue; other members light a muted badge on that member.
+    MuteChanged mute_changed = 7;
+    // Sent when an admin mutes/unmutes a whole channel (see
+    // Admin.SetChannelMute), and on Join / ChangeFrequency to deliver
+    // the current channel's mute state. Broadcast to every member of the
+    // affected frequency. The client compares `frequency` against its
+    // current tuning: while its channel is muted it can't transmit and
+    // the PTT button shows the disabled "unable to talk" cue.
+    ChannelMuteChanged channel_mute_changed = 8;
+    // Sent to a member when an admin grants or revokes their *priority
+    // speaker* standing (see Admin.SetPriority), and on Join /
+    // ChangeFrequency to deliver current standing. Addressed only to the
+    // subject (priority is a per-session, per-channel grant). The client
+    // tracks it so a priority speaker on a muted (No-Talk) channel keeps
+    // a live PTT button instead of the "unable to talk" cue — they are
+    // the granted-voice exception. `frequency` is the channel the grant
+    // is bound to; `granted = false` clears it.
+    PriorityChanged priority_changed = 9;
+    // Sent to a client when an admin grants or revokes their *global
+    // broadcast* capability (Admin.SetGlobalBroadcast), and on Join /
+    // ChangeFrequency to deliver current standing. Addressed only to the
+    // subject. When granted, the client's dedicated broadcast PTT binding
+    // becomes active; when revoked it is silently disabled. If the client
+    // is mid-broadcast when revoked, the broadcast is torn down
+    // server-side before this event is delivered.
+    BroadcastCapabilityChanged broadcast_capability_changed = 10;
     // Sent when a frequency's duplex mode changes, or to deliver the
     // current mode on Join / ChangeFrequency. HALF (the default) is the
     // classic single-floor walkie-talkie; FULL lets several members
     // transmit at once and clients mix the streams. The client compares
-    // `frequency` against its current tuning before applying.
-    ChannelModeChanged channel_mode_changed = 7;
+    // `frequency` against its current tuning before applying. (Field 11:
+    // appended after the mute/priority/broadcast events that landed on
+    // main while this branch was in flight.)
+    ChannelModeChanged channel_mode_changed = 11;
   }
 }
 
@@ -157,6 +287,38 @@ message ChannelNameChanged {
   string name = 2;
 }
 
+// A member's server-side mute state changed (see Admin.SetMute).
+message MuteChanged {
+  string client_id = 1;
+  bool muted = 2;
+}
+
+// A channel's mute state changed (see Admin.SetChannelMute), or the
+// current state delivered on Join / ChangeFrequency.
+message ChannelMuteChanged {
+  string frequency = 1;
+  bool muted = 2;
+}
+
+// A member's priority-speaker standing changed (see Admin.SetPriority),
+// or current standing delivered on Join / ChangeFrequency. Addressed to
+// the subject only. `frequency` is the channel the grant is bound to
+// (empty when revoked).
+message PriorityChanged {
+  string client_id = 1;
+  string frequency = 2;
+  bool granted = 3;
+}
+
+// A member's global-broadcast capability changed (see Admin.SetGlobalBroadcast),
+// or current standing delivered on Join / ChangeFrequency. Addressed to the
+// subject only. When granted, the dedicated broadcast PTT binding becomes
+// active; when revoked it is silently disabled.
+message BroadcastCapabilityChanged {
+  string client_id = 1;
+  bool granted = 2;
+}
+
 // The duplex mode of a frequency channel. Sent on Join/ChangeFrequency
 // backfill and whenever the admin changes a channel's mode.
 message ChannelModeChanged {
@@ -177,6 +339,25 @@ message PttEvent {
   // to false, so older clients simply treat priority traffic as a
   // normal take-floor.
   bool priority = 4;
+  // True when this PTT event belongs to a *global broadcast* session —
+  // the broadcaster has simultaneously seized every frequency room.
+  // Set by the server on the fan-out to all listeners; always false on
+  // events sent client->server (the server is the sole arbiter, exactly
+  // like `priority`). Clients use this to play the distinct broadcast
+  // roger cue instead of the normal or priority roger. Always false on
+  // release (pressed = false is still flagged broadcast=true during a
+  // broadcast teardown so clients can clear the broadcast indicator).
+  bool broadcast = 5;
+  // The talker's callsign (display name) at the time of the event.
+  // Populated by the server primarily for *global broadcast* events
+  // (broadcast = true), where listeners on other frequencies don't have
+  // the broadcaster in their local roster and so can't resolve the name
+  // from client_id alone. Empty when the server didn't supply a name
+  // (e.g. ordinary per-room PTT, where every recipient already has the
+  // talker in roster); clients fall back to their roster lookup, then to
+  // the client_id, when this is empty. Additive/optional — older clients
+  // ignore it.
+  string display_name = 6;
 }
 
 message PttAck {}

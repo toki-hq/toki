@@ -39,6 +39,16 @@ use tokio::sync::Mutex;
 const MAX_REGISTERS_PER_WINDOW: u32 = 5;
 const REGISTER_WINDOW: Duration = Duration::from_secs(60);
 
+/// Identity-challenge nonces any single IP may request in
+/// `CHALLENGE_WINDOW`. Looser than the register cap because a client
+/// fetches a challenge once per connect (and the endpoint is cheaper than
+/// register), but still bounds the amplification of an attacker hammering
+/// it for free self-expiring blobs — 30/min caps a single-IP flood at
+/// ~0.5/s instead of line rate. Tracked independently of the register
+/// counter so a challenge never eats into the register budget.
+const MAX_CHALLENGES_PER_WINDOW: u32 = 30;
+const CHALLENGE_WINDOW: Duration = Duration::from_secs(60);
+
 /// First auth-failure delay. Doubles on each consecutive failure
 /// until capped at `MAX_BACKOFF`.
 const BACKOFF_INITIAL: Duration = Duration::from_millis(200);
@@ -55,6 +65,12 @@ struct Entry {
     register_count: u32,
     /// When the current window opened.
     register_window_start: Instant,
+    /// Number of identity-challenge nonces issued in the current window.
+    /// Independent of the register counter — fetching a challenge must
+    /// not consume the (much tighter) register budget.
+    challenge_count: u32,
+    /// When the current challenge window opened.
+    challenge_window_start: Instant,
     /// Consecutive auth failures since the last success.
     auth_failures: u32,
     /// Earliest instant the next register is allowed. `None` means
@@ -70,6 +86,8 @@ impl Entry {
         Self {
             register_count: 0,
             register_window_start: now,
+            challenge_count: 0,
+            challenge_window_start: now,
             auth_failures: 0,
             backoff_until: None,
             last_touched: now,
@@ -131,6 +149,34 @@ impl IpThrottle {
             return Err(ThrottleReject::RateLimited);
         }
         entry.register_count += 1;
+        Ok(())
+    }
+
+    /// Gate an identity-challenge request. Independent per-IP cap on its
+    /// own window — does **not** touch the register counter or the
+    /// auth-failure backoff (issuing a stateless nonce is neither a
+    /// register nor an authentication). Returns `Ok(())` to proceed or
+    /// `Err(ThrottleReject::RateLimited)` once the IP exceeds
+    /// `MAX_CHALLENGES_PER_WINDOW`.
+    pub async fn try_challenge(&self, ip: IpAddr) -> Result<(), ThrottleReject> {
+        let now = Instant::now();
+        let mut map = self.inner.lock().await;
+
+        // Same opportunistic idle prune as try_register — keeps the map
+        // bounded to active IPs without a dedicated sweeper.
+        map.retain(|_, e| now.duration_since(e.last_touched) < IDLE_EVICTION);
+
+        let entry = map.entry(ip).or_insert_with(|| Entry::new(now));
+        entry.last_touched = now;
+
+        if now.duration_since(entry.challenge_window_start) >= CHALLENGE_WINDOW {
+            entry.challenge_window_start = now;
+            entry.challenge_count = 0;
+        }
+        if entry.challenge_count >= MAX_CHALLENGES_PER_WINDOW {
+            return Err(ThrottleReject::RateLimited);
+        }
+        entry.challenge_count += 1;
         Ok(())
     }
 
@@ -222,5 +268,70 @@ mod tests {
         // (we can't sleep through MAX_BACKOFF in a test).
         t.record_auth_success(ip(4)).await;
         t.try_register(ip(4)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn allows_under_challenge_cap_then_rejects() {
+        let t = IpThrottle::new();
+        for _ in 0..MAX_CHALLENGES_PER_WINDOW {
+            t.try_challenge(ip(5)).await.unwrap();
+        }
+        let err = t.try_challenge(ip(5)).await.unwrap_err();
+        assert!(matches!(err, ThrottleReject::RateLimited));
+    }
+
+    #[tokio::test]
+    async fn challenge_cap_is_per_ip() {
+        let t = IpThrottle::new();
+        for _ in 0..MAX_CHALLENGES_PER_WINDOW {
+            t.try_challenge(ip(6)).await.unwrap();
+        }
+        // A different IP has its own fresh budget.
+        t.try_challenge(ip(7)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn challenge_and_register_budgets_are_independent() {
+        let t = IpThrottle::new();
+        // Exhaust the register budget for an IP.
+        for _ in 0..MAX_REGISTERS_PER_WINDOW {
+            t.try_register(ip(8)).await.unwrap();
+        }
+        assert!(matches!(
+            t.try_register(ip(8)).await.unwrap_err(),
+            ThrottleReject::RateLimited
+        ));
+        // Challenges from the same IP are unaffected — a connect's
+        // challenge must not be collateral damage of the register cap,
+        // and (conversely) challenges don't burn register slots.
+        for _ in 0..MAX_CHALLENGES_PER_WINDOW {
+            t.try_challenge(ip(8)).await.unwrap();
+        }
+
+        // And the reverse: exhausting challenges doesn't block registers
+        // for a *fresh* IP's register budget.
+        for _ in 0..MAX_CHALLENGES_PER_WINDOW {
+            t.try_challenge(ip(9)).await.unwrap();
+        }
+        assert!(matches!(
+            t.try_challenge(ip(9)).await.unwrap_err(),
+            ThrottleReject::RateLimited
+        ));
+        t.try_register(ip(9)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn challenge_does_not_arm_or_observe_backoff() {
+        let t = IpThrottle::new();
+        // An auth failure arms the register backoff…
+        t.try_register(ip(10)).await.unwrap();
+        t.record_auth_failure(ip(10)).await;
+        assert!(matches!(
+            t.try_register(ip(10)).await.unwrap_err(),
+            ThrottleReject::Backoff
+        ));
+        // …but the challenge gate ignores backoff entirely (it's not an
+        // auth step), so the client can still fetch a fresh nonce.
+        t.try_challenge(ip(10)).await.unwrap();
     }
 }

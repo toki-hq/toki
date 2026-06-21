@@ -101,6 +101,25 @@ async fn main() -> anyhow::Result<()> {
     // the persisted `channel_modes` from sqlite right after it opens.
     let duplex_modes = state::shared_duplex_modes(std::collections::HashMap::new());
 
+    // Channel-wide mutes. Same bootstrap dance as channel_names: starts
+    // empty, hydrated from the `channel_mutes` table by the admin task,
+    // read by the signaling speak-gate on every PTT press.
+    let channel_mutes = state::shared_channel_mutes(std::collections::HashSet::new());
+
+    // Client identities seen by this server. Same bootstrap dance:
+    // starts empty, hydrated from the `identities` table by the admin
+    // task. Signaling's Register merges into the map and pushes each
+    // change onto the channel below; the admin task drains it into
+    // the db (mirroring the audit pipeline's producer/writer split).
+    let identities = state::shared_identities(std::collections::HashMap::new());
+    let (identity_tx, identity_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, state::IdentityRecord)>();
+
+    // Active identity bans. Hydrated from the `bans` table by the admin
+    // task; written by the admin ban/lift RPCs, read by the signaling
+    // register gate.
+    let bans = state::shared_bans(std::collections::HashMap::new());
+
     // Runtime-mutable server settings. Starts at hardcoded defaults
     // (same values the code shipped before this lived in the db);
     // the admin task, if enabled, will overwrite from sqlite right
@@ -169,6 +188,10 @@ async fn main() -> anyhow::Result<()> {
         server_config.clone(),
         channel_names.clone(),
         duplex_modes.clone(),
+        channel_mutes.clone(),
+        identities.clone(),
+        identity_rx,
+        bans.clone(),
         byte_counters.clone(),
         audit_tx,
         audit_rx,
@@ -199,6 +222,10 @@ async fn main() -> anyhow::Result<()> {
                 server_config.clone(),
                 channel_names,
                 duplex_modes,
+                channel_mutes,
+                identities,
+                identity_tx,
+                bans,
                 audit_tx_sig,
             )
             .max_decoding_message_size(8 * 1024),

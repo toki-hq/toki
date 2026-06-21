@@ -110,6 +110,14 @@ pub type PlaybackBuf = Arc<Mutex<Mixer>>;
 pub struct AudioHandle {
     pub mic_rx: UnboundedReceiver<Vec<i16>>,
     pub playback: PlaybackBuf,
+    /// A *second* playback ring for locally-generated effect audio —
+    /// roger beeps, priority/preempt cues, the output test tone. Mixed
+    /// into the output alongside `playback`, but kept separate so the
+    /// voice path's latency catch-up (`push_voice`, which trims the voice
+    /// ring to bound mouth-to-ear delay) can never discard a beep that's
+    /// mid-playback. Fed via [`push_playback`]; voice uses [`push_voice`]
+    /// on `playback`.
+    pub effects: PlaybackBuf,
     /// Device names visible to cpal at startup. We don't auto-refresh —
     /// the user can restart the app if they hot-plug new hardware.
     pub devices: AudioDevices,
@@ -289,6 +297,27 @@ pub const PRIORITY_ROGER: &[BeepStep] = &[
     BeepStep::Tone {
         freq_hz: C6,
         duration_ms: 170,
+    },
+];
+
+/// Three-step falling cue heard fleet-wide when a *global broadcast*
+/// begins — distinct from the two-tone PRIORITY_ROGER (rising G5→C6) and
+/// the PREEMPTED_BUMP (C6→C5). Signals "all-hands broadcast" to every
+/// listener regardless of their channel. C6 (80 ms) → G5 (80 ms) → C5
+/// (120 ms) gives an unmistakable descending three-note pattern that reads
+/// as "attention — all stations" without being confused for a priority cue.
+pub const BROADCAST_ROGER: &[BeepStep] = &[
+    BeepStep::Tone {
+        freq_hz: C6,
+        duration_ms: 80,
+    },
+    BeepStep::Tone {
+        freq_hz: G5,
+        duration_ms: 80,
+    },
+    BeepStep::Tone {
+        freq_hz: C5,
+        duration_ms: 120,
     },
 ];
 
@@ -515,17 +544,16 @@ impl AudioLevels {
         }
     }
 
-    /// Mic-side peak in `[0.0, 1.0]`. Currently unused at the UI
-    /// surface (the histogram reads the spectrum ring directly), but
-    /// kept around for future affordances like a Settings VU meter.
-    #[allow(dead_code)]
+    /// Mic-side peak in `[0.0, 1.0]`. Drives the INPUT LEVEL VU bar in
+    /// Settings → AUDIO. The capture stream runs continuously, so this
+    /// reflects live mic input regardless of PTT / connection state.
     pub fn input(&self) -> f32 {
         f32::from_bits(self.input.load(Ordering::Relaxed))
     }
 
-    /// Playback-side peak in `[0.0, 1.0]`. Same future-use story as
-    /// `input` above.
-    #[allow(dead_code)]
+    /// Playback-side peak in `[0.0, 1.0]`. Drives the OUTPUT LEVEL VU bar
+    /// in Settings → AUDIO — moves while the test tone, roger beeps, or
+    /// incoming voice play out the selected device.
     pub fn output(&self) -> f32 {
         f32::from_bits(self.output.load(Ordering::Relaxed))
     }
@@ -670,8 +698,14 @@ pub fn spawn(
     initial_balance: f32,
 ) -> Result<AudioHandle> {
     let (mic_tx, mic_rx) = unbounded_channel::<Vec<i16>>();
-    // Per-source playback mixer (one jitter buffer per talker + beeps).
+    // Per-source playback mixer: one jitter buffer per talker (supports
+    // full-duplex concurrent senders) plus LOCAL_SENDER_ID for beeps.
     let playback: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
+    // Effects ring (beeps / cues / test tone). Kept separate from the
+    // voice mixer so the voice path's latency catch-up (push_voice) can
+    // never discard a beep that's mid-playback. Also uses Mixer so
+    // push_playback routes beeps to LOCAL_SENDER_ID without type conflicts.
+    let effects: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<AudioCmd>();
 
     let (init_tx, init_rx) = std::sync::mpsc::channel::<AudioDevices>();
@@ -682,6 +716,7 @@ pub fn spawn(
 
     let mic_tx_for_thread = mic_tx;
     let playback_for_thread = playback.clone();
+    let effects_for_thread = effects.clone();
     let in_gain_for_thread = gains.input_atomic();
     let out_gain_for_thread = gains.output_atomic();
     let out_balance_for_thread = gains.balance_atomic();
@@ -708,6 +743,7 @@ pub fn spawn(
                 &host,
                 initial_output.as_deref(),
                 &playback_for_thread,
+                &effects_for_thread,
                 &out_gain_for_thread,
                 &out_balance_for_thread,
                 &out_level_for_thread,
@@ -740,6 +776,7 @@ pub fn spawn(
                             &host,
                             name.as_deref(),
                             &playback_for_thread,
+                            &effects_for_thread,
                             &out_gain_for_thread,
                             &out_balance_for_thread,
                             &out_level_for_thread,
@@ -760,6 +797,7 @@ pub fn spawn(
     Ok(AudioHandle {
         mic_rx,
         playback,
+        effects,
         devices,
         control: AudioControl { tx: cmd_tx },
         gains,
@@ -849,6 +887,7 @@ fn open_output_for(
     host: &cpal::Host,
     name: Option<&str>,
     playback: &PlaybackBuf,
+    effects: &PlaybackBuf,
     gain: &Arc<AtomicU32>,
     balance: &Arc<AtomicU32>,
     level: &Arc<AtomicU32>,
@@ -859,6 +898,7 @@ fn open_output_for(
     let stream = match open_output(
         &device,
         playback.clone(),
+        effects.clone(),
         gain.clone(),
         balance.clone(),
         level.clone(),
@@ -969,9 +1009,11 @@ fn open_input(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_output(
     dev: &cpal::Device,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     gain: Arc<AtomicU32>,
     balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
@@ -982,6 +1024,7 @@ fn open_output(
         &PREFERRED_OUTPUT,
         2,
         playback.clone(),
+        effects.clone(),
         gain.clone(),
         balance.clone(),
         level.clone(),
@@ -1009,13 +1052,13 @@ fn open_output(
 
     match format {
         cpal::SampleFormat::F32 => build_output_stream::<f32>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         cpal::SampleFormat::I16 => build_output_stream::<i16>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         cpal::SampleFormat::U16 => build_output_stream::<u16>(
-            dev, &cfg, channels, playback, gain, balance, level, spectrum,
+            dev, &cfg, channels, playback, effects, gain, balance, level, spectrum,
         ),
         other => Err(anyhow!("unsupported output sample format: {other:?}")),
     }
@@ -1168,12 +1211,12 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn build_output_stream<T>(
     dev: &cpal::Device,
     cfg: &cpal::StreamConfig,
     channels: u16,
     playback: PlaybackBuf,
+    effects: PlaybackBuf,
     gain: Arc<AtomicU32>,
     balance: Arc<AtomicU32>,
     level: Arc<AtomicU32>,
@@ -1187,11 +1230,18 @@ where
     // The playback ring stores wire-rate (48 kHz) samples; we resample
     // to the device's native rate as we drain. Mirror of the input
     // path — keeps the ring's 10-ms-per-480-samples timing intact and
-    // device-rate concerns isolated to the callback.
+    // device-rate concerns isolated to the callback. The effects ring
+    // (beeps / cues / test tone) is drained + resampled the same way by a
+    // parallel set of buffers, then summed into the voice stream so the
+    // two mix at the output. Each ring carries its own resampler state
+    // since they fill independently.
     let mut resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
+    let mut fx_resampler = LinearResampler::new(SAMPLE_RATE_HZ, dev_rate);
     let mut wire_chunk: Vec<i16> = Vec::with_capacity(512);
     let mut resampled: Vec<i16> = Vec::with_capacity(1024);
     let mut ready: std::collections::VecDeque<i16> =
+        std::collections::VecDeque::with_capacity(4096);
+    let mut fx_ready: std::collections::VecDeque<i16> =
         std::collections::VecDeque::with_capacity(4096);
     // Hoisted so we don't reallocate inside the audio-thread callback
     // every ~10 ms. Same trick the input builder uses.
@@ -1212,14 +1262,19 @@ where
             let stereo = ch == 2;
             let frames_needed = data.len() / ch;
 
-            // Refill `ready` from the wire-rate playback ring, resampling
-            // as we go. We pull chunks rather than one sample at a time
-            // so the resampler's per-call fixed costs amortize well.
+            // Refill `ready` (voice mixer) and `fx_ready` (effects mixer)
+            // from their wire-rate Mixers, resampling as we go. The voice
+            // mixer sums all concurrent talkers per chunk (full-duplex:
+            // several peers; half-duplex: one). The effects mixer holds
+            // beeps / cues via LOCAL_SENDER_ID. We pull chunks rather than
+            // one sample at a time so the resampler's per-call fixed costs
+            // amortize well.
             while ready.len() < frames_needed {
                 wire_chunk.clear();
                 {
                     // Mix one chunk across all active sources (peers +
-                    // local beeps). On half-duplex this is a single buffer.
+                    // local beeps on the voice ring). On half-duplex this
+                    // degrades to a single buffer; full-duplex sums all.
                     let mut mixer = playback.lock().unwrap();
                     mixer.mix_into(&mut wire_chunk, 256);
                 }
@@ -1230,17 +1285,32 @@ where
                 resampler.process(&wire_chunk, &mut resampled);
                 ready.extend(resampled.iter().copied());
             }
+            while fx_ready.len() < frames_needed {
+                wire_chunk.clear();
+                {
+                    let mut fx_mixer = effects.lock().unwrap();
+                    fx_mixer.mix_into(&mut wire_chunk, 256);
+                }
+                if wire_chunk.is_empty() {
+                    break; // effects ring dry
+                }
+                resampled.clear();
+                fx_resampler.process(&wire_chunk, &mut resampled);
+                fx_ready.extend(resampled.iter().copied());
+            }
 
-            // Pop one mono sample, replicate it across N output channels.
-            // Track the |max| f32 amplitude we wrote so the UI can
-            // render a real waveform during RX. Empty pops contribute
-            // 0 to the peak, so silence decays naturally via
-            // `blend_level`. Same loop also fills the spectrum ring
-            // with the post-gain mono `f32`s.
+            // Pop one voice + one effect sample, sum them (a beep mixed
+            // over incoming voice), replicate across N output channels.
+            // Track the |max| f32 amplitude we wrote so the UI can render
+            // a real waveform during RX. Empty pops contribute 0, so
+            // silence decays naturally via `blend_level`. Same loop also
+            // fills the spectrum ring with the post-gain mono `f32`s.
             let mut peak: f32 = 0.0;
             spec_samples.clear();
             for frame in data.chunks_mut(ch) {
-                let mono = ready.pop_front().unwrap_or(0);
+                let voice = ready.pop_front().unwrap_or(0) as i32;
+                let fx = fx_ready.pop_front().unwrap_or(0) as i32;
+                let mono = (voice + fx).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
                 let f = ((mono as f32 / i16::MAX as f32) * g).clamp(-1.0, 1.0);
                 let abs = f.abs();
                 if abs > peak {
@@ -1538,6 +1608,33 @@ mod beep_tests {
     }
 
     #[test]
+    fn effects_ring_survives_voice_catch_up() {
+        // The roger-beep bug: a 500 ms beep lives ~10× longer than the
+        // voice ring's 120 ms catch-up cap, so when voice flowed right
+        // after a take/clear event, `push_voice`'s trim wiped the beep
+        // before it played. The fix routes beeps to a *separate* ring;
+        // this pins the guarantee that voice trimming never touches it.
+        let effects: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
+        let voice: PlaybackBuf = Arc::new(Mutex::new(Mixer::default()));
+        // A full 500 ms beep on the effects ring (via LOCAL_SENDER_ID).
+        let beep_len = (SAMPLE_RATE_HZ / 2) as usize;
+        push_playback(&effects, &vec![9i16; beep_len]);
+        // Now slam voice past its hard ceiling, which trims the *voice*
+        // ring hard.
+        push_voice(&voice, 1, &vec![3i16; VOICE_MAX_SAMPLES + 8000]);
+        // The voice ring snapped back to its target; the beep is fully
+        // intact and unchanged on its own ring.
+        assert_eq!(
+            voice.lock().unwrap().sender_buf(1).unwrap().len(),
+            VOICE_TARGET_SAMPLES
+        );
+        let fx = effects.lock().unwrap();
+        let fx_buf = fx.sender_buf(LOCAL_SENDER_ID).unwrap();
+        assert_eq!(fx_buf.len(), beep_len, "beep must not be trimmed by voice");
+        assert!(fx_buf.iter().all(|&s| s == 9), "beep samples unchanged");
+    }
+
+    #[test]
     fn beep_pattern_lengths_match_durations() {
         // 100 ms at 48 kHz = 4800 samples per step.
         let steps = vec![
@@ -1652,5 +1749,39 @@ mod beep_tests {
         assert_eq!(bp.volume(), 0.25);
         bp.set_volume(0.75);
         assert_eq!(bp.volume(), 0.75);
+    }
+
+    #[test]
+    fn broadcast_roger_is_distinct_from_priority_roger() {
+        // BROADCAST_ROGER and PRIORITY_ROGER must sound different so
+        // listeners can distinguish "all-hands broadcast" from "priority
+        // speaker took the floor". Verify they differ in step count or
+        // in at least one step's frequency.
+        let br_len = BROADCAST_ROGER.len();
+        let pr_len = PRIORITY_ROGER.len();
+        let same_length = br_len == pr_len;
+        if same_length {
+            // If they happen to have the same step count, at least one
+            // step must differ so the two patterns are audibly distinct.
+            let all_match = BROADCAST_ROGER
+                .iter()
+                .zip(PRIORITY_ROGER.iter())
+                .all(|(b, p)| {
+                    matches!(
+                        (b, p),
+                        (
+                            BeepStep::Tone { freq_hz: bf, .. },
+                            BeepStep::Tone { freq_hz: pf, .. }
+                        ) if (bf - pf).abs() < 1e-3
+                    )
+                });
+            assert!(
+                !all_match,
+                "BROADCAST_ROGER and PRIORITY_ROGER must differ in at least one step"
+            );
+        } else {
+            // Different lengths → already distinct.
+            assert_ne!(br_len, pr_len);
+        }
     }
 }

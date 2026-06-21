@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file admin.proto.
  */
 export const file_admin: GenFile = /*@__PURE__*/
-  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSKmAwoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQSQAoNY2hhbm5lbF9tb2RlcxgIIAMoCzIpLnRva2kuYWRtaW4udjEuU25hcHNob3QuQ2hhbm5lbE1vZGVzRW50cnkaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ARozChFDaGFubmVsTW9kZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKA06AjgBImEKBFJvb20SEQoJZnJlcXVlbmN5GAEgASgJEhMKBmhvbGRlchgCIAEoCUgAiAEBEiYKB21lbWJlcnMYAyADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlckIJCgdfaG9sZGVyIlQKBk1lbWJlchIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkSFgoOY29ubmVjdGVkX3NlY3MYAyABKAQSEAoIcHJpb3JpdHkYBCABKAgiagoKU2VydmVySW5mbxIPCgd2ZXJzaW9uGAEgASgJEhIKCmFkbWluX2JpbmQYAiABKAkSFwoPc3RhcnRlZF9hdF91bml4GAMgASgEEh4KFnRvbWxfcGFzc3dvcmRfb3ZlcnJpZGUYBCABKAgi1AEKDFNlcnZlckNvbmZpZxITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SFQoNZ3JwY19wYXNzd29yZBgEIAEoCRIZChFncnBjX3Bhc3N3b3JkX3NldBgFIAEoCBIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAYgASgIEhUKDWF1ZGlvX3F1YWxpdHkYByABKA0SGwoTZnVsbF9kdXBsZXhfZW5hYmxlZBgIIAEoCCIOCgxXYXRjaFJlcXVlc3QiFgoUR2V0U2VydmVySW5mb1JlcXVlc3QiGAoWR2V0U2VydmVyQ29uZmlnUmVxdWVzdCKvAQoZVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBITCgtzZXJ2ZXJfbmFtZRgBIAEoCRIRCgltYXhfcGVlcnMYAiABKA0SFgoOaWRsZV9raWNrX3NlY3MYAyABKA0SHgoWbmFtZWRfY2hhbm5lbHNfZW5hYmxlZBgEIAEoCBIVCg1hdWRpb19xdWFsaXR5GAUgASgNEhsKE2Z1bGxfZHVwbGV4X2VuYWJsZWQYBiABKAgiLAoYU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0EhAKCHBhc3N3b3JkGAEgASgJIhsKGVNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2UiPgoVQ2hhbmdlUGFzc3dvcmRSZXF1ZXN0Eg8KB2N1cnJlbnQYASABKAkSFAoMbmV3X3Bhc3N3b3JkGAIgASgJIhgKFkNoYW5nZVBhc3N3b3JkUmVzcG9uc2UiHwoRS2lja0NsaWVudFJlcXVlc3QSCgoCaWQYASABKAkiFAoSS2lja0NsaWVudFJlc3BvbnNlIjIKEU1vdmVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhEKCWZyZXF1ZW5jeRgCIAEoCSIUChJNb3ZlQ2xpZW50UmVzcG9uc2UiNwoTUmVuYW1lQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCRIUCgxkaXNwbGF5X25hbWUYAiABKAkiFgoUUmVuYW1lQ2xpZW50UmVzcG9uc2UiLwoSU2V0UHJpb3JpdHlSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhUKE1NldFByaW9yaXR5UmVzcG9uc2UiOAoVU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRuYW1lGAIgASgJIhgKFlNldENoYW5uZWxOYW1lUmVzcG9uc2UiHQobQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXF1ZXN0Ih4KHENsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2UiOAoVU2V0Q2hhbm5lbE1vZGVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRIMCgRtb2RlGAIgASgNIhgKFlNldENoYW5uZWxNb2RlUmVzcG9uc2UieAoMTWV0cmljU2FtcGxlEg8KB3RzX3VuaXgYASABKAQSGAoQcnhfYnl0ZXNfcGVyX3NlYxgCIAEoBBIYChB0eF9ieXRlc19wZXJfc2VjGAMgASgEEg0KBXVzZXJzGAQgASgNEhQKDHRyYW5zbWl0dGluZxgFIAEoDSI+Cg5NZXRyaWNzUmVxdWVzdBIsCgZ3aW5kb3cYASABKA4yHC50b2tpLmFkbWluLnYxLk1ldHJpY3NXaW5kb3ciPwoPTWV0cmljc1Jlc3BvbnNlEiwKB3NhbXBsZXMYASADKAsyGy50b2tpLmFkbWluLnYxLk1ldHJpY1NhbXBsZSIYChZHZXRTZXJ2ZXJIZWFsdGhSZXF1ZXN0IocBCgxTZXJ2ZXJIZWFsdGgSEwoLY3B1X3BlcmNlbnQYASABKAESFgoObWVtX3VzZWRfYnl0ZXMYAiABKAQSFwoPbWVtX3RvdGFsX2J5dGVzGAMgASgEEhcKD2Rpc2tfdXNlZF9ieXRlcxgEIAEoBBIYChBkaXNrX3RvdGFsX2J5dGVzGAUgASgEImkKCkF1ZGl0RW50cnkSCgoCaWQYASABKAQSDwoHdHNfdW5peBgCIAEoBBIMCgRraW5kGAMgASgJEg0KBWFjdG9yGAQgASgJEhEKCWZyZXF1ZW5jeRgFIAEoCRIOCgZkZXRhaWwYBiABKAkiXwoPQXVkaXRMb2dSZXF1ZXN0EioKBmZpbHRlchgBIAEoDjIaLnRva2kuYWRtaW4udjEuQXVkaXRGaWx0ZXISDQoFbGltaXQYAiABKA0SEQoJYmVmb3JlX2lkGAMgASgEIk0KEEF1ZGl0TG9nUmVzcG9uc2USKgoHZW50cmllcxgBIAMoCzIZLnRva2kuYWRtaW4udjEuQXVkaXRFbnRyeRINCgV0b3RhbBgCIAEoBCpZCg1NZXRyaWNzV2luZG93EhcKE01FVFJJQ1NfV0lORE9XX0hPVVIQABIWChJNRVRSSUNTX1dJTkRPV19EQVkQARIXChNNRVRSSUNTX1dJTkRPV19XRUVLEAIqdAoLQXVkaXRGaWx0ZXISFAoQQVVESVRfRklMVEVSX0FMTBAAEhYKEkFVRElUX0ZJTFRFUl9BRE1JThABEhwKGEFVRElUX0ZJTFRFUl9DT05ORUNUSU9OUxACEhkKFUFVRElUX0ZJTFRFUl9TRUNVUklUWRADMowLCgVBZG1pbhI/CgVXYXRjaBIbLnRva2kuYWRtaW4udjEuV2F0Y2hSZXF1ZXN0GhcudG9raS5hZG1pbi52MS5TbmFwc2hvdDABEk8KDUdldFNlcnZlckluZm8SIy50b2tpLmFkbWluLnYxLkdldFNlcnZlckluZm9SZXF1ZXN0GhkudG9raS5hZG1pbi52MS5TZXJ2ZXJJbmZvElUKD0dldFNlcnZlckNvbmZpZxIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVyQ29uZmlnUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVyQ29uZmlnElsKElVwZGF0ZVNlcnZlckNvbmZpZxIoLnRva2kuYWRtaW4udjEuVXBkYXRlU2VydmVyQ29uZmlnUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVyQ29uZmlnEmYKEVNldFNlcnZlclBhc3N3b3JkEicudG9raS5hZG1pbi52MS5TZXRTZXJ2ZXJQYXNzd29yZFJlcXVlc3QaKC50b2tpLmFkbWluLnYxLlNldFNlcnZlclBhc3N3b3JkUmVzcG9uc2USXQoOQ2hhbmdlUGFzc3dvcmQSJC50b2tpLmFkbWluLnYxLkNoYW5nZVBhc3N3b3JkUmVxdWVzdBolLnRva2kuYWRtaW4udjEuQ2hhbmdlUGFzc3dvcmRSZXNwb25zZRJRCgpLaWNrQ2xpZW50EiAudG9raS5hZG1pbi52MS5LaWNrQ2xpZW50UmVxdWVzdBohLnRva2kuYWRtaW4udjEuS2lja0NsaWVudFJlc3BvbnNlElEKCk1vdmVDbGllbnQSIC50b2tpLmFkbWluLnYxLk1vdmVDbGllbnRSZXF1ZXN0GiEudG9raS5hZG1pbi52MS5Nb3ZlQ2xpZW50UmVzcG9uc2USVwoMUmVuYW1lQ2xpZW50EiIudG9raS5hZG1pbi52MS5SZW5hbWVDbGllbnRSZXF1ZXN0GiMudG9raS5hZG1pbi52MS5SZW5hbWVDbGllbnRSZXNwb25zZRJUCgtTZXRQcmlvcml0eRIhLnRva2kuYWRtaW4udjEuU2V0UHJpb3JpdHlSZXF1ZXN0GiIudG9raS5hZG1pbi52MS5TZXRQcmlvcml0eVJlc3BvbnNlEl0KDlNldENoYW5uZWxOYW1lEiQudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlcXVlc3QaJS50b2tpLmFkbWluLnYxLlNldENoYW5uZWxOYW1lUmVzcG9uc2USbwoUQ2xlYXJBbGxDaGFubmVsTmFtZXMSKi50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdBorLnRva2kuYWRtaW4udjEuQ2xlYXJBbGxDaGFubmVsTmFtZXNSZXNwb25zZRJdCg5TZXRDaGFubmVsTW9kZRIkLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE1vZGVSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTW9kZVJlc3BvbnNlEksKCkdldE1ldHJpY3MSHS50b2tpLmFkbWluLnYxLk1ldHJpY3NSZXF1ZXN0Gh4udG9raS5hZG1pbi52MS5NZXRyaWNzUmVzcG9uc2USVQoPR2V0U2VydmVySGVhbHRoEiUudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJIZWFsdGhSZXF1ZXN0GhsudG9raS5hZG1pbi52MS5TZXJ2ZXJIZWFsdGgSTgoLR2V0QXVkaXRMb2cSHi50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVxdWVzdBofLnRva2kuYWRtaW4udjEuQXVkaXRMb2dSZXNwb25zZWIGcHJvdG8z");
+  fileDesc("CgthZG1pbi5wcm90bxINdG9raS5hZG1pbi52MSK+AwoIU25hcHNob3QSIgoFcm9vbXMYASADKAsyEy50b2tpLmFkbWluLnYxLlJvb20SJAoFbG9iYnkYAiADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchISCgpnZW5lcmF0aW9uGAMgASgEEhoKEnNlcnZlcl91cHRpbWVfc2VjcxgEIAEoBBJACg1jaGFubmVsX25hbWVzGAUgAygLMikudG9raS5hZG1pbi52MS5TbmFwc2hvdC5DaGFubmVsTmFtZXNFbnRyeRIYChByeF9ieXRlc19wZXJfc2VjGAYgASgEEhgKEHR4X2J5dGVzX3Blcl9zZWMYByABKAQSFgoObXV0ZWRfY2hhbm5lbHMYCCADKAkSQAoNY2hhbm5lbF9tb2RlcxgJIAMoCzIpLnRva2kuYWRtaW4udjEuU25hcHNob3QuQ2hhbm5lbE1vZGVzRW50cnkaMwoRQ2hhbm5lbE5hbWVzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ARozChFDaGFubmVsTW9kZXNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKA06AjgBInAKBFJvb20SEQoJZnJlcXVlbmN5GAEgASgJEhMKBmhvbGRlchgCIAEoCUgAiAEBEiYKB21lbWJlcnMYAyADKAsyFS50b2tpLmFkbWluLnYxLk1lbWJlchINCgVtdXRlZBgEIAEoCEIJCgdfaG9sZGVyIr8CCgZNZW1iZXISCgoCaWQYASABKAkSFAoMZGlzcGxheV9uYW1lGAIgASgJEhYKDmNvbm5lY3RlZF9zZWNzGAMgASgEEhAKCHByaW9yaXR5GAQgASgIEhAKCGlkZW50aXR5GAUgASgJEhcKD2lkZW50aXR5X3B1YmtleRgGIAEoCRIdChVpZGVudGl0eV9tYWNoaW5lX2hhc2gYByABKAkSIAoYaWRlbnRpdHlfZmlyc3Rfc2Vlbl91bml4GAggASgEEg0KBW11dGVkGAkgASgIEg4KBnJ0dF9tcxgKIAEoDRIRCglqaXR0ZXJfbXMYCyABKA0SFgoObG9zc19wY3RfY2VudGkYDCABKA0SFQoNcXVhbGl0eV9mcmVzaBgNIAEoCBIcChRjYW5fZ2xvYmFsX2Jyb2FkY2FzdBgOIAEoCCJqCgpTZXJ2ZXJJbmZvEg8KB3ZlcnNpb24YASABKAkSEgoKYWRtaW5fYmluZBgCIAEoCRIXCg9zdGFydGVkX2F0X3VuaXgYAyABKAQSHgoWdG9tbF9wYXNzd29yZF9vdmVycmlkZRgEIAEoCCKxAgoMU2VydmVyQ29uZmlnEhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIVCg1ncnBjX3Bhc3N3b3JkGAQgASgJEhkKEWdycGNfcGFzc3dvcmRfc2V0GAUgASgIEh4KFm5hbWVkX2NoYW5uZWxzX2VuYWJsZWQYBiABKAgSFQoNYXVkaW9fcXVhbGl0eRgHIAEoDRIYChByZXF1aXJlX2lkZW50aXR5GAggASgIEhgKEHVuaXF1ZV9jYWxsc2lnbnMYCSABKAgSEAoIb3B1c19kdHgYCiABKAgSFQoNb3B1c19mcmFtZV9tcxgLIAEoDRIbChNmdWxsX2R1cGxleF9lbmFibGVkGAwgASgIIg4KDFdhdGNoUmVxdWVzdCIWChRHZXRTZXJ2ZXJJbmZvUmVxdWVzdCIYChZHZXRTZXJ2ZXJDb25maWdSZXF1ZXN0IowCChlVcGRhdGVTZXJ2ZXJDb25maWdSZXF1ZXN0EhMKC3NlcnZlcl9uYW1lGAEgASgJEhEKCW1heF9wZWVycxgCIAEoDRIWCg5pZGxlX2tpY2tfc2VjcxgDIAEoDRIeChZuYW1lZF9jaGFubmVsc19lbmFibGVkGAQgASgIEhUKDWF1ZGlvX3F1YWxpdHkYBSABKA0SGAoQcmVxdWlyZV9pZGVudGl0eRgGIAEoCBIYChB1bmlxdWVfY2FsbHNpZ25zGAcgASgIEhAKCG9wdXNfZHR4GAggASgIEhUKDW9wdXNfZnJhbWVfbXMYCSABKA0SGwoTZnVsbF9kdXBsZXhfZW5hYmxlZBgKIAEoCCIsChhTZXRTZXJ2ZXJQYXNzd29yZFJlcXVlc3QSEAoIcGFzc3dvcmQYASABKAkiGwoZU2V0U2VydmVyUGFzc3dvcmRSZXNwb25zZSI+ChVDaGFuZ2VQYXNzd29yZFJlcXVlc3QSDwoHY3VycmVudBgBIAEoCRIUCgxuZXdfcGFzc3dvcmQYAiABKAkiGAoWQ2hhbmdlUGFzc3dvcmRSZXNwb25zZSIfChFLaWNrQ2xpZW50UmVxdWVzdBIKCgJpZBgBIAEoCSIUChJLaWNrQ2xpZW50UmVzcG9uc2UiMgoRTW92ZUNsaWVudFJlcXVlc3QSCgoCaWQYASABKAkSEQoJZnJlcXVlbmN5GAIgASgJIhQKEk1vdmVDbGllbnRSZXNwb25zZSI3ChNSZW5hbWVDbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEhQKDGRpc3BsYXlfbmFtZRgCIAEoCSIWChRSZW5hbWVDbGllbnRSZXNwb25zZSIvChJTZXRQcmlvcml0eVJlcXVlc3QSCgoCaWQYASABKAkSDQoFZ3JhbnQYAiABKAgiFQoTU2V0UHJpb3JpdHlSZXNwb25zZSI2ChlTZXRHbG9iYWxCcm9hZGNhc3RSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBWdyYW50GAIgASgIIhwKGlNldEdsb2JhbEJyb2FkY2FzdFJlc3BvbnNlIisKDlNldE11dGVSZXF1ZXN0EgoKAmlkGAEgASgJEg0KBW11dGVkGAIgASgIIhEKD1NldE11dGVSZXNwb25zZSJDChBCYW5DbGllbnRSZXF1ZXN0EgoKAmlkGAEgASgJEg4KBnJlYXNvbhgCIAEoCRITCgtiYW5fbWFjaGluZRgDIAEoCCITChFCYW5DbGllbnRSZXNwb25zZSIRCg9MaXN0QmFuc1JlcXVlc3QiOgoQTGlzdEJhbnNSZXNwb25zZRImCgRiYW5zGAEgAygLMhgudG9raS5hZG1pbi52MS5CYW5SZWNvcmQilwEKCUJhblJlY29yZBIOCgZwdWJrZXkYASABKAkSEgoKZGlzcGxheV9pZBgCIAEoCRIVCg1sYXN0X2NhbGxzaWduGAMgASgJEhQKDG1hY2hpbmVfaGFzaBgEIAEoCRIOCgZyZWFzb24YBSABKAkSEQoJYmFubmVkX2J5GAYgASgJEhYKDmJhbm5lZF9hdF91bml4GAcgASgEIiAKDkxpZnRCYW5SZXF1ZXN0Eg4KBnB1YmtleRgBIAEoCSIRCg9MaWZ0QmFuUmVzcG9uc2UiOQoVU2V0Q2hhbm5lbE11dGVSZXF1ZXN0EhEKCWZyZXF1ZW5jeRgBIAEoCRINCgVtdXRlZBgCIAEoCCIYChZTZXRDaGFubmVsTXV0ZVJlc3BvbnNlIjgKFVNldENoYW5uZWxOYW1lUmVxdWVzdBIRCglmcmVxdWVuY3kYASABKAkSDAoEbmFtZRgCIAEoCSIYChZTZXRDaGFubmVsTmFtZVJlc3BvbnNlIh0KG0NsZWFyQWxsQ2hhbm5lbE5hbWVzUmVxdWVzdCIeChxDbGVhckFsbENoYW5uZWxOYW1lc1Jlc3BvbnNlIjgKFVNldENoYW5uZWxNb2RlUmVxdWVzdBIRCglmcmVxdWVuY3kYASABKAkSDAoEbW9kZRgCIAEoDSIYChZTZXRDaGFubmVsTW9kZVJlc3BvbnNlIngKDE1ldHJpY1NhbXBsZRIPCgd0c191bml4GAEgASgEEhgKEHJ4X2J5dGVzX3Blcl9zZWMYAiABKAQSGAoQdHhfYnl0ZXNfcGVyX3NlYxgDIAEoBBINCgV1c2VycxgEIAEoDRIUCgx0cmFuc21pdHRpbmcYBSABKA0iPgoOTWV0cmljc1JlcXVlc3QSLAoGd2luZG93GAEgASgOMhwudG9raS5hZG1pbi52MS5NZXRyaWNzV2luZG93Ij8KD01ldHJpY3NSZXNwb25zZRIsCgdzYW1wbGVzGAEgAygLMhsudG9raS5hZG1pbi52MS5NZXRyaWNTYW1wbGUiGAoWR2V0U2VydmVySGVhbHRoUmVxdWVzdCKHAQoMU2VydmVySGVhbHRoEhMKC2NwdV9wZXJjZW50GAEgASgBEhYKDm1lbV91c2VkX2J5dGVzGAIgASgEEhcKD21lbV90b3RhbF9ieXRlcxgDIAEoBBIXCg9kaXNrX3VzZWRfYnl0ZXMYBCABKAQSGAoQZGlza190b3RhbF9ieXRlcxgFIAEoBCJpCgpBdWRpdEVudHJ5EgoKAmlkGAEgASgEEg8KB3RzX3VuaXgYAiABKAQSDAoEa2luZBgDIAEoCRINCgVhY3RvchgEIAEoCRIRCglmcmVxdWVuY3kYBSABKAkSDgoGZGV0YWlsGAYgASgJIl8KD0F1ZGl0TG9nUmVxdWVzdBIqCgZmaWx0ZXIYASABKA4yGi50b2tpLmFkbWluLnYxLkF1ZGl0RmlsdGVyEg0KBWxpbWl0GAIgASgNEhEKCWJlZm9yZV9pZBgDIAEoBCJNChBBdWRpdExvZ1Jlc3BvbnNlEioKB2VudHJpZXMYASADKAsyGS50b2tpLmFkbWluLnYxLkF1ZGl0RW50cnkSDQoFdG90YWwYAiABKAQqWQoNTWV0cmljc1dpbmRvdxIXChNNRVRSSUNTX1dJTkRPV19IT1VSEAASFgoSTUVUUklDU19XSU5ET1dfREFZEAESFwoTTUVUUklDU19XSU5ET1dfV0VFSxACKnQKC0F1ZGl0RmlsdGVyEhQKEEFVRElUX0ZJTFRFUl9BTEwQABIWChJBVURJVF9GSUxURVJfQURNSU4QARIcChhBVURJVF9GSUxURVJfQ09OTkVDVElPTlMQAhIZChVBVURJVF9GSUxURVJfU0VDVVJJVFkQAzKHDwoFQWRtaW4SPwoFV2F0Y2gSGy50b2tpLmFkbWluLnYxLldhdGNoUmVxdWVzdBoXLnRva2kuYWRtaW4udjEuU25hcHNob3QwARJPCg1HZXRTZXJ2ZXJJbmZvEiMudG9raS5hZG1pbi52MS5HZXRTZXJ2ZXJJbmZvUmVxdWVzdBoZLnRva2kuYWRtaW4udjEuU2VydmVySW5mbxJVCg9HZXRTZXJ2ZXJDb25maWcSJS50b2tpLmFkbWluLnYxLkdldFNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJbChJVcGRhdGVTZXJ2ZXJDb25maWcSKC50b2tpLmFkbWluLnYxLlVwZGF0ZVNlcnZlckNvbmZpZ1JlcXVlc3QaGy50b2tpLmFkbWluLnYxLlNlcnZlckNvbmZpZxJmChFTZXRTZXJ2ZXJQYXNzd29yZBInLnRva2kuYWRtaW4udjEuU2V0U2VydmVyUGFzc3dvcmRSZXF1ZXN0GigudG9raS5hZG1pbi52MS5TZXRTZXJ2ZXJQYXNzd29yZFJlc3BvbnNlEl0KDkNoYW5nZVBhc3N3b3JkEiQudG9raS5hZG1pbi52MS5DaGFuZ2VQYXNzd29yZFJlcXVlc3QaJS50b2tpLmFkbWluLnYxLkNoYW5nZVBhc3N3b3JkUmVzcG9uc2USUQoKS2lja0NsaWVudBIgLnRva2kuYWRtaW4udjEuS2lja0NsaWVudFJlcXVlc3QaIS50b2tpLmFkbWluLnYxLktpY2tDbGllbnRSZXNwb25zZRJRCgpNb3ZlQ2xpZW50EiAudG9raS5hZG1pbi52MS5Nb3ZlQ2xpZW50UmVxdWVzdBohLnRva2kuYWRtaW4udjEuTW92ZUNsaWVudFJlc3BvbnNlElcKDFJlbmFtZUNsaWVudBIiLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVxdWVzdBojLnRva2kuYWRtaW4udjEuUmVuYW1lQ2xpZW50UmVzcG9uc2USVAoLU2V0UHJpb3JpdHkSIS50b2tpLmFkbWluLnYxLlNldFByaW9yaXR5UmVxdWVzdBoiLnRva2kuYWRtaW4udjEuU2V0UHJpb3JpdHlSZXNwb25zZRJpChJTZXRHbG9iYWxCcm9hZGNhc3QSKC50b2tpLmFkbWluLnYxLlNldEdsb2JhbEJyb2FkY2FzdFJlcXVlc3QaKS50b2tpLmFkbWluLnYxLlNldEdsb2JhbEJyb2FkY2FzdFJlc3BvbnNlEkgKB1NldE11dGUSHS50b2tpLmFkbWluLnYxLlNldE11dGVSZXF1ZXN0Gh4udG9raS5hZG1pbi52MS5TZXRNdXRlUmVzcG9uc2USTgoJQmFuQ2xpZW50Eh8udG9raS5hZG1pbi52MS5CYW5DbGllbnRSZXF1ZXN0GiAudG9raS5hZG1pbi52MS5CYW5DbGllbnRSZXNwb25zZRJLCghMaXN0QmFucxIeLnRva2kuYWRtaW4udjEuTGlzdEJhbnNSZXF1ZXN0Gh8udG9raS5hZG1pbi52MS5MaXN0QmFuc1Jlc3BvbnNlEkgKB0xpZnRCYW4SHS50b2tpLmFkbWluLnYxLkxpZnRCYW5SZXF1ZXN0Gh4udG9raS5hZG1pbi52MS5MaWZ0QmFuUmVzcG9uc2USXQoOU2V0Q2hhbm5lbE11dGUSJC50b2tpLmFkbWluLnYxLlNldENoYW5uZWxNdXRlUmVxdWVzdBolLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE11dGVSZXNwb25zZRJdCg5TZXRDaGFubmVsTmFtZRIkLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE5hbWVSZXF1ZXN0GiUudG9raS5hZG1pbi52MS5TZXRDaGFubmVsTmFtZVJlc3BvbnNlEm8KFENsZWFyQWxsQ2hhbm5lbE5hbWVzEioudG9raS5hZG1pbi52MS5DbGVhckFsbENoYW5uZWxOYW1lc1JlcXVlc3QaKy50b2tpLmFkbWluLnYxLkNsZWFyQWxsQ2hhbm5lbE5hbWVzUmVzcG9uc2USXQoOU2V0Q2hhbm5lbE1vZGUSJC50b2tpLmFkbWluLnYxLlNldENoYW5uZWxNb2RlUmVxdWVzdBolLnRva2kuYWRtaW4udjEuU2V0Q2hhbm5lbE1vZGVSZXNwb25zZRJLCgpHZXRNZXRyaWNzEh0udG9raS5hZG1pbi52MS5NZXRyaWNzUmVxdWVzdBoeLnRva2kuYWRtaW4udjEuTWV0cmljc1Jlc3BvbnNlElUKD0dldFNlcnZlckhlYWx0aBIlLnRva2kuYWRtaW4udjEuR2V0U2VydmVySGVhbHRoUmVxdWVzdBobLnRva2kuYWRtaW4udjEuU2VydmVySGVhbHRoEk4KC0dldEF1ZGl0TG9nEh4udG9raS5hZG1pbi52MS5BdWRpdExvZ1JlcXVlc3QaHy50b2tpLmFkbWluLnYxLkF1ZGl0TG9nUmVzcG9uc2ViBnByb3RvMw");
 
 /**
  * @generated from message toki.admin.v1.Snapshot
@@ -67,11 +67,22 @@ export type Snapshot = Message<"toki.admin.v1.Snapshot"> & {
   txBytesPerSec: bigint;
 
   /**
+   * Canonical frequencies currently muted channel-wide (no one may
+   * transmit). Carries ALL muted channels regardless of occupancy, so
+   * the panel can flag an empty-but-muted frequency. Independent of the
+   * named-channels feature — channel mute is always available.
+   *
+   * @generated from field: repeated string muted_channels = 8;
+   */
+  mutedChannels: string[];
+
+  /**
    * Per-frequency duplex mode (0 = half, 1 = full), keyed by canonical
    * frequency. Only non-default (full) channels appear; an absent key
-   * means half-duplex. Persists independently of room occupancy.
+   * means half-duplex. Persists independently of room occupancy. (Field
+   * 9: appended after muted_channels, which took 8 on main.)
    *
-   * @generated from field: map<string, uint32> channel_modes = 8;
+   * @generated from field: map<string, uint32> channel_modes = 9;
    */
   channelModes: { [key: string]: number };
 };
@@ -105,6 +116,15 @@ export type Room = Message<"toki.admin.v1.Room"> & {
    * @generated from field: repeated toki.admin.v1.Member members = 3;
    */
   members: Member[];
+
+  /**
+   * True when this whole channel is muted (see Admin.SetChannelMute) —
+   * no member tuned here can transmit. Convenience mirror of the
+   * Snapshot.muted_channels entry for this frequency.
+   *
+   * @generated from field: bool muted = 4;
+   */
+  muted: boolean;
 };
 
 /**
@@ -143,6 +163,91 @@ export type Member = Message<"toki.admin.v1.Member"> & {
    * @generated from field: bool priority = 4;
    */
   priority: boolean;
+
+  /**
+   * Human-readable identity string, e.g. "7Q4XF9KB" (8-char base32
+   * fingerprint of the public key). Stable across sessions and
+   * display-name changes — the durable "who".
+   *
+   * @generated from field: string identity = 5;
+   */
+  identity: string;
+
+  /**
+   * Full 32-byte ed25519 public key as lowercase hex — the canonical
+   * identity key, shown in the panel's hover detail and used to
+   * correlate with the identities table / audit log.
+   *
+   * @generated from field: string identity_pubkey = 6;
+   */
+  identityPubkey: string;
+
+  /**
+   * Salted machine-fingerprint hash (lowercase hex) the client
+   * presented at register. Lets an operator spot "fresh identity,
+   * previously-seen machine" after a config wipe. Claimed, not provable.
+   *
+   * @generated from field: string identity_machine_hash = 7;
+   */
+  identityMachineHash: string;
+
+  /**
+   * Unix time this identity was first seen by THIS server (from the
+   * identities table). 0 when absent.
+   *
+   * @generated from field: uint64 identity_first_seen_unix = 8;
+   */
+  identityFirstSeenUnix: bigint;
+
+  /**
+   * Server-side mute (see Admin.SetMute). When true, the server
+   * refuses this session's PTT presses — it stays connected and
+   * hears the channel but cannot transmit. Session-scoped.
+   *
+   * @generated from field: bool muted = 9;
+   */
+  muted: boolean;
+
+  /**
+   * ── Connection quality (client-reported) ────────────────────────
+   * Most-recent metrics the client reported via
+   * Signaling.ReportConnectionQuality. All zero until the first report
+   * lands (a just-connected member, or a pre-0.5.0 client that never
+   * reports). `quality_fresh` distinguishes "0 ms, freshly reported"
+   * from "never reported": false ⇒ show a dash, not green bars.
+   *
+   * @generated from field: uint32 rtt_ms = 10;
+   */
+  rttMs: number;
+
+  /**
+   * @generated from field: uint32 jitter_ms = 11;
+   */
+  jitterMs: number;
+
+  /**
+   * Loss percentage ×100 (250 = 2.50%); see ConnectionQualityReport.
+   *
+   * @generated from field: uint32 loss_pct_centi = 12;
+   */
+  lossPctCenti: number;
+
+  /**
+   * True once at least one quality report has been received for this
+   * session. Gates the panel between "—" and an actual reading.
+   *
+   * @generated from field: bool quality_fresh = 13;
+   */
+  qualityFresh: boolean;
+
+  /**
+   * True when an admin has granted this session the global-broadcast
+   * capability. Session-scoped (cleared on disconnect). The admin panel
+   * shows a "BCAST" badge and a grant/revoke toggle.
+   *
+   * @generated from field: bool can_global_broadcast = 14;
+   */
+  canGlobalBroadcast: boolean;
 };
 
 /**
@@ -239,11 +344,50 @@ export type ServerConfig = Message<"toki.admin.v1.ServerConfig"> & {
   audioQuality: number;
 
   /**
+   * When on, identity-less registers are rejected — every member must
+   * present a verified keypair identity, which makes identity bans
+   * airtight (an evader can no longer connect anonymously). Off by
+   * default so open/legacy deployments keep working unchanged.
+   *
+   * @generated from field: bool require_identity = 8;
+   */
+  requireIdentity: boolean;
+
+  /**
+   * When on (the default), callsigns must be unique across connected
+   * members: a register or rename onto a name already in use is
+   * refused. Case-insensitive. Off restores the legacy behaviour where
+   * duplicate callsigns are allowed.
+   *
+   * @generated from field: bool unique_callsigns = 9;
+   */
+  uniqueCallsigns: boolean;
+
+  /**
+   * When on (the default), clients using Opus enable DTX (discontinuous
+   * transmission): silence is sent as tiny comfort-noise frames, cutting
+   * the talker's outbound and the whole fan-out during gaps. No effect on
+   * the raw-PCM path. Off only for debugging — DTX has no audible cost.
+   *
+   * @generated from field: bool opus_dtx = 10;
+   */
+  opusDtx: boolean;
+
+  /**
+   * Opus frame duration the server advertises to clients: 10, 20, or 40 ms.
+   * Default 10 ms (absent = legacy). See RegisterResponse.opus_frame_ms.
+   *
+   * @generated from field: uint32 opus_frame_ms = 11;
+   */
+  opusFrameMs: number;
+
+  /**
    * Gate the per-channel full-duplex feature. When off, every channel is
    * half-duplex and SetChannelMode is rejected; the UI hides duplex
-   * controls + indicators.
+   * controls + indicators. (Field 12: appended after the identity/
+   * callsign/DTX/frame-size settings that landed on main.)
    *
-   * @generated from field: bool full_duplex_enabled = 8;
+   * @generated from field: bool full_duplex_enabled = 12;
    */
   fullDuplexEnabled: boolean;
 };
@@ -326,7 +470,38 @@ export type UpdateServerConfigRequest = Message<"toki.admin.v1.UpdateServerConfi
   audioQuality: number;
 
   /**
-   * @generated from field: bool full_duplex_enabled = 6;
+   * Reject identity-less registers (see ServerConfig.require_identity).
+   *
+   * @generated from field: bool require_identity = 6;
+   */
+  requireIdentity: boolean;
+
+  /**
+   * Enforce unique callsigns (see ServerConfig.unique_callsigns).
+   *
+   * @generated from field: bool unique_callsigns = 7;
+   */
+  uniqueCallsigns: boolean;
+
+  /**
+   * Enable Opus DTX (see ServerConfig.opus_dtx).
+   *
+   * @generated from field: bool opus_dtx = 8;
+   */
+  opusDtx: boolean;
+
+  /**
+   * Opus frame size (see ServerConfig.opus_frame_ms).
+   *
+   * @generated from field: uint32 opus_frame_ms = 9;
+   */
+  opusFrameMs: number;
+
+  /**
+   * Gate the full-duplex feature (see ServerConfig.full_duplex_enabled).
+   * Field 10: appended after the settings that landed on main.
+   *
+   * @generated from field: bool full_duplex_enabled = 10;
    */
   fullDuplexEnabled: boolean;
 };
@@ -541,6 +716,283 @@ export const SetPriorityResponseSchema: GenMessage<SetPriorityResponse> = /*@__P
   messageDesc(file_admin, 20);
 
 /**
+ * @generated from message toki.admin.v1.SetGlobalBroadcastRequest
+ */
+export type SetGlobalBroadcastRequest = Message<"toki.admin.v1.SetGlobalBroadcastRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: bool grant = 2;
+   */
+  grant: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.SetGlobalBroadcastRequest.
+ * Use `create(SetGlobalBroadcastRequestSchema)` to create a new message.
+ */
+export const SetGlobalBroadcastRequestSchema: GenMessage<SetGlobalBroadcastRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 21);
+
+/**
+ * @generated from message toki.admin.v1.SetGlobalBroadcastResponse
+ */
+export type SetGlobalBroadcastResponse = Message<"toki.admin.v1.SetGlobalBroadcastResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.SetGlobalBroadcastResponse.
+ * Use `create(SetGlobalBroadcastResponseSchema)` to create a new message.
+ */
+export const SetGlobalBroadcastResponseSchema: GenMessage<SetGlobalBroadcastResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 22);
+
+/**
+ * @generated from message toki.admin.v1.SetMuteRequest
+ */
+export type SetMuteRequest = Message<"toki.admin.v1.SetMuteRequest"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * true = mute (silence), false = unmute
+   *
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.SetMuteRequest.
+ * Use `create(SetMuteRequestSchema)` to create a new message.
+ */
+export const SetMuteRequestSchema: GenMessage<SetMuteRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 23);
+
+/**
+ * @generated from message toki.admin.v1.SetMuteResponse
+ */
+export type SetMuteResponse = Message<"toki.admin.v1.SetMuteResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.SetMuteResponse.
+ * Use `create(SetMuteResponseSchema)` to create a new message.
+ */
+export const SetMuteResponseSchema: GenMessage<SetMuteResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 24);
+
+/**
+ * @generated from message toki.admin.v1.BanClientRequest
+ */
+export type BanClientRequest = Message<"toki.admin.v1.BanClientRequest"> & {
+  /**
+   * live session client_id to ban + kick
+   *
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * shown to the banned client on rejected registers
+   *
+   * @generated from field: string reason = 2;
+   */
+  reason: string;
+
+  /**
+   * Also ban the machine hash the session presented (when it presented
+   * one): a config wipe then mints a fresh identity but stays banned.
+   *
+   * @generated from field: bool ban_machine = 3;
+   */
+  banMachine: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.BanClientRequest.
+ * Use `create(BanClientRequestSchema)` to create a new message.
+ */
+export const BanClientRequestSchema: GenMessage<BanClientRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 25);
+
+/**
+ * @generated from message toki.admin.v1.BanClientResponse
+ */
+export type BanClientResponse = Message<"toki.admin.v1.BanClientResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.BanClientResponse.
+ * Use `create(BanClientResponseSchema)` to create a new message.
+ */
+export const BanClientResponseSchema: GenMessage<BanClientResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 26);
+
+/**
+ * @generated from message toki.admin.v1.ListBansRequest
+ */
+export type ListBansRequest = Message<"toki.admin.v1.ListBansRequest"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.ListBansRequest.
+ * Use `create(ListBansRequestSchema)` to create a new message.
+ */
+export const ListBansRequestSchema: GenMessage<ListBansRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 27);
+
+/**
+ * @generated from message toki.admin.v1.ListBansResponse
+ */
+export type ListBansResponse = Message<"toki.admin.v1.ListBansResponse"> & {
+  /**
+   * newest-first
+   *
+   * @generated from field: repeated toki.admin.v1.BanRecord bans = 1;
+   */
+  bans: BanRecord[];
+};
+
+/**
+ * Describes the message toki.admin.v1.ListBansResponse.
+ * Use `create(ListBansResponseSchema)` to create a new message.
+ */
+export const ListBansResponseSchema: GenMessage<ListBansResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 28);
+
+/**
+ * @generated from message toki.admin.v1.BanRecord
+ */
+export type BanRecord = Message<"toki.admin.v1.BanRecord"> & {
+  /**
+   * banned identity key, lowercase hex (the ban key)
+   *
+   * @generated from field: string pubkey = 1;
+   */
+  pubkey: string;
+
+  /**
+   * its 8-char fingerprint, for display
+   *
+   * @generated from field: string display_id = 2;
+   */
+  displayId: string;
+
+  /**
+   * display name at ban time (display aid)
+   *
+   * @generated from field: string last_callsign = 3;
+   */
+  lastCallsign: string;
+
+  /**
+   * non-empty → the machine tier is banned too
+   *
+   * @generated from field: string machine_hash = 4;
+   */
+  machineHash: string;
+
+  /**
+   * @generated from field: string reason = 5;
+   */
+  reason: string;
+
+  /**
+   * admin username
+   *
+   * @generated from field: string banned_by = 6;
+   */
+  bannedBy: string;
+
+  /**
+   * @generated from field: uint64 banned_at_unix = 7;
+   */
+  bannedAtUnix: bigint;
+};
+
+/**
+ * Describes the message toki.admin.v1.BanRecord.
+ * Use `create(BanRecordSchema)` to create a new message.
+ */
+export const BanRecordSchema: GenMessage<BanRecord> = /*@__PURE__*/
+  messageDesc(file_admin, 29);
+
+/**
+ * @generated from message toki.admin.v1.LiftBanRequest
+ */
+export type LiftBanRequest = Message<"toki.admin.v1.LiftBanRequest"> & {
+  /**
+   * @generated from field: string pubkey = 1;
+   */
+  pubkey: string;
+};
+
+/**
+ * Describes the message toki.admin.v1.LiftBanRequest.
+ * Use `create(LiftBanRequestSchema)` to create a new message.
+ */
+export const LiftBanRequestSchema: GenMessage<LiftBanRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 30);
+
+/**
+ * @generated from message toki.admin.v1.LiftBanResponse
+ */
+export type LiftBanResponse = Message<"toki.admin.v1.LiftBanResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.LiftBanResponse.
+ * Use `create(LiftBanResponseSchema)` to create a new message.
+ */
+export const LiftBanResponseSchema: GenMessage<LiftBanResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 31);
+
+/**
+ * @generated from message toki.admin.v1.SetChannelMuteRequest
+ */
+export type SetChannelMuteRequest = Message<"toki.admin.v1.SetChannelMuteRequest"> & {
+  /**
+   * canonical "446.05"
+   *
+   * @generated from field: string frequency = 1;
+   */
+  frequency: string;
+
+  /**
+   * true = mute the channel, false = unmute
+   *
+   * @generated from field: bool muted = 2;
+   */
+  muted: boolean;
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelMuteRequest.
+ * Use `create(SetChannelMuteRequestSchema)` to create a new message.
+ */
+export const SetChannelMuteRequestSchema: GenMessage<SetChannelMuteRequest> = /*@__PURE__*/
+  messageDesc(file_admin, 32);
+
+/**
+ * @generated from message toki.admin.v1.SetChannelMuteResponse
+ */
+export type SetChannelMuteResponse = Message<"toki.admin.v1.SetChannelMuteResponse"> & {
+};
+
+/**
+ * Describes the message toki.admin.v1.SetChannelMuteResponse.
+ * Use `create(SetChannelMuteResponseSchema)` to create a new message.
+ */
+export const SetChannelMuteResponseSchema: GenMessage<SetChannelMuteResponse> = /*@__PURE__*/
+  messageDesc(file_admin, 33);
+
+/**
  * @generated from message toki.admin.v1.SetChannelNameRequest
  */
 export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest"> & {
@@ -564,7 +1016,7 @@ export type SetChannelNameRequest = Message<"toki.admin.v1.SetChannelNameRequest
  * Use `create(SetChannelNameRequestSchema)` to create a new message.
  */
 export const SetChannelNameRequestSchema: GenMessage<SetChannelNameRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 21);
+  messageDesc(file_admin, 34);
 
 /**
  * @generated from message toki.admin.v1.SetChannelNameResponse
@@ -577,7 +1029,7 @@ export type SetChannelNameResponse = Message<"toki.admin.v1.SetChannelNameRespon
  * Use `create(SetChannelNameResponseSchema)` to create a new message.
  */
 export const SetChannelNameResponseSchema: GenMessage<SetChannelNameResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 22);
+  messageDesc(file_admin, 35);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesRequest
@@ -590,7 +1042,7 @@ export type ClearAllChannelNamesRequest = Message<"toki.admin.v1.ClearAllChannel
  * Use `create(ClearAllChannelNamesRequestSchema)` to create a new message.
  */
 export const ClearAllChannelNamesRequestSchema: GenMessage<ClearAllChannelNamesRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 23);
+  messageDesc(file_admin, 36);
 
 /**
  * @generated from message toki.admin.v1.ClearAllChannelNamesResponse
@@ -603,7 +1055,7 @@ export type ClearAllChannelNamesResponse = Message<"toki.admin.v1.ClearAllChanne
  * Use `create(ClearAllChannelNamesResponseSchema)` to create a new message.
  */
 export const ClearAllChannelNamesResponseSchema: GenMessage<ClearAllChannelNamesResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 24);
+  messageDesc(file_admin, 37);
 
 /**
  * @generated from message toki.admin.v1.SetChannelModeRequest
@@ -629,7 +1081,7 @@ export type SetChannelModeRequest = Message<"toki.admin.v1.SetChannelModeRequest
  * Use `create(SetChannelModeRequestSchema)` to create a new message.
  */
 export const SetChannelModeRequestSchema: GenMessage<SetChannelModeRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 25);
+  messageDesc(file_admin, 38);
 
 /**
  * @generated from message toki.admin.v1.SetChannelModeResponse
@@ -642,7 +1094,7 @@ export type SetChannelModeResponse = Message<"toki.admin.v1.SetChannelModeRespon
  * Use `create(SetChannelModeResponseSchema)` to create a new message.
  */
 export const SetChannelModeResponseSchema: GenMessage<SetChannelModeResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 26);
+  messageDesc(file_admin, 39);
 
 /**
  * One sampled data point. `rx/tx_bytes_per_sec` are the average voice-
@@ -694,7 +1146,7 @@ export type MetricSample = Message<"toki.admin.v1.MetricSample"> & {
  * Use `create(MetricSampleSchema)` to create a new message.
  */
 export const MetricSampleSchema: GenMessage<MetricSample> = /*@__PURE__*/
-  messageDesc(file_admin, 27);
+  messageDesc(file_admin, 40);
 
 /**
  * @generated from message toki.admin.v1.MetricsRequest
@@ -711,7 +1163,7 @@ export type MetricsRequest = Message<"toki.admin.v1.MetricsRequest"> & {
  * Use `create(MetricsRequestSchema)` to create a new message.
  */
 export const MetricsRequestSchema: GenMessage<MetricsRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 28);
+  messageDesc(file_admin, 41);
 
 /**
  * @generated from message toki.admin.v1.MetricsResponse
@@ -730,7 +1182,7 @@ export type MetricsResponse = Message<"toki.admin.v1.MetricsResponse"> & {
  * Use `create(MetricsResponseSchema)` to create a new message.
  */
 export const MetricsResponseSchema: GenMessage<MetricsResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 29);
+  messageDesc(file_admin, 42);
 
 /**
  * @generated from message toki.admin.v1.GetServerHealthRequest
@@ -743,7 +1195,7 @@ export type GetServerHealthRequest = Message<"toki.admin.v1.GetServerHealthReque
  * Use `create(GetServerHealthRequestSchema)` to create a new message.
  */
 export const GetServerHealthRequestSchema: GenMessage<GetServerHealthRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 30);
+  messageDesc(file_admin, 43);
 
 /**
  * @generated from message toki.admin.v1.ServerHealth
@@ -784,7 +1236,7 @@ export type ServerHealth = Message<"toki.admin.v1.ServerHealth"> & {
  * Use `create(ServerHealthSchema)` to create a new message.
  */
 export const ServerHealthSchema: GenMessage<ServerHealth> = /*@__PURE__*/
-  messageDesc(file_admin, 31);
+  messageDesc(file_admin, 44);
 
 /**
  * @generated from message toki.admin.v1.AuditEntry
@@ -836,7 +1288,7 @@ export type AuditEntry = Message<"toki.admin.v1.AuditEntry"> & {
  * Use `create(AuditEntrySchema)` to create a new message.
  */
 export const AuditEntrySchema: GenMessage<AuditEntry> = /*@__PURE__*/
-  messageDesc(file_admin, 32);
+  messageDesc(file_admin, 45);
 
 /**
  * @generated from message toki.admin.v1.AuditLogRequest
@@ -867,7 +1319,7 @@ export type AuditLogRequest = Message<"toki.admin.v1.AuditLogRequest"> & {
  * Use `create(AuditLogRequestSchema)` to create a new message.
  */
 export const AuditLogRequestSchema: GenMessage<AuditLogRequest> = /*@__PURE__*/
-  messageDesc(file_admin, 33);
+  messageDesc(file_admin, 46);
 
 /**
  * @generated from message toki.admin.v1.AuditLogResponse
@@ -893,7 +1345,7 @@ export type AuditLogResponse = Message<"toki.admin.v1.AuditLogResponse"> & {
  * Use `create(AuditLogResponseSchema)` to create a new message.
  */
 export const AuditLogResponseSchema: GenMessage<AuditLogResponse> = /*@__PURE__*/
-  messageDesc(file_admin, 34);
+  messageDesc(file_admin, 47);
 
 /**
  * @generated from enum toki.admin.v1.MetricsWindow
@@ -1076,11 +1528,96 @@ export const Admin: GenService<{
     output: typeof SetPriorityResponseSchema;
   },
   /**
+   * Grant or revoke the *global broadcast* capability on a connected
+   * client. When granted, the client may key a dedicated broadcast PTT
+   * that simultaneously seizes every occupied frequency room, blocks
+   * local talkers, and reaches every listener regardless of mute.
+   * Session-scoped (cleared on disconnect). NOT_FOUND for an unknown id.
+   * FAILED_PRECONDITION if another client already holds the capability
+   * (only one at a time). If the client is mid-broadcast when revoked,
+   * the broadcast is torn down before the response returns.
+   *
+   * @generated from rpc toki.admin.v1.Admin.SetGlobalBroadcast
+   */
+  setGlobalBroadcast: {
+    methodKind: "unary";
+    input: typeof SetGlobalBroadcastRequestSchema;
+    output: typeof SetGlobalBroadcastResponseSchema;
+  },
+  /**
+   * Server-side mute: revoke (or restore) a member's ability to take
+   * the PTT floor, without disconnecting them. A muted member's press
+   * is refused server-side — they stay connected and keep hearing the
+   * channel; they just can't transmit. The gentle lever between
+   * "nothing" and kick/ban. Session-scoped (clears on disconnect);
+   * NOT_FOUND for an unknown client id. If the member currently holds
+   * the floor, muting drops it immediately so the channel frees up.
+   *
+   * @generated from rpc toki.admin.v1.Admin.SetMute
+   */
+  setMute: {
+    methodKind: "unary";
+    input: typeof SetMuteRequestSchema;
+    output: typeof SetMuteResponseSchema;
+  },
+  /**
+   * ── Identity bans ───────────────────────────────────────────────
+   * Ban a connected member's *identity* (and optionally its machine
+   * hash) and kick the live session. Future registers presenting the
+   * banned identity — or, for a machine ban, the banned machine hash
+   * under ANY identity — are rejected with PERMISSION_DENIED + the
+   * reason. NOT_FOUND for an unknown client id; FAILED_PRECONDITION
+   * when the member registered without an identity (nothing durable
+   * to ban — kick is the only lever for those).
+   *
+   * @generated from rpc toki.admin.v1.Admin.BanClient
+   */
+  banClient: {
+    methodKind: "unary";
+    input: typeof BanClientRequestSchema;
+    output: typeof BanClientResponseSchema;
+  },
+  /**
+   * Every active ban, newest-first.
+   *
+   * @generated from rpc toki.admin.v1.Admin.ListBans
+   */
+  listBans: {
+    methodKind: "unary";
+    input: typeof ListBansRequestSchema;
+    output: typeof ListBansResponseSchema;
+  },
+  /**
+   * Lift a ban by banned pubkey. Idempotent (lifting an unknown ban
+   * is a no-op success, so a double-click never errors).
+   *
+   * @generated from rpc toki.admin.v1.Admin.LiftBan
+   */
+  liftBan: {
+    methodKind: "unary";
+    input: typeof LiftBanRequestSchema;
+    output: typeof LiftBanResponseSchema;
+  },
+  /**
    * Named channels. Assign or clear the human-readable name of a
    * frequency (empty `name` clears it). FAILED_PRECONDITION when the
    * feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
    * longer than 16 chars. Names persist independently of room occupancy.
+   * Channel-wide mute: silence transmission on a whole frequency. While
+   * a channel is muted, no member tuned to it may take the PTT floor;
+   * moving to another (unmuted) channel restores the ability to talk.
+   * Enforced by the same relay speak-gate as member mute. Persists
+   * independently of occupancy (like channel names). INVALID_ARGUMENT
+   * for a bad frequency.
    *
+   * @generated from rpc toki.admin.v1.Admin.SetChannelMute
+   */
+  setChannelMute: {
+    methodKind: "unary";
+    input: typeof SetChannelMuteRequestSchema;
+    output: typeof SetChannelMuteResponseSchema;
+  },
+  /**
    * @generated from rpc toki.admin.v1.Admin.SetChannelName
    */
   setChannelName: {

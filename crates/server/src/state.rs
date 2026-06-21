@@ -117,6 +117,99 @@ pub struct Client {
     /// "token-capture → audio hijack" path. The *port* is allowed to
     /// vary because NAT will usually pick a different one for UDP.
     pub expected_ip: Option<IpAddr>,
+    /// Verified keypair identity, when the client presented one at
+    /// register (see `crate::identity::verify_register`). `None` for
+    /// pre-identity clients and identity-less registers. Denormalized
+    /// onto the session so snapshots + audit lines never have to
+    /// touch the shared identity map.
+    pub identity: Option<ClientIdentity>,
+    /// Server-side mute: while `true`, the relay's speak-gate refuses
+    /// this session's PTT presses (see [`Client::can_speak`]). The
+    /// member stays connected and keeps receiving the channel; they
+    /// just can't transmit. Set by the admin `SetMute` RPC, cleared on
+    /// disconnect — session-scoped, like `priority_freq`. The durable,
+    /// identity-keyed tier is a deliberate later slice.
+    pub muted: bool,
+    /// Admin-granted global-broadcast capability. When true, this session
+    /// may key the broadcast PTT, which simultaneously seizes every occupied
+    /// room. Session-scoped: cleared on disconnect. Only one client holds it
+    /// at a time (admin RPC enforces); the broadcast itself is additionally
+    /// serialized by `Registry.broadcast_active`.
+    pub can_global_broadcast: bool,
+    /// Most-recent connection-quality sample the client reported via
+    /// `Signaling.ReportConnectionQuality`. `None` until the first
+    /// report lands — the server can't measure these itself (only the
+    /// receiver sees its own loss/jitter, and RTT is a client-stamped
+    /// round trip), so it just stores what the client pushes up for the
+    /// admin dashboard.
+    pub quality: Option<ConnQuality>,
+}
+
+impl Default for Client {
+    fn default() -> Self {
+        Client {
+            id: String::new(),
+            display_name: String::new(),
+            audio_token_hash: [0u8; TOKEN_HASH_LEN],
+            audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
+            audio_last_seq: 0,
+            audio_outbound_seq: 1,
+            audio_id: 0,
+            audio_addr: None,
+            events_tx: None,
+            current_frequency: None,
+            priority_freq: None,
+            last_seen: std::time::Instant::now(),
+            connected_at: std::time::Instant::now(),
+            expected_ip: None,
+            identity: None,
+            muted: false,
+            can_global_broadcast: false,
+            quality: None,
+        }
+    }
+}
+
+/// Client-reported connection-quality metrics, denormalized onto the
+/// session for the admin snapshot. All as-of the last report.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConnQuality {
+    /// Smoothed round-trip time, milliseconds (keepalive/pong probe).
+    pub rtt_ms: u32,
+    /// Inter-arrival jitter, milliseconds.
+    pub jitter_ms: u32,
+    /// Inbound packet loss, percent ×100 (250 = 2.50%).
+    pub loss_pct_centi: u32,
+}
+
+impl Client {
+    /// The relay-side **speak gate**: may this session take/hold the
+    /// PTT floor right now? Today the only veto is an admin mute, but
+    /// this is intentionally the single chokepoint every "can this
+    /// member transmit" decision flows through — both the signaling
+    /// PTT-arbitration path and the UDP relay backstop call it, and
+    /// No-Talk channels (default-deny + per-member grant) will extend
+    /// the same check rather than bolting on a parallel one.
+    pub fn can_speak(&self) -> bool {
+        !self.muted
+    }
+}
+
+/// The session-facing slice of a verified identity — exactly what
+/// admin snapshots and audit lines need.
+#[derive(Clone, Debug)]
+pub struct ClientIdentity {
+    /// Human-readable identity string — the 8-char base32 fingerprint
+    /// of the public key, e.g. `7Q4XF9KB`. Purely key-derived, so it's
+    /// stable across renames, sessions, and machines.
+    pub display_id: String,
+    /// Full ed25519 public key, lowercase hex — the canonical key.
+    pub pubkey_hex: String,
+    /// Salted machine-fingerprint hash presented this session (empty
+    /// on platforms without a machine id).
+    pub machine_hash: String,
+    /// Unix seconds this identity was first seen by this server.
+    pub first_seen: i64,
 }
 
 /// One frequency channel. Each holds its own member list and PTT lock —
@@ -166,6 +259,11 @@ pub struct Registry {
     /// live sender). Wraps after 2^32 sessions — astronomically beyond
     /// any real uptime, and old ids are long gone by then.
     next_audio_id: u32,
+    /// Global broadcast lock. `Some(client_id)` while a broadcast is live,
+    /// `None` when idle. Serializes concurrent broadcast attempts (first-come
+    /// wins). On Registry so the audio relay + signaling handler read it under
+    /// the existing registry lock with no extra synchronization.
+    pub broadcast_active: Option<String>,
 }
 
 impl Registry {
@@ -176,6 +274,44 @@ impl Registry {
             self.next_audio_id = 1;
         }
         self.next_audio_id
+    }
+
+    /// Is `callsign` already used by a connected client other than
+    /// `except` (a `client_id` to skip — e.g. the subject of a rename,
+    /// who legitimately keeps their own name)?
+    ///
+    /// `own_identity` exempts a holder that is *the same identity* as the
+    /// caller: a keypair-backed client reconnecting (a fresh session id,
+    /// same identity) before its old session is reaped should keep its
+    /// own callsign rather than be locked out by its own ghost. `None`
+    /// (identity-less register/rename) never matches this exemption.
+    ///
+    /// Case-insensitive, since callsigns are uppercased client-side and
+    /// `ECHO-1` / `echo-1` should collide. Drives the unique-callsign
+    /// gate on register and admin rename. Linear scan over the live
+    /// clients — fine at the hundreds-of-peers scale Toki targets, and
+    /// only runs on the two cold paths (register, rename), never per
+    /// audio packet.
+    pub fn callsign_taken(
+        &self,
+        callsign: &str,
+        except: Option<&str>,
+        own_identity: Option<&str>,
+    ) -> bool {
+        let want = callsign.to_lowercase();
+        self.clients.iter().any(|(id, c)| {
+            if Some(id.as_str()) == except {
+                return false;
+            }
+            if c.display_name.to_lowercase() != want {
+                return false;
+            }
+            // Same-identity reconnect keeps its name (not a collision).
+            !matches!(
+                (own_identity, c.identity.as_ref()),
+                (Some(mine), Some(theirs)) if theirs.pubkey_hex == mine
+            )
+        })
     }
 }
 
@@ -225,6 +361,95 @@ pub type SharedDuplexModes = Arc<RwLock<HashMap<String, DuplexMode>>>;
 /// Build a shared duplex-mode map from an initial snapshot (typically
 /// `AdminDb::load_channel_modes` at boot, or empty for headless runs).
 pub fn shared_duplex_modes(initial: HashMap<String, DuplexMode>) -> SharedDuplexModes {
+    Arc::new(RwLock::new(initial))
+}
+
+/// Channel-wide mutes — the set of canonical frequencies on which no one
+/// may transmit (see the admin `SetChannelMute` RPC). Written by the
+/// admin handlers, read by the signaling PTT path and the UDP relay's
+/// speak-gate (keyed by the sender's current frequency). Same
+/// writer/reader split and off-`Registry` rationale as
+/// [`SharedChannelNames`]: a mute persists independently of room
+/// occupancy (you can mute an empty channel), and reads dominate.
+/// Hydrated from the `channel_mutes` table at boot.
+pub type SharedChannelMutes = Arc<RwLock<std::collections::HashSet<String>>>;
+
+/// Build a shared channel-mute set from an initial snapshot (typically
+/// `AdminDb::load_channel_mutes` at boot, or empty for tests).
+pub fn shared_channel_mutes(initial: std::collections::HashSet<String>) -> SharedChannelMutes {
+    Arc::new(RwLock::new(initial))
+}
+
+/// Everything this server remembers about one client identity,
+/// keyed by the pubkey hex in [`SharedIdentities`] and mirrored to
+/// the `identities` table by the admin task.
+#[derive(Clone, Debug)]
+pub struct IdentityRecord {
+    /// Human-readable identity string (`7Q4XF9KB` — the 8-char key
+    /// fingerprint). Derived from the pubkey and stored so audit rows
+    /// can be joined against it without re-deriving.
+    pub display_id: String,
+    /// Display name used at the most recent register.
+    pub last_callsign: String,
+    /// Most recent machine-fingerprint hash (claimed; may be empty).
+    pub machine_hash: String,
+    /// Claimed provenance: the first session id any server ever
+    /// assigned this identity. Recorded once, first non-empty wins.
+    pub origin_client_id: String,
+    /// Unix seconds of first / most recent register on this server.
+    pub first_seen: i64,
+    pub last_seen: i64,
+    /// Source IP of the most recent register (empty when the
+    /// transport exposed none).
+    pub last_ip: String,
+}
+
+/// Identity records seen by this server (pubkey hex → record).
+/// Hydrated from the `identities` table at boot by the admin task;
+/// the signaling `Register` handler is the writer (merge + insert),
+/// pushing each change to the admin task for persistence over the
+/// identity channel — same split as the audit pipeline. Same
+/// rationale as [`SharedChannelNames`] for living off the registry
+/// `Mutex`: records outlive sessions and reads dominate.
+pub type SharedIdentities = Arc<RwLock<HashMap<String, IdentityRecord>>>;
+
+/// Build a shared identity map from an initial snapshot (typically
+/// `AdminDb::load_identities` at boot, or empty for tests).
+pub fn shared_identities(initial: HashMap<String, IdentityRecord>) -> SharedIdentities {
+    Arc::new(RwLock::new(initial))
+}
+
+/// One active identity ban, keyed by the banned pubkey hex in
+/// [`SharedBans`] and mirrored to the `bans` table.
+#[derive(Clone, Debug)]
+pub struct BanRecord {
+    /// 8-char fingerprint of the banned key, for display.
+    pub display_id: String,
+    /// Display name the session used when it was banned. Display aid
+    /// only — names are freely chosen and may be reused by others.
+    pub last_callsign: String,
+    /// When non-empty, the machine tier is banned too: ANY identity
+    /// presenting this machine hash at register is rejected, so a
+    /// config wipe (fresh key, same machine) stays banned.
+    pub machine_hash: String,
+    /// Operator-supplied reason, echoed to the banned client in the
+    /// register rejection.
+    pub reason: String,
+    /// Admin username that issued the ban.
+    pub banned_by: String,
+    /// Unix seconds the ban was issued.
+    pub banned_at: i64,
+}
+
+/// Active bans (banned pubkey hex → record). Written by the admin
+/// gRPC handlers (ban / lift — they own the db), read by the signaling
+/// `Register` gate. Same writer/reader split as [`SharedChannelNames`];
+/// hydrated from the `bans` table at boot.
+pub type SharedBans = Arc<RwLock<HashMap<String, BanRecord>>>;
+
+/// Build a shared ban map from an initial snapshot (typically
+/// `AdminDb::load_bans` at boot, or empty for tests).
+pub fn shared_bans(initial: HashMap<String, BanRecord>) -> SharedBans {
     Arc::new(RwLock::new(initial))
 }
 

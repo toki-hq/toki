@@ -33,6 +33,10 @@ async fn boot(password: Option<&str>) -> SignalingClient<Channel> {
         server_config::shared_default(),
         state::shared_channel_names(Default::default()),
         state::shared_duplex_modes(Default::default()),
+        state::shared_channel_mutes(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
 
@@ -77,6 +81,7 @@ async fn register_or_fail(client: &mut SignalingClient<Channel>, name: &str) -> 
             display_name: name.into(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .expect("register should succeed")
@@ -98,6 +103,55 @@ async fn register_open_mode_succeeds() {
 
 #[tokio::test]
 #[serial_test::serial]
+async fn register_rejects_duplicate_callsign() {
+    // Default config has unique_callsigns on. First ECHO-1 wins; a
+    // second register with the same name — or a case variant — is
+    // refused with ALREADY_EXISTS.
+    let mut client = boot(None).await;
+    register_or_fail(&mut client, "ECHO-1").await;
+
+    let dup = client
+        .register(RegisterRequest {
+            display_name: "ECHO-1".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(dup.code(), tonic::Code::AlreadyExists);
+
+    // Case-insensitive: echo-1 collides with ECHO-1 too.
+    let dup_case = client
+        .register(RegisterRequest {
+            display_name: "echo-1".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(dup_case.code(), tonic::Code::AlreadyExists);
+
+    // A different callsign still registers fine.
+    register_or_fail(&mut client, "FOXTROT-2").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn register_allows_duplicate_when_uniqueness_disabled() {
+    let mut client = boot_with_config(server_config::ServerConfig {
+        unique_callsigns: false,
+        ..Default::default()
+    })
+    .await;
+    register_or_fail(&mut client, "ECHO-1").await;
+    // Second ECHO-1 is allowed with the toggle off (legacy behaviour).
+    register_or_fail(&mut client, "ECHO-1").await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn register_advertises_opus_by_default() {
     // Default server_config audio_quality = 2 (Standard) → clients are
     // asked to Opus-encode at ~24 kbps.
@@ -107,6 +161,7 @@ async fn register_advertises_opus_by_default() {
             display_name: "anon".into(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap()
@@ -127,6 +182,7 @@ async fn register_rejects_incompatible_minor_version() {
             display_name: "anon".into(),
             password: String::new(),
             client_version: "99.99.0".into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -143,6 +199,7 @@ async fn register_rejects_missing_client_version() {
             display_name: "anon".into(),
             password: String::new(),
             client_version: String::new(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -161,6 +218,7 @@ async fn register_accepts_matching_major_minor_with_different_patch() {
             display_name: "anon".into(),
             password: String::new(),
             client_version: format!("{major}.{minor}.999"),
+            ..Default::default()
         })
         .await
         .expect("matching major.minor should be accepted");
@@ -176,6 +234,7 @@ async fn register_password_required_rejects_wrong_password() {
             display_name: "anon".into(),
             password: "wrong".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -191,6 +250,7 @@ async fn register_password_required_accepts_correct_password() {
             display_name: "anon".into(),
             password: "hunter2".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .expect("good password should succeed");
@@ -206,6 +266,7 @@ async fn register_rejects_control_chars_in_display_name() {
             display_name: "evil\n[INFO] root logged in".into(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -222,6 +283,7 @@ async fn register_rejects_empty_display_name() {
             display_name: String::new(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -320,6 +382,10 @@ async fn boot_with_config(
         server_config,
         state::shared_channel_names(Default::default()),
         state::shared_duplex_modes(Default::default()),
+        state::shared_channel_mutes(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -362,6 +428,10 @@ async fn boot_with_passwords(
         grpc_password: db_password.to_string(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
+        unique_callsigns: true,
+        opus_dtx: true,
+        opus_frame_ms: 10,
         full_duplex_enabled: false,
     };
     let server_config = Arc::new(RwLock::new(cfg));
@@ -372,6 +442,10 @@ async fn boot_with_passwords(
         server_config,
         state::shared_channel_names(Default::default()),
         state::shared_duplex_modes(Default::default()),
+        state::shared_channel_mutes(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
+        state::shared_bans(Default::default()),
         toki_server::audit::channel().0,
     );
     let (client_side, server_side) = tokio::io::duplex(64 * 1024);
@@ -406,6 +480,7 @@ async fn db_password_arms_the_gate_when_no_toml_override() {
             display_name: "anon".into(),
             password: "wrong".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -417,6 +492,7 @@ async fn db_password_arms_the_gate_when_no_toml_override() {
             display_name: "anon".into(),
             password: "from-db".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .expect("DB-sourced password should authenticate");
@@ -434,6 +510,7 @@ async fn toml_password_overrides_db() {
             display_name: "anon".into(),
             password: "from-db".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -445,6 +522,7 @@ async fn toml_password_overrides_db() {
             display_name: "anon".into(),
             password: "from-toml".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .expect("TOML override should win");
@@ -463,6 +541,7 @@ async fn both_unset_means_open_mode() {
             display_name: "anon".into(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .expect("open mode should accept any caller");
@@ -481,6 +560,10 @@ async fn register_rejected_when_at_max_peers() {
         grpc_password: String::new(),
         named_channels_enabled: false,
         audio_quality: 2,
+        require_identity: false,
+        unique_callsigns: true,
+        opus_dtx: true,
+        opus_frame_ms: 10,
         full_duplex_enabled: false,
     })
     .await;
@@ -490,6 +573,7 @@ async fn register_rejected_when_at_max_peers() {
                 display_name: format!("peer-{i}"),
                 password: String::new(),
                 client_version: env!("CARGO_PKG_VERSION").into(),
+                ..Default::default()
             })
             .await
             .expect("under-cap register must succeed");
@@ -499,6 +583,7 @@ async fn register_rejected_when_at_max_peers() {
             display_name: "overflow".into(),
             password: String::new(),
             client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
         })
         .await
         .unwrap_err();
@@ -518,4 +603,321 @@ async fn leave_unknown_client_is_noop() {
         })
         .await
         .expect("leave of unknown client should be a no-op");
+}
+
+// ── Client identity handshake ───────────────────────────────────────
+
+/// Sign `nonce` exactly like the real client does (domain-separated
+/// payload, ed25519) and build the register request around it.
+fn identity_register(signing: &ed25519_dalek::SigningKey, nonce: Vec<u8>) -> RegisterRequest {
+    use ed25519_dalek::Signer as _;
+    let signature = signing
+        .sign(&toki_proto::identity::signing_payload(&nonce))
+        .to_vec();
+    RegisterRequest {
+        display_name: "anon".into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+        identity_pubkey: signing.verifying_key().to_bytes().to_vec(),
+        challenge_nonce: nonce,
+        identity_signature: signature,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_challenge_then_register_succeeds() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .expect("challenge should be issued")
+        .into_inner()
+        .nonce;
+    assert!(!nonce.is_empty());
+
+    let resp = client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("identity-ful register should succeed")
+        .into_inner();
+    assert!(!resp.client_id.is_empty());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_rejects_wrong_key_signature() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    let impostor = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+
+    // Claim signing's pubkey but sign with the impostor's key.
+    let mut req = identity_register(&signing, nonce.clone());
+    use ed25519_dalek::Signer as _;
+    req.identity_signature = impostor
+        .sign(&toki_proto::identity::signing_payload(&nonce))
+        .to_vec();
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_rejects_forged_nonce() {
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+    // A self-invented nonce was never issued by this server boot.
+    let forged = vec![0u8; 56];
+    let err = client
+        .register(identity_register(&signing, forged))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identity_register_twice_with_same_key_succeeds() {
+    // Two registers with the same key (reconnect): the second must be
+    // accepted; the identity string is purely key-derived, so it's
+    // identical both times. The first_seen/origin merge semantics are
+    // covered by the unit tests (identity::merged_identity + db upsert).
+    let mut client = boot(None).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+
+    for _ in 0..2 {
+        let nonce = client
+            .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+            .await
+            .unwrap()
+            .into_inner()
+            .nonce;
+        client
+            .register(identity_register(&signing, nonce))
+            .await
+            .expect("register should succeed");
+    }
+}
+
+// ── Identity-ban enforcement at register ────────────────────────────
+
+/// `boot` with an injectable ban map, so tests can pre-seed bans the
+/// way the admin ban RPC would.
+async fn boot_with_bans(bans: toki_server::state::SharedBans) -> SignalingClient<Channel> {
+    let registry = state::shared();
+    let svc = SignalingSvc::new(
+        registry,
+        "127.0.0.1:50052".to_string(),
+        None,
+        server_config::shared_default(),
+        state::shared_channel_names(Default::default()),
+        state::shared_duplex_modes(Default::default()),
+        state::shared_channel_mutes(Default::default()),
+        state::shared_identities(Default::default()),
+        tokio::sync::mpsc::unbounded_channel().0,
+        bans,
+        toki_server::audit::channel().0,
+    );
+    let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        let _ = Server::builder()
+            .add_service(svc)
+            .serve_with_incoming(tokio_stream::iter(vec![Ok::<_, std::io::Error>(
+                server_side,
+            )]))
+            .await;
+    });
+    let mut client_socket = Some(client_side);
+    let channel = Endpoint::try_from("http://[::1]:50051")
+        .unwrap()
+        .connect_timeout(Duration::from_secs(2))
+        .connect_with_connector(tower::service_fn(move |_: Uri| {
+            let sock = client_socket.take().expect("connector called twice");
+            async move { Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(sock)) }
+        }))
+        .await
+        .expect("in-process tonic connect");
+    SignalingClient::new(channel)
+}
+
+fn ban_entry(machine_hash: &str, reason: &str) -> toki_server::state::BanRecord {
+    toki_server::state::BanRecord {
+        display_id: "FLNIHQMB".into(),
+        last_callsign: "banned".into(),
+        machine_hash: machine_hash.into(),
+        reason: reason.into(),
+        banned_by: "admin".into(),
+        banned_at: 1,
+    }
+}
+
+/// Lowercase-hex pubkey of an ed25519 signing key, exactly as the
+/// server stores ban keys.
+fn pubkey_hex(signing: &ed25519_dalek::SigningKey) -> String {
+    signing
+        .verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn banned_identity_is_rejected_with_reason() {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[50u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&signing), ban_entry("", "spamming the net"));
+    let mut client = boot_with_bans(bans).await;
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let err = client
+        .register(identity_register(&signing, nonce))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    assert!(
+        err.message().contains("spamming the net"),
+        "rejection carries the operator's reason: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn machine_ban_catches_fresh_identity_on_same_machine() {
+    // The banned identity presented machine hash M with a machine-tier
+    // ban. A brand-new keypair claiming the same machine hash must be
+    // rejected too (config-wipe evasion).
+    let machine = "ab".repeat(32);
+    let banned_key = ed25519_dalek::SigningKey::from_bytes(&[51u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&banned_key), ban_entry(&machine, "evader"));
+    let mut client = boot_with_bans(bans).await;
+
+    let fresh_key = ed25519_dalek::SigningKey::from_bytes(&[52u8; 32]);
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let mut req = identity_register(&fresh_key, nonce);
+    req.machine_hash = machine;
+    let err = client.register(req).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn lifted_ban_allows_register_again() {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[53u8; 32]);
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert(pubkey_hex(&signing), ban_entry("", ""));
+    let mut client = boot_with_bans(bans.clone()).await;
+
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    let err = client
+        .register(identity_register(&signing, nonce))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+
+    // Lift (as the admin RPC would: remove from the shared map).
+    bans.write().await.clear();
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("register should succeed once the ban is lifted");
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn identityless_register_unaffected_by_bans() {
+    // Bans key on identities; an identity-less register sails through
+    // (closing that hole is the future "require identity" toggle).
+    let bans = state::shared_bans(Default::default());
+    bans.write()
+        .await
+        .insert("aa".repeat(32), ban_entry("", "someone"));
+    let mut client = boot_with_bans(bans).await;
+    register_or_fail(&mut client, "anon").await;
+}
+
+// ── Require-identity toggle ─────────────────────────────────────────
+
+fn require_identity_config() -> toki_server::server_config::ServerConfig {
+    toki_server::server_config::ServerConfig {
+        require_identity: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_rejects_identityless_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let err = client
+        .register(RegisterRequest {
+            display_name: "anon".into(),
+            password: String::new(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::FailedPrecondition);
+    assert!(
+        err.message().contains("requires a client identity"),
+        "actionable message: {}",
+        err.message()
+    );
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn require_identity_accepts_identityful_register() {
+    let mut client = boot_with_config(require_identity_config()).await;
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[60u8; 32]);
+    let nonce = client
+        .identity_challenge(toki_proto::v1::IdentityChallengeRequest {})
+        .await
+        .unwrap()
+        .into_inner()
+        .nonce;
+    client
+        .register(identity_register(&signing, nonce))
+        .await
+        .expect("identity-ful register passes the gate");
 }

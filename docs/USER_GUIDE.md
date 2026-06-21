@@ -33,8 +33,9 @@ a home lab.
                    libxcursor-dev libxi-dev libxkbcommon-dev \
                    libxkbcommon-x11-dev libxcb1-dev \
                    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-                   libopus-dev
+                   libopus-dev libudev-dev
   ```
+  (`libudev-dev` is needed by the client's HID input backend.)
 - **Node.js 24** — only needed to build the standalone admin UI (`admin-ui/`).
   Not required to build or run the server/client.
 - **Headphones** — both client and host grab the system default microphone and
@@ -187,7 +188,7 @@ session_ttl_hours = 12
 | `TOKI_DATA_DIR` | path | `.` | Runtime data root. Auto-generated TLS files land in `{TOKI_DATA_DIR}/tls/`; a relative `[admin] db_path` is resolved here. Absolute operator paths are honored verbatim. |
 | `TOKI_GRPC_ADDR` | `host:port` | `0.0.0.0:50051` | TCP bind for the gRPC signaling channel. |
 | `TOKI_AUDIO_ADDR` | `host:port` | `0.0.0.0:50051` | UDP bind for the audio relay. Shares the port with gRPC by default; kernel binds are keyed by `(protocol, port)`. |
-| `TOKI_AUDIO_PUBLIC` | `host:port` | value of `TOKI_AUDIO_ADDR` | UDP endpoint advertised to clients in `RegisterResponse`. Set this when behind NAT/port-forwarding (e.g. `203.0.113.5:50051`). |
+| `TOKI_AUDIO_PUBLIC` | `host:port` | value of `TOKI_AUDIO_ADDR` | UDP endpoint advertised to clients in `RegisterResponse`. Set this when behind NAT/port-forwarding (e.g. `203.0.113.5:50051`). **Only the host is used by the client** — it always connects UDP on the same port it reached gRPC on (audio and gRPC share a port number by design), so the advertised port here is informational. Run audio on the gRPC port; don't try to split them via this var. |
 | `TOKI_ADMIN_BIND` | string | from TOML (`127.0.0.1`) | Override the admin bind interface. |
 | `TOKI_ADMIN_PORT` | u16 | from TOML (`8000`) | Override the admin port. |
 | `TOKI_ADMIN_DB_PATH` | path | from TOML (`admin.db`) | Override the SQLite admin store path. |
@@ -242,7 +243,59 @@ first boot:
 | `idleKickSecs` | `10` | Stale-client eviction threshold. A client with no inbound UDP packet for this long is removed and its peers are notified. |
 | `voiceQuality` | `Standard` | Codec/quality advertised to clients at register: Raw PCM, or Low/Standard/High Opus. |
 | `namedChannels` | `off` | When on, clients receive admin-assigned channel names beside their tuner. |
+| `uniqueCallsigns` | `on` | When on, a register or admin rename onto a callsign another connected member already holds is refused (`ALREADY_EXISTS`, case-insensitive). A name frees the instant its holder disconnects; a keypair client reconnecting keeps its own name. Off allows duplicates. |
+| `opusFrameMs` | `10` | Opus encoder frame duration advertised to clients at register: `10`, `20`, or `40` ms. Larger frames bundle more 10 ms capture chunks per UDP packet, reducing per-packet overhead on the O(N) relay fan-out — useful when per-packet overhead dominates payload (~53 B overhead vs ~30 B payload at 24 kbps/10 ms). Cost: +10 ms latency (20 ms) or +30 ms latency (40 ms) mouth-to-ear. Stacks with DTX. No effect when `voiceQuality` is Raw PCM. **Compatibility:** `opusFrameMs > 10` requires all clients to be on the release that introduced this setting or newer — older clients have a decode buffer sized for ≤30 ms (1440 samples) and would overflow on a 40 ms frame (1920 samples). |
 | `grpcPassword` | `""` | Runtime-editable shared secret. **Overridden** by `config.toml`'s `password` field — if TOML set one, the UI greys out this input. |
+
+#### Global Broadcast
+
+Global broadcast lets a designated client transmit simultaneously to every
+frequency room that currently has listeners — a server-wide all-hands
+announcement that cuts through every channel at once.
+
+**Granting and revoking**
+
+In the admin panel **Channels** view, open the context menu on any connected
+member and choose **Grant broadcast** / **Revoke broadcast**. The grant is
+**session-scoped** — it clears automatically when the client disconnects, so
+there is nothing to clean up after a broadcast session ends.
+
+Only **one client may hold the capability at a time.** Attempting to grant it
+to a second client while one already holds it is rejected by the server
+(`FAILED_PRECONDITION: another client already holds the global-broadcast
+capability`).
+
+Grant and revoke are both recorded in the audit log under the `global_broadcast`
+action with a `granted` or `revoked` detail.
+
+**What broadcast does on air**
+
+When the broadcaster keys their broadcast PTT:
+
+- The PTT floor is seized on every occupied frequency simultaneously.
+- Any member currently transmitting on their channel is cut off.
+- Local talkers on every frequency are blocked from keying up for the duration
+  of the broadcast.
+- Listeners hear only the broadcaster's voice — no other audio passes through.
+
+On release, all floors free again and normal half-duplex rules resume.
+
+Broadcast **pierces all mutes**: it reaches every listener regardless of
+channel-mute or member-mute status. It is an all-hands announcement and is
+unmutable by design.
+
+If the broadcaster disconnects mid-broadcast, the server clears the broadcast
+and frees all floors automatically.
+
+**Broadcast roger beep + indicator**
+
+Listeners hear a distinct three-step falling tone (C6 → G5 → C5) at the start
+of a broadcast. This "broadcast roger" is separate from the normal take-floor
+beep and the priority roger, so listeners can immediately tell a server-wide
+broadcast from priority traffic on their own channel. The client's center
+display also tints **light blue** and reads **BROADCAST** (instead of the
+usual green "RECEIVING" or red "CHANNEL BUSY") for the duration, so the cue is
+both audible and visible.
 
 ### Client: per-user config
 
@@ -271,8 +324,13 @@ Schema:
 | `[audio]` `input_gain` | f32 | `1.0` | Linear mic gain. UI range 0.0–2.0; clipped at i16 boundary. |
 | `[audio]` `output_gain` | f32 | `1.0` | Linear playback gain. Same range / clipping. |
 | `[audio]` `balance` | f32 | `0.0` | Stereo pan for received audio + beeps (−1.0 left … +1.0 right). |
-| `[hotkey]` `key` | string? | `"Backquote"` | PTT keyboard binding (`keyboard_types::Code` variant name, e.g. `F8`, `Space`). |
-| `[hotkey]` `mouse_button` | string? | unset | PTT mouse binding (`Left`, `Right`, `Middle`, `Mouse4`, …). Takes precedence over `key` if both are set. |
+| `[audio]` `noise_suppression` | bool | `true` | Capture-side RNNoise noise filter (strips steady background noise before encoding). Toggleable live in Settings → Voice DSP. |
+| `[audio]` `agc` | bool | `true` | Capture-side automatic gain control (eases speech toward a fixed level: −18 dBFS target, up to +18 dB boost / −6 dB cut, speech-gated so pauses don't pump the noise floor). Toggleable live in Settings → Voice DSP. |
+| `[hotkey]` `binding` | string? | unset | Primary PTT binding, tagged form for any peripheral (e.g. `key:F8`, `mouse:Middle`, `gamepad:0:South`, `streamdeck:0x0fd9:0x0080:3`, `hid:0x046d:0xc52b:2:4`). Preferred over the legacy `key`/`mouse_button` below; written by all new saves. |
+| `[hotkey]` `secondary` | string? | unset | Optional fallback PTT binding (same tagged form). PTT fires while *either* the primary or this is held — e.g. a keyboard key backing up a gamepad button. |
+| `[hotkey]` `broadcast_ptt` | string? | unset | Optional global-broadcast PTT binding (same tagged form, e.g. `"key:F9"`). Bindable from **Settings → Controls → BROADCAST PTT** as well as here. When held, sends a broadcast PTT the server fans out to every occupied frequency simultaneously. Omitted (unbound) by default. **Inert until an admin grants the global-broadcast capability to this session.** Separate from and additive to the normal PTT — the normal PTT continues to work on the broadcaster's own channel regardless. |
+| `[hotkey]` `key` | string? | `"Backquote"` | Legacy PTT keyboard binding (`keyboard_types::Code` variant name). Read-only fallback used only when `binding` is absent. |
+| `[hotkey]` `mouse_button` | string? | unset | Legacy PTT mouse binding (`Left`, `Right`, `Middle`, `Mouse4`, …). Read-only fallback used only when `binding` is absent. |
 | `[beeps]` `preset` | string | `"default"` | Roger-beep preset id. Unknown ids resolve to `default` at load time. |
 | `[beeps]` `volume` | f32 | `0.05` | Beep volume (linear). |
 | `[updates]` `auto_check` | bool | `true` | Check GitHub Releases for a newer version on launch + periodically. Notify-only. |
@@ -285,6 +343,32 @@ Schema:
 | Variable | Default | Description |
 |---|---|---|
 | `RUST_LOG` | `info` | tracing filter. Note: on Windows release builds the process has no console attached, so logs are silently dropped. |
+
+### Client identity
+
+On first connect the client mints a persistent, keypair-backed **identity**
+and stores it next to the config as `identity.toml` (chmod `0600` — the key
+is exactly as sensitive as the stored server password):
+
+- The identity **is** an ed25519 public key. It's displayed everywhere as
+  the key's 8-character fingerprint (e.g. `7Q4XF9KB`) — purely derived from
+  the key, so renaming yourself never changes your identity string.
+- At register, the client signs a server-issued challenge with the private
+  key, so an identity string seen in the admin panel or audit log can't be
+  claimed by someone who merely saw it.
+- A **machine fingerprint** travels alongside: a salted BLAKE3 hash of the
+  OS machine id (Linux `/etc/machine-id`, macOS `IOPlatformUUID`, Windows
+  `MachineGuid`). The raw identifier never leaves your machine — servers see
+  only the hash. Deleting `identity.toml` mints a fresh identity, but the
+  machine hash stays the same, so operators can spot config-wipe ban evasion.
+- Connecting to an older server (or one without identity support) silently
+  falls back to an identity-less session — exactly the pre-0.5 behavior.
+  Servers can flip **require identity** in their settings, in which case an
+  identity-less register is refused with a clear message.
+
+To **reset** your identity, delete `identity.toml` and reconnect. To **move**
+it to another machine, copy the file (the identity follows the key; the
+machine hash updates to the new hardware).
 
 ## Usage
 
@@ -333,15 +417,53 @@ The UI is a single landscape "strip" widget. The main controls:
   the channel's name scrolls as a marquee.
 - **Memory presets (M1–M4)** — left-click to save/recall a frequency, left-hold
   to overwrite, right-hold to clear.
-- **PTT button** — hold the configured key (default: `` ` ``) or click and hold
+- **PTT button** — hold the configured input (default: `` ` ``) or click and hold
   the on-screen button to transmit. A 30-second transmission cap is enforced
   client-side (`TX_LIMIT_MS = 30_000`) — release and re-press to keep talking.
 - **Roster / event log** — current members with talking indicators, plus a
   connection/event log.
 - **Knobs** — mic gain, speaker gain, and **balance** (pan received audio +
   beeps toward one ear).
-- **Settings** — input/output devices, gains, PTT binding (keyboard or mouse),
-  roger-beep preset, global hotkeys, and the update-check toggle.
+- **Voice DSP** — capture-side **noise suppression** (RNNoise) and **auto
+  gain** run on your mic signal before it's encoded, so the cleanup benefits
+  everyone who hears you. Both are on by default; each has its own toggle in
+  Settings → Voice DSP, and turning both off gives a bit-exact raw mic for the
+  unprocessed CB character. Toggles apply instantly (next 10 ms frame).
+- **Audio self-test** — Settings → Audio shows a live **INPUT LEVEL** bar
+  under the input device picker and an **OUTPUT LEVEL** bar under the output
+  picker. The input bar moves whenever your mic hears something — *even before
+  you connect and without holding PTT* — so you can confirm the right
+  microphone is selected and that it's picking you up; it turns amber as the
+  signal nears clipping (back off the gain or move away from the mic). The
+  **TEST TONE** button plays a short rising chime out the selected output
+  device at your current speaker volume — use it to confirm the right
+  speaker/earpiece is selected and to check the balance knob (the tone leans
+  toward whichever ear you've panned to). The tone needs no connection.
+- **Settings** — input/output devices with level meters + test tone, voice DSP
+  toggles, PTT binding, roger-beep preset, global hotkeys, and the update-check
+  toggle.
+
+#### Binding any input device
+
+PTT, the memory recalls (M1–M4), and the tune up/down hotkeys can each be bound
+to **any connected peripheral**: a keyboard key, a mouse button, a game
+controller / joystick button, an Elgato Stream Deck key, or a button on an
+arbitrary USB HID device. In **Settings**, click **BIND** on a row and *hold the
+button you want for ~1 second* — the hold avoids capturing a stray click. The
+PTT row also has a **PTT (2ND)** row for an optional **fallback** binding: PTT
+fires while either the primary or the secondary is held (e.g. a Stream Deck key
+backed up by a keyboard key).
+
+Notes:
+- **Keyboard and mouse stay passthrough** — the focused app still receives the
+  keystroke. Gamepad / Stream Deck / HID buttons are capture-only (the OS
+  doesn't route those to focused apps anyway), and Toki never opens a device
+  exclusively, so a game keeps receiving your joystick input.
+- **macOS** may require **Input Monitoring** (System Settings → Privacy &
+  Security → Input Monitoring) for keyboard/mouse/HID capture. Without it those
+  silently see no input; controllers (GameController framework) are unaffected.
+- A bound device that's unplugged still shows its label in Settings and simply
+  does nothing until reconnected.
 
 ### Connecting to a remote server
 
@@ -390,8 +512,15 @@ same-origin.
 Sections:
 
 - **Overview** — live dashboard (gRPC-Web `Watch` stream): members per
-  frequency, current PTT holder, session age; updates on a 1 Hz tick and
-  immediately after any admin action.
+  frequency, current PTT holder, session age, and a per-member
+  **connection-quality** readout (`RTT · loss`, jitter on hover); updates on
+  a 1 Hz tick and immediately after any admin action.
+- **Connection quality** — each client measures its own inbound link and
+  reports it up: round-trip time (a timestamped probe ridden on the UDP
+  keepalive that the server echoes back as a `PONG`), inter-arrival jitter,
+  and packet loss (gaps in the server→client sequence). The client shows it
+  as 4 signal bars on its radio strip; the admin Rooms column mirrors the
+  same verdict. A dash means "not yet measured" (a just-connected member).
 - **Metrics & KPIs** — time-series charts of voice-relay bandwidth
   (ingress/egress) and users over time (1h / 24h / 7d), plus uptime / peers /
   transmitting / busiest-channel KPIs and a host-health card (CPU, memory, disk).
@@ -403,25 +532,70 @@ Sections:
   named-channels toggle), and set each channel's **duplex mode** (Half /
   Full). Both persist independently of room occupancy.
 - **Server config** — edit `serverName`, `maxPeers`, `idleKickSecs`,
-  `voiceQuality`, the named-channels toggle, and `grpcPassword` at runtime.
+  `voiceQuality`, the named-channels toggle, the **require-identity** toggle
+  (reject clients without a verified identity — makes bans airtight), and
+  `grpcPassword` at runtime.
+- **Bans** — review and lift identity bans (who, why, by whom, when; a
+  "machine" badge marks bans that also cover the machine hash).
 - **Account** — rotate the current admin user's password (revokes other
   sessions).
 
 Per-client actions in the roster: **kick**, **move** (to another frequency),
-**rename** (broadcasts `DisplayNameChanged`), and **priority** (elect/clear a
-priority speaker on a channel).
+**rename** (broadcasts `DisplayNameChanged`), **priority** (elect/clear a
+priority speaker on a channel), **mute**, **ban**, and **grant/revoke broadcast**
+(see Global Broadcast below).
+
+**Mute** silences a member's *transmit* without disconnecting them: the
+server refuses their PTT presses (`SetMute`), so they stay connected and keep
+hearing the channel — the gentle lever between doing nothing and a kick/ban.
+Muting whoever currently holds the floor drops it on the spot so the channel
+isn't stuck on a now-silent talker; the muted client gets a "muted by an
+operator" cue and its PTT button goes red ("UNABLE TO TALK"). Mute is
+**session-scoped** (it clears if they reconnect) and audited; the roster shows
+a **MUTED** badge.
+
+**Channel mute / No-Talk channels** mute a *whole frequency* (`SetChannelMute`):
+while a channel is muted, nobody tuned there may take the floor — **except a
+priority speaker**, who keeps their voice. That's the "stage" / "town-hall"
+model: a default-muted channel where you grant voice by promoting a member to
+**priority speaker** on it. Moving to another (unmuted) channel restores
+transmit instantly, since the gate is keyed on the member's current frequency.
+An individual **member mute** still outranks a priority grant — a personally
+muted speaker stays silent even on a channel where they'd otherwise be the
+granted voice. Channel mutes are persisted (across restarts and occupancy, so
+you can pre-mute an empty channel) and audited; the panel shows a **MUTED**
+badge and a per-channel toggle.
+
+Both mutes run through a single relay-side **speak-gate**
+(`member_muted || (channel_muted && !priority)`), so the No-Talk behaviour is
+just "default-deny + priority grant" on the same check the per-member mute uses.
+
+**Ban** kicks the session and blocks its *identity* from registering again,
+with an optional reason echoed to the banned client and an optional **machine
+ban** (a wiped config mints a fresh identity but keeps the machine hash, so it
+stays banned). Members without a verified identity can only be kicked — there's
+nothing durable to ban.
+
+Members that registered with a verified **client identity** show a
+fingerprint badge with their durable identity string (e.g. `7Q4XF9KB`)
+next to the display name; hover it for the full public key, the machine-hash
+prefix, and when this identity was first seen by the server. The connect line
+in the audit log carries the same identity, so a renamed or reconnected
+client stays attributable.
 
 ### API surface (server)
 
 | Endpoint / RPC | Surface | Notes |
 |---|---|---|
-| `Signaling.Register` | gRPC | Sends `client_version`; returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR. Rate-limited per IP. |
+| `Signaling.Register` | gRPC | Sends `client_version` + optional signed identity (pubkey, challenge nonce, signature, machine hash); returns `client_id`, `audio_token`, advertised audio endpoint, AEAD key, and the advertised codec. Rejects an incompatible MAJOR.MINOR, a present-but-invalid identity, and a **banned** identity / machine hash (`PERMISSION_DENIED` + the ban reason). Rate-limited per IP. |
+| `Signaling.IdentityChallenge` | gRPC | Issues a short-lived (~60 s), stateless nonce the client signs in the subsequent `Register` to prove possession of its identity key. |
 | `Signaling.Join` | gRPC server-stream | Pushes `Event`s (members joined/left, PTT, frequency change, rename, channel-name change). |
 | `Signaling.Leave` | gRPC | Explicit disconnect. |
 | `Signaling.ChangeFrequency` | gRPC | Move between rooms without reopening the event stream. |
-| `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. |
-| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive; `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = 10 ms Opus frame. Server→peer packets prepend the codec version. |
-| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions, runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
+| `Signaling.PushToTalk` | gRPC client-stream | Stream PTT key-down/key-up; server fans out to other members. A broadcast PTT (sent when the client holds the broadcast binding and holds the admin-granted global-broadcast capability) seizes floors on all occupied frequencies simultaneously. |
+| `Signaling.ReportConnectionQuality` | gRPC | Client pushes its locally-measured RTT / jitter / loss every few seconds; the server denormalizes the latest onto the session for the admin Rooms quality column. Advisory — a dropped report just delays the next refresh. |
+| UDP `:50051` | raw UDP | Audio packets: `[16-byte token][1-byte version][8-byte seq][payload][16-byte tag]`, AEAD-sealed (ChaCha20-Poly1305) with the per-session key. Version `0` = keepalive (carries a 16-byte RTT probe); `1` = 10 ms raw-PCM frame (mono i16 LE 48 kHz); `2` = Opus frame whose duration is server-advertised via `RegisterResponse.opus_frame_ms` (10/20/40 ms → 480/960/1920 samples; absent or 0 = legacy 10 ms); `3` = `PONG` (server's RTT-probe echo). Server→peer packets prepend the version. |
+| `toki.admin.v1.Admin/*` | gRPC-Web | The admin control plane: `Watch` (server-stream dashboard), operator actions (kick / move / rename / priority / **mute** / **ban** / **grant-broadcast** / **revoke-broadcast**), bans (`BanClient` / `ListBans` / `LiftBan`), runtime config, metrics, health, audit, channel names. Behind the session-cookie auth interceptor. |
 | `POST /api/login` | HTTPS | Admin login; sets the session cookie (TTL `session_ttl_hours`). Per-IP rate-limited. |
 | `POST /api/logout` | HTTPS | Clears the session cookie. |
 
@@ -523,17 +697,28 @@ volumes:
 The repo's [docker-compose.yml](../docker-compose.yml) ships a source-mounted
 dev variant of this stack (`cargo run` + Vite dev server).
 
-### 5. Customizing the PTT key from the CLI
+### 5. Customizing the PTT binding from the CLI
 
 ```toml
 [hotkey]
-key = "F8"
-mouse_button = ""   # clear any mouse binding
+binding       = "key:F8"          # primary trigger
+secondary     = "gamepad:0:South" # optional fallback (PTT fires if either is held)
+broadcast_ptt = "key:F9"          # global-broadcast PTT (inert until admin grants capability)
 ```
 
-Valid `key` values are `keyboard_types::Code` variant names (`Backquote`,
-`Space`, `F1`–`F24`, letter keys like `KeyA`, etc.). Restart the client to pick
-up the change.
+The `binding` / `secondary` values use the tagged form:
+
+| Form | Example | Meaning |
+|------|---------|---------|
+| `key:<Code>` | `key:F8` | `keyboard_types::Code` variant name (`Backquote`, `Space`, `F1`–`F24`, `KeyA`, …) |
+| `mouse:<label>` | `mouse:Middle` | Mouse button (`Left`, `Right`, `Middle`, `Mouse4`, …) |
+| `gamepad:<index>:<button>` | `gamepad:0:South` | Controller button; `index` selects the pad when several are connected (`0` = first) |
+| `streamdeck:<vid>:<pid>:<key>` | `streamdeck:0x0fd9:0x0080:3` | Stream Deck key (0-based) |
+| `hid:<vid>:<pid>:<byte>:<bit>` | `hid:0x046d:0xc52b:2:4` | Generic HID report bit |
+
+It's easiest to set these from the in-app **Settings** BIND flow rather than by
+hand. Restart the client to pick up a hand-edited change. Legacy configs using
+`key`/`mouse_button` (without `binding`) still work unchanged.
 
 ## Troubleshooting
 
@@ -579,7 +764,10 @@ target. Verify the URL and that the DB accepts TLS connections.
 - Confirm UDP `50051` (or your `TOKI_AUDIO_ADDR`) is reachable from the client.
   Firewalls + NAT often allow the TCP gRPC handshake but silently drop UDP.
 - When the server is behind NAT, set `TOKI_AUDIO_PUBLIC` to the externally
-  reachable `host:port`.
+  reachable host. Note the client connects UDP on the **same port it reached
+  gRPC on**, ignoring any different port in `TOKI_AUDIO_PUBLIC` — so make sure
+  audio is exposed on the gRPC port. If you moved gRPC to a non-default port
+  (e.g. `:50052`), audio must be reachable there too.
 - The server learns the client's UDP source from the version-`0` keepalive. If
   clients never send one (broken outbound UDP path), the server has nowhere to
   relay audio to.
@@ -588,6 +776,19 @@ target. Verify the URL and that the DB accepts TLS connections.
 
 You hit `maxPeers` (default 256). Bump it in the admin panel's Server Config
 section.
+
+### Broadcast PTT is bound but does nothing
+
+The `broadcast_ptt` binding is inert until an admin grants the global-broadcast
+capability to your session from the Channels view (member context menu →
+**Grant broadcast**). The binding has no effect in open mode or before a grant —
+this is by design.
+
+### Admin panel rejects "Grant broadcast" with `FAILED_PRECONDITION`
+
+Another connected client already holds the global-broadcast capability. Only one
+client may hold it at a time. Revoke it from the current holder first (member
+context menu → **Revoke broadcast**), then grant it to the new client.
 
 ### `cargo build` fails with "could not find `protoc`"
 
@@ -605,6 +806,28 @@ list.
 The Windows release build uses `windows_subsystem = "windows"`, which detaches
 from the console. `tracing` writes are silently dropped. Use a debug build
 (`cargo run -p toki-client`) for log output.
+
+### Cross-compiling a Windows `.exe` from macOS
+
+The shipped Windows binary is built by CI on a native `windows-latest` MSVC
+runner (`.github/workflows/ci.yml`). For **local testing** you can cross-compile
+a `windows-gnu` (mingw) `.exe` from macOS, but `audiopus_sys` (Opus) can't build
+its C library for Windows on a Mac host, so you must supply a prebuilt mingw
+libopus:
+
+```sh
+brew install mingw-w64 automake autoconf libtool pkg-config
+rustup target add x86_64-pc-windows-gnu
+
+scripts/build-opus-mingw.sh        # builds vendor/opus-mingw/.../libopus.a (once)
+scripts/build-windows-cross.sh --release
+# → target/x86_64-pc-windows-gnu/release/toki.exe
+```
+
+The wrapper sets `OPUS_LIB_DIR` / `OPUS_STATIC` / `OPUS_NO_PKG` only for the
+cross-build (they'd break a native macOS build) and clears the `audiopus_sys`
+build cache so cargo re-resolves the link path. This produces a GNU-ABI binary
+for testing — not the MSVC binary that's actually released.
 
 ## Architecture Overview
 
@@ -648,7 +871,8 @@ Key client modules ([crates/client/src/](../crates/client/src/)):
   (incl. Opus encode/decode and PTT-release flush).
 - `audio.rs` — cpal input/output on a dedicated thread; PTT-gated capture;
   inbound feeds a latency-managed playback ring.
-- `hotkey.rs` — global keyboard/mouse hotkey.
+- `hotkey.rs` — global input binding across keyboard/mouse (device_query),
+  gamepads (gilrs), and Stream Deck / HID (hidapi); passive, non-exclusive.
 - `update.rs` — GitHub Releases update check (notify-only).
 - `config.rs` — persisted user preferences.
 - `state.rs` — connection + UI state shared between runtime and GUI.
@@ -660,3 +884,20 @@ so there's no encoder buffering. Operators can drop to raw PCM or dial Opus
 quality from the admin panel; the codec lives entirely on the clients (the
 server relays opaque encrypted payloads), so adding future codecs is a
 client-only change plus a wire-version byte.
+
+**Opus frame size.** The server advertises a frame duration (10/20/40 ms) in
+`RegisterResponse.opus_frame_ms`; the client encoder accumulates that many
+10 ms capture chunks before sending one UDP packet. At 24 kbps/10 ms the
+payload is only ~30 B while per-packet overhead is ~53 B, so doubling the
+frame to 20 ms halves packet rate and cuts relay egress materially. Stacks with
+DTX (silence suppression) for further savings during speech pauses.
+
+The latency cost is +10 ms at 20 ms frames, +30 ms at 40 ms frames
+(mouth-to-ear). The default (10 ms) preserves the original low-latency
+behaviour.
+
+**Client-compatibility warning.** Clients older than the release that added
+`opus_frame_ms` carry a decode buffer sized for ≤30 ms (1440 samples). A 40 ms
+frame (1920 samples) would have overflowed that buffer — the bug is fixed in
+the same release. Do not raise `opusFrameMs` above `10` until every connected
+client is on this release or newer.

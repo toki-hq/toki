@@ -23,6 +23,7 @@ use crate::audio::{
     BeepPreset,
 };
 use crate::config::{self, HotkeyBinding};
+use crate::dsp::{DspParams, MonitorParams, OutputDspParams};
 use crate::hotkey::{self, InstalledHotkey};
 use crate::runtime::{self, Cmd};
 use crate::state::{self, ConnState, SharedState};
@@ -44,24 +45,23 @@ enum RadioState {
     Busy,
 }
 
-/// Which audio direction a `paint_knob` call drives. Both knobs share
-/// the same visuals — only the underlying field, the apply path
-/// (input vs output gain), and the indicator colour-when-muted differ.
+/// Which audio control a sound-drawer fader drives. The faders share
+/// visuals — only the bound field, the apply path, the colour, and the
+/// readout format differ. The explicit discriminants double as a stable
+/// per-fader key for egui interaction ids.
 #[derive(Clone, Copy)]
-enum KnobKind {
-    /// Input (microphone) gain. Applied unconditionally; mute is an
-    /// output-only concept.
-    Mic,
-    /// Output (speaker) gain. While muted, the knob updates
-    /// `config.audio.output_gain` and `gain_before_mute` so the next
-    /// unmute reflects the user's chosen level — but does *not* call
-    /// `audio_gains.set_output`, which would defeat the mute.
-    Speaker,
-    /// Stereo playback balance in `[-1, 1]`, centred at 0. Routes
-    /// received audio toward the left or right ear — a mono-earpiece
-    /// effect for walkie-talkie listening. Unlike the gain knobs its
-    /// detent sits at 12 o'clock (centre), not full-left.
-    Balance,
+enum FaderKind {
+    /// Output (speaker) volume → `config.audio.output_gain`. The "VOL"
+    /// fader. Dragging it while muted un-mutes first (the design's mute
+    /// coupling); reads 0 and uses muted ink while muted.
+    Volume = 0,
+    /// Stereo playback balance → `config.audio.balance` in `[-1, 1]`,
+    /// centred at 0. Centre-origin fill; routes received audio toward one
+    /// ear for the mono-earpiece effect.
+    Balance = 1,
+    /// Input (microphone) gain → `config.audio.input_gain`. The "MIC"
+    /// fader; warm amber accent. Independent of mute (output-only).
+    Mic = 2,
 }
 
 impl RadioState {
@@ -123,6 +123,21 @@ pub struct TokiApp {
     /// Settings takes effect on the next take-floor / clear-floor
     /// event without a reconnect.
     beep_params: BeepParams,
+    /// Live atomics behind the capture-DSP toggles (noise
+    /// suppression and AGC). Same sharing pattern as `beep_params`:
+    /// the runtime's mic loop reads them every frame, so flipping a
+    /// Settings checkbox takes effect on the next 10 ms frame.
+    dsp_params: DspParams,
+    /// Live atomics behind the playback "radio FX" dirtier. Read by the
+    /// runtime's UDP recv task per voice chunk, so the Settings toggle /
+    /// intensity slider take effect on the next chunk. Off by default.
+    output_dsp_params: OutputDspParams,
+    /// Live atomics behind the self-monitor (sidetone) test aid. Read by
+    /// the runtime's mic loop every frame: when enabled it loops the mic
+    /// (raw or DSP-processed, per `processed`) back to the speakers so the
+    /// operator can hear themselves and A/B the capture DSP. Always starts
+    /// off — not persisted — since a mic→speaker loop is a feedback risk.
+    monitor_params: MonitorParams,
     /// Live peak levels published by the cpal callbacks. Kept on
     /// `self` so a future Settings meter (e.g. a per-direction VU
     /// bar) can read them without re-plumbing the audio handle.
@@ -151,6 +166,10 @@ pub struct TokiApp {
     /// called once per viewport. Cleared when the window closes so a
     /// fresh open re-registers.
     settings_fonts_ready: bool,
+    /// Which Settings page the sidebar has selected. Persists across
+    /// open/close within a session (it's plain UI state, not saved to
+    /// config) so reopening lands on the last-viewed tab.
+    settings_tab: SettingsTab,
 
     /// Connect dialog open? Triggered by the strip's "NEW CONNECTION"
     /// button when offline. Hosts URL + Username inputs in their own
@@ -168,6 +187,11 @@ pub struct TokiApp {
     muted: bool,
     /// Pre-mute output gain, so toggling mute round-trips cleanly.
     gain_before_mute: f32,
+    /// Sound drawer folded (`false`) or open (`true`). UI-local, not
+    /// persisted — resets folded on launch (a fold state is a transient
+    /// preference, and the window opens at its compact height). When this
+    /// flips, `update` drives the OS window to `theme::window_h`.
+    show_drawer: bool,
     /// Currently-selected channel index in the 446–448 MHz band. UI
     /// updates this instantly on chevron click; the actual server-
     /// side room join is debounced — see `freq_change_deadline`.
@@ -215,11 +239,12 @@ pub struct TokiApp {
 }
 
 /// In-flight press gesture on a single memory button. A short left
-/// release recalls/saves; a held left press (≥ [`MEM_HOLD`]) overwrites;
-/// a held right press frees. Each side latches on press-start and only
-/// resolves when its global mouse button goes up, so it survives the
-/// transient `is_pointer_button_down_on()` flicker documented on the
-/// PTT handler.
+/// release recalls/saves; a held left press (≥ [`MEM_HOLD`]) (re)assigns
+/// the slot to the current frequency; a right click frees a saved slot
+/// (released over it — dragging off aborts).
+/// Each side latches on press-start and only resolves when its mouse
+/// button goes up, so it survives the transient
+/// `is_pointer_button_down_on()` flicker documented on the PTT handler.
 #[derive(Default, Clone, Copy)]
 struct MemPress {
     /// When the left button went down on this widget, if it's down.
@@ -227,16 +252,16 @@ struct MemPress {
     /// Whether the long-press overwrite already fired this gesture, so
     /// the subsequent release doesn't *also* fire the short-click recall.
     primary_fired: bool,
-    /// When the right button went down on this widget, if it's down.
-    secondary_since: Option<Instant>,
-    /// Whether the long-press free already fired this gesture.
-    secondary_fired: bool,
+    /// Whether the right button is latched on this widget. Unlike the
+    /// left side this carries no timestamp — the right gesture has no
+    /// hold, it just clears a *saved* slot on a clean release over it.
+    secondary_latched: bool,
 }
 
-/// How long either mouse button must be held on a memory button before
-/// the hold gesture (overwrite on left, free on right) fires. Short
-/// enough to feel responsive, long enough that an ordinary click never
-/// trips it.
+/// How long the left button must be held on a memory button before the
+/// (re)assign gesture fires (a short left click recalls/saves instead).
+/// Short enough to feel responsive, long enough that an ordinary click
+/// never trips it. The right button frees on click, so it has no hold.
 const MEM_HOLD: Duration = Duration::from_millis(450);
 
 /// Which binding an in-progress key-capture session will write to.
@@ -244,14 +269,45 @@ const MEM_HOLD: Duration = Duration::from_millis(450);
 /// input); the app decides where the captured value lands.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RecordTarget {
-    /// The push-to-talk trigger.
+    /// The primary push-to-talk trigger.
     Ptt,
+    /// The secondary/fallback push-to-talk trigger. PTT fires while
+    /// either the primary or this is held.
+    PttSecondary,
+    /// The dedicated global-broadcast trigger. Inert until an admin
+    /// grants the capability; when held (and granted) it transmits to
+    /// every frequency at once. Separate from the normal PTT.
+    BroadcastPtt,
     /// Memory-recall hotkey for preset slot `0..4`.
     Memory(usize),
     /// Tune one channel up.
     FreqUp,
     /// Tune one channel down.
     FreqDown,
+}
+
+/// The three pages of the Settings window. Each renders full-height on
+/// the right while the sidebar lists them; the selected one is held in
+/// [`TokiApp::settings_tab`]. Grouped by theme:
+///   * **Controls** — PTT + memory + tuning key bindings.
+///   * **Audio** — everything sound-related: input/output devices, level
+///     meters, test tone, self-monitor, capture DSP (noise/AGC), playback
+///     Radio FX, and roger beeps.
+///   * **Updates** — version + the update checker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsTab {
+    Controls,
+    Audio,
+    Updates,
+}
+
+impl SettingsTab {
+    /// Tabs in sidebar order, each with the label shown on its button.
+    const ALL: &'static [(SettingsTab, &'static str)] = &[
+        (SettingsTab::Controls, "CONTROLS"),
+        (SettingsTab::Audio, "AUDIO"),
+        (SettingsTab::Updates, "UPDATES"),
+    ];
 }
 
 impl TokiApp {
@@ -270,6 +326,7 @@ impl TokiApp {
         let audio::AudioHandle {
             mic_rx,
             playback,
+            effects,
             devices,
             control,
             gains,
@@ -290,7 +347,30 @@ impl TokiApp {
             BeepPreset::index_of(&config.beeps.preset),
             config.beeps.volume,
         );
-        let cmd_tx = runtime::spawn(state.clone(), mic_rx, playback, beep_params.clone());
+        // Capture-DSP atomics — seeded from the saved toggles, shared
+        // live with the runtime's mic loop (same arrangement as the
+        // beep params above).
+        let dsp_params = DspParams::new(config.audio.noise_suppression, config.audio.agc);
+        // Playback radio-FX atomics — seeded from the saved toggle +
+        // amount (off by default), shared live with the runtime's recv
+        // task (same arrangement as the capture DSP above).
+        let output_dsp_params =
+            OutputDspParams::new(config.audio.output_dirty, config.audio.output_dirty_amount);
+        // Self-monitor atomics — always start off (not persisted; a
+        // mic→speaker loop left on across launches would howl) and default
+        // to monitoring the processed mic so the first listen shows the
+        // DSP at work. Shared live with the runtime's mic loop.
+        let monitor_params = MonitorParams::new(false, true);
+        let cmd_tx = runtime::spawn(
+            state.clone(),
+            mic_rx,
+            playback,
+            effects,
+            beep_params.clone(),
+            dsp_params.clone(),
+            output_dsp_params.clone(),
+            monitor_params.clone(),
+        );
 
         let initial = config.hotkey.to_input().or_else(|| {
             tracing::warn!(
@@ -302,8 +382,10 @@ impl TokiApp {
         let installed = hotkey::install(
             cmd_tx.clone(),
             initial,
+            config.hotkey.to_input_secondary(),
             config.hotkey.memory_inputs(),
             config.hotkey.freq_inputs(),
+            config.hotkey.broadcast_ptt_input(),
         );
 
         // Seed the channel index from the saved frequency. If the
@@ -349,17 +431,22 @@ impl TokiApp {
             audio_control: control,
             audio_gains: gains,
             beep_params,
+            dsp_params,
+            output_dsp_params,
+            monitor_params,
             audio_levels: levels,
             audio_spectrum: spectrum,
             ptt_held: false,
             tx_start: None,
             show_settings: false,
             settings_fonts_ready: false,
+            settings_tab: SettingsTab::Controls,
             show_connect: false,
             connect_fonts_ready: false,
             connect_form: ConnectForm::default(),
             muted: false,
             gain_before_mute: 1.0,
+            show_drawer: false,
             channel_idx,
             freq_change_deadline: None,
             spectrum_bars: vec![0.0; T::SPECTRUM_BARS],
@@ -410,7 +497,14 @@ impl TokiApp {
             let holder = s.holder.clone();
             let is_tx = self_id.is_some() && holder.as_deref() == self_id.as_deref();
             let name = if let Some(h) = &holder {
-                s.members.get(h).cloned().unwrap_or_else(|| h.clone())
+                // For a global broadcast the talker is usually on another
+                // frequency (not in our roster), so prefer the callsign the
+                // server stamped on the event; otherwise resolve from roster.
+                s.broadcast_talker
+                    .clone()
+                    .filter(|_| s.broadcast_active)
+                    .or_else(|| s.members.get(h).cloned())
+                    .unwrap_or_else(|| h.clone())
             } else {
                 String::new()
             };
@@ -422,8 +516,11 @@ impl TokiApp {
             holder_name,
             is_transmitting,
             duplex_full: s.duplex_full,
+            broadcast_active: s.broadcast_active,
             display_name: s.display_name.clone(),
             frequency: s.frequency.clone(),
+            muted: s.locally_silenced(),
+            conn_quality: s.conn_quality.as_ref().map(|h| h.snapshot()),
             log_tail: s.log.iter().next_back().cloned().unwrap_or_default(),
         }
     }
@@ -682,6 +779,10 @@ struct StateSnapshot {
     /// OLED duplex light reads `duplex_full`/`duplex_known` from state
     /// directly.)
     duplex_full: bool,
+    /// `true` when the current floor activity is a global broadcast.
+    /// Drives the distinct light-blue talking indicator (and the
+    /// "BROADCAST" label) in the center display while it's live.
+    broadcast_active: bool,
     /// Our own live callsign. Mirrors `ClientState.display_name` and
     /// changes mid-session when the admin renames us — read by the
     /// topbar so the change is visible without a reconnect.
@@ -692,6 +793,15 @@ struct StateSnapshot {
     /// (server→client `FrequencyChanged`) snap the tuner over to
     /// match without round-tripping through user input.
     frequency: Option<String>,
+    /// `true` when an operator has barred us from transmitting on the
+    /// current channel — either a personal member-mute or a mute on the
+    /// channel we're tuned to. Drives the PTT button's disabled "UNABLE
+    /// TO TALK" treatment. Moving to an unmuted channel clears it.
+    muted: bool,
+    /// Live connection-quality readout (RTT / jitter / loss + a 0–4 bars
+    /// score), or `None` when disconnected or not yet measured. Drives
+    /// the topbar signal-bars glyph.
+    conn_quality: Option<crate::telemetry::ConnQuality>,
     #[allow(dead_code)]
     log_tail: String,
 }
@@ -702,6 +812,63 @@ struct StateSnapshot {
 
 fn font_mono(size: f32) -> FontId {
     FontId::new(size, FontFamily::Monospace)
+}
+
+/// A gain value in `[0, 2]` formatted as an integer percentage where
+/// 100% = unity (passthrough). Shared by the drawer's VOL/MIC readouts
+/// and the folded summary line.
+fn gain_pct(gain: f32) -> u32 {
+    (gain.clamp(0.0, 2.0) * 100.0).round() as u32
+}
+
+/// Format the stereo balance (`[-1, 1]`, 0 = centre) as the design's
+/// compact pan label: `C` near centre, else `L`/`R` + 0..100. Mirrors the
+/// handoff's `balanceLabel`, adapted to Toki's `[-1, 1]` range (the
+/// prototype used `[0, 1]` with 0.5 centre).
+fn balance_label(b: f32) -> String {
+    let pct = (b.abs() * 100.0).round() as u32;
+    if pct <= 1 {
+        "C".to_string()
+    } else if b < 0.0 {
+        format!("L{pct}")
+    } else {
+        format!("R{pct}")
+    }
+}
+
+/// The drawer-handle "sliders" glyph: two horizontal lines, each with a
+/// filled dot at a different x (a fader icon). Drawn into `rect` in
+/// `color`. Replaces the design's `Icon.Sliders` SVG with painter
+/// primitives (egui has no SVG; this matches the icon set's hand-drawn
+/// style).
+fn paint_sliders_icon(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let stroke = Stroke::new(1.4, color);
+    let x0 = rect.left();
+    let x1 = rect.right();
+    // Top line, dot toward the right; bottom line, dot toward the left.
+    let y_top = rect.top() + rect.height() * 0.32;
+    let y_bot = rect.top() + rect.height() * 0.68;
+    painter.line_segment([Pos2::new(x0, y_top), Pos2::new(x1, y_top)], stroke);
+    painter.line_segment([Pos2::new(x0, y_bot), Pos2::new(x1, y_bot)], stroke);
+    let r = 1.7;
+    painter.circle_filled(Pos2::new(x0 + rect.width() * 0.68, y_top), r, color);
+    painter.circle_filled(Pos2::new(x0 + rect.width() * 0.32, y_bot), r, color);
+}
+
+/// A small chevron centred at `c`, pointing down when `up == false` and
+/// up when `up == true` (the design rotates a chevron-down 180°; an
+/// up/down pair reads identically and is simpler to paint). Used on the
+/// drawer handle to signal fold state.
+fn paint_chevron(painter: &egui::Painter, c: Pos2, color: Color32, up: bool) {
+    let w = 4.0; // half-width
+    let h = 2.5; // half-height
+    let stroke = Stroke::new(1.4, color);
+    let (tip_dy, arm_dy) = if up { (h, -h) } else { (-h, h) };
+    let tip = Pos2::new(c.x, c.y + tip_dy);
+    let left = Pos2::new(c.x - w, c.y + arm_dy);
+    let right = Pos2::new(c.x + w, c.y + arm_dy);
+    painter.line_segment([left, tip], stroke);
+    painter.line_segment([right, tip], stroke);
 }
 
 /// Best-effort truncation to fit inside `max_w` pixels at the given
@@ -795,7 +962,9 @@ fn offline_reason(snap: &StateSnapshot, is_offline: bool) -> String {
             // error if we can recognize it — falls back to the raw
             // message otherwise.
             let lower = e.to_ascii_lowercase();
-            if lower.contains("auth") {
+            if lower.contains("already in use") || lower.contains("alreadyexists") {
+                "CALLSIGN TAKEN".into()
+            } else if lower.contains("auth") {
                 "AUTH FAILED".into()
             } else if lower.contains("refused")
                 || lower.contains("unreachable")
@@ -991,6 +1160,39 @@ fn paint_refresh_icon(
     painter.line_segment([tip, back2], stroke);
 }
 
+/// Width of the Settings tab sidebar, in points. Wide enough for the
+/// longest label ("CONTROLS"/"UPDATES") at the 10 px mono face with a
+/// little breathing room.
+const SETTINGS_SIDEBAR_W: f32 = 92.0;
+
+/// One tab in the Settings sidebar: a full-width, left-aligned button
+/// that reads selected (phosphor text on a faint fill) or idle (dim
+/// text, transparent). Returns `true` on click. Styled by hand rather
+/// than `selectable_label` so the selected fill spans the whole sidebar
+/// width and the type matches the section-header phosphor.
+fn settings_tab_button(ui: &mut egui::Ui, label: &str, selected: bool) -> bool {
+    let (rect, resp) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 24.0), egui::Sense::click());
+    let hovered = resp.hovered();
+    if selected {
+        ui.painter().rect_filled(rect, 3.0, T::PRIMARY_INK);
+    } else if hovered {
+        // A barely-there wash on hover so tabs feel live without a hard
+        // background flash.
+        ui.painter()
+            .rect_filled(rect, 3.0, T::PRIMARY_INK.gamma_multiply(0.4));
+    }
+    let color = if selected { T::PRIMARY } else { T::INK_DIM };
+    ui.painter().text(
+        rect.left_center() + Vec2::new(8.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::monospace(10.0),
+        color,
+    );
+    resp.clicked()
+}
+
 /// Section header inside the settings window: a small upper-case label
 /// in the phosphor primary colour, followed by a thin divider. Used to
 /// group rows into "CUSTOMIZATION" and "AUDIO" buckets.
@@ -1011,6 +1213,30 @@ fn section_header(ui: &mut egui::Ui, label: &str) {
         Stroke::new(1.0, T::PRIMARY_INK),
     );
     ui.add_space(8.0);
+}
+
+/// A horizontal VU bar for the Settings AUDIO section. `level` is the
+/// smoothed peak in `[0.0, 1.0]` straight from [`AudioLevels`]. We draw
+/// a dim track and fill it left-to-right proportional to the level; the
+/// fill turns amber as it nears full-scale (>0.9) so "my mic is too hot
+/// / clipping" reads at a glance without a number. Sits inside a
+/// [`settings_row`] like any other control.
+fn paint_level_meter(ui: &mut egui::Ui, level: f32) {
+    let level = level.clamp(0.0, 1.0);
+    // Fixed footprint so the INPUT/OUTPUT meter rows line up under the
+    // device pickers above them.
+    let (rect, _resp) = ui.allocate_exact_size(Vec2::new(200.0, 10.0), egui::Sense::hover());
+    let painter = ui.painter();
+    // Track behind the fill.
+    painter.rect_filled(rect, 2.0, T::PRIMARY_INK);
+    if level > 0.0 {
+        let mut fill = rect;
+        fill.set_width(rect.width() * level);
+        // Amber once we're within ~1 dB of full-scale — the "back off"
+        // cue. Phosphor green otherwise.
+        let color = if level > 0.9 { T::WARN } else { T::PRIMARY };
+        painter.rect_filled(fill, 2.0, color);
+    }
 }
 
 /// One row in the settings window: fixed-width label + arbitrary
@@ -1319,6 +1545,22 @@ impl eframe::App for TokiApp {
                             self.config.save();
                         }
                     }
+                    RecordTarget::PttSecondary => {
+                        if let Err(e) = self.hotkey.rebind_secondary(Some(input)) {
+                            tracing::warn!(error = %e, "secondary PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_ptt_secondary(Some(input));
+                            self.config.save();
+                        }
+                    }
+                    RecordTarget::BroadcastPtt => {
+                        if let Err(e) = self.hotkey.rebind_broadcast_ptt(Some(input)) {
+                            tracing::warn!(error = %e, "broadcast PTT rebind failed");
+                        } else {
+                            self.config.hotkey.set_broadcast_ptt(Some(input));
+                            self.config.save();
+                        }
+                    }
                     RecordTarget::Memory(i) => {
                         self.hotkey.rebind_memory(i, Some(input));
                         self.config
@@ -1357,7 +1599,12 @@ impl eframe::App for TokiApp {
         }
 
         // ── TX timer ────────────────────────────────────────────────
-        if matches!(st, RadioState::Tx) {
+        // The 30 s cap applies to a normal transmission only. A global
+        // broadcast is governed by the operator holding the dedicated
+        // broadcast key (released via the broadcast path, not Cmd::PttUp),
+        // and an all-hands announcement shouldn't be force-cut at the
+        // per-transmission cap — so skip the timer while broadcasting.
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             if self.tx_start.is_none() {
                 self.tx_start = Some(Instant::now());
             }
@@ -1380,6 +1627,18 @@ impl eframe::App for TokiApp {
             self.paint_strip(ui, &snap, st);
         });
 
+        // Drive the OS window to match the drawer's fold state. `paint_strip`
+        // (above) processes this frame's handle click, so `show_drawer` is
+        // already current. Only command a resize when the height actually
+        // differs from what's on screen — otherwise we'd re-send it every
+        // frame and fight the window manager. Width is preserved (the user
+        // may have widened the strip within its allowed band).
+        let target_h = T::window_h(self.show_drawer);
+        let cur = ctx.input(|i| i.screen_rect().size());
+        if (cur.y - target_h).abs() > 0.5 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(cur.x, target_h)));
+        }
+
         // Settings live in a real OS-level child viewport (own titlebar,
         // resizable, can be moved off the strip). Using
         // `show_viewport_immediate` rather than `_deferred` keeps the
@@ -1388,10 +1647,14 @@ impl eframe::App for TokiApp {
         // is fine — it's a tiny form.
         if self.show_settings {
             let viewport_id = egui::ViewportId::from_hash_of("toki-settings");
+            // Fixed 640×640 for the tabbed layout: square gives the
+            // sidebar + device-picker rows room side-by-side and leaves
+            // each tab's page comfortable headroom. Min == initial so the
+            // window can't be shrunk into the sidebar crowding the rows.
             let builder = egui::ViewportBuilder::default()
                 .with_title("Toki — Settings")
-                .with_inner_size([460.0, 520.0])
-                .with_min_inner_size([380.0, 380.0]);
+                .with_inner_size([640.0, 640.0])
+                .with_min_inner_size([640.0, 640.0]);
             ctx.show_viewport_immediate(viewport_id, builder, |child_ctx, _class| {
                 // Each viewport carries its own font atlas — push the
                 // brand fonts on the first frame after open so the
@@ -1417,15 +1680,29 @@ impl eframe::App for TokiApp {
                                 self.paint_settings_window(ui);
                             });
                     });
+                // Keep the AUDIO section's VU meters animating even when
+                // we're offline. While connected the parent repaints on a
+                // 33 ms cadence and this immediate child rides along, but
+                // offline the parent goes idle — without this the meters
+                // would freeze the instant the user stops interacting,
+                // exactly when they're trying to check their mic.
+                child_ctx.request_repaint_after(Duration::from_millis(33));
                 // Honor the OS close button (red dot / X / window menu).
                 if child_ctx.input(|i| i.viewport().close_requested()) {
                     self.show_settings = false;
                 }
             });
         } else if self.settings_fonts_ready {
-            // Window just closed — arm `register_fonts` to run again on
-            // the next open, since the child context will be re-created.
+            // Window just closed (catches both the OS close button and the
+            // gear toggle). Arm `register_fonts` to run again on the next
+            // open, since the child context will be re-created.
             self.settings_fonts_ready = false;
+            // Force the self-monitor off on close. It's a transient test
+            // aid and a mic→speaker loop the user can no longer see is a
+            // feedback risk — so it must never outlive the window it's
+            // toggled from. (The runtime reads this live; the checkbox,
+            // which reflects the same atom, shows unchecked on next open.)
+            self.monitor_params.set_enabled(false);
         }
 
         // Connect dialog (sibling viewport to Settings). Same
@@ -1493,8 +1770,18 @@ impl eframe::App for TokiApp {
 
 impl TokiApp {
     fn paint_strip(&mut self, ui: &mut egui::Ui, snap: &StateSnapshot, st: RadioState) {
-        let rect = ui.max_rect();
+        let full = ui.max_rect();
         let painter = ui.painter().clone();
+
+        // The window is now `radio body (WIDGET_H)` + gap + `sound drawer`.
+        // Carve the fixed-height body off the top; everything below the
+        // gap is the drawer. The body keeps the exact layout it had when
+        // it was the whole window.
+        let rect = Rect::from_min_size(full.min, Vec2::new(full.width(), T::WIDGET_H));
+        let drawer_rect = Rect::from_min_max(
+            Pos2::new(full.left(), rect.bottom() + T::DRAWER_GAP),
+            full.max,
+        );
 
         // ── Chassis ────────────────────────────────────────────────
         // Three-stop vertical gradient per `design-tokens.md`:
@@ -1544,6 +1831,9 @@ impl TokiApp {
         self.paint_topbar(ui, &painter, topbar_rect, snap, st);
         self.paint_main(ui, &painter, main_rect, snap, st);
         self.paint_bottom(ui, &painter, bottom_rect, st);
+
+        // Sound drawer (VOL / BAL / MIC faders), mounted below the body.
+        self.paint_drawer(ui, drawer_rect);
     }
 
     // ── Top bar ─────────────────────────────────────────────────────
@@ -1699,6 +1989,18 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::Disconnect);
             }
             x -= 14.0;
+
+            // Signal-quality bars — cell-style 4-bar glyph from the
+            // live loss/jitter/RTT score, with the raw numbers on hover.
+            // Only while connected (no link to rate otherwise).
+            let bars_w = 18.0;
+            x -= bars_w;
+            let bars_rect = Rect::from_min_size(
+                Pos2::new(x, y_mid - T::ICON_BTN_D / 2.0),
+                Vec2::new(bars_w, T::ICON_BTN_D),
+            );
+            self.paint_signal_bars(ui, painter, bars_rect, snap.conn_quality);
+            x -= 14.0;
         }
 
         // Status chip: dot + label. Transport-down states win over
@@ -1720,6 +2022,7 @@ impl TokiApp {
                 (pulsing, "CONN…", 1.0, T::INK_DIM)
             }
             _ if self.is_tuning() => (T::TX, "TUNING", 1.0, T::INK_DIM),
+            RadioState::Tx if snap.broadcast_active => (T::BROADCAST, "BCAST", 1.2, T::INK_DIM),
             RadioState::Tx => (T::TX, "TX", 1.2, T::INK_DIM),
             RadioState::Rx => (T::PRIMARY, "RX", 1.2, T::INK_DIM),
             RadioState::Busy => (T::WARN, "BUSY", 1.0, T::INK_DIM),
@@ -1737,6 +2040,70 @@ impl TokiApp {
         );
         x -= 12.0;
         glow_dot(painter, Pos2::new(x, y_mid), 3.0, chip_color, chip_glow);
+    }
+
+    /// Cell-style 4-bar signal indicator driven by the connection-quality
+    /// score. Four ascending bars: filled green→amber→red up to the bar
+    /// count, the rest drawn as faint outlines. `None` (not yet measured)
+    /// shows all four as faint outlines. Hover reveals the raw
+    /// RTT / jitter / loss numbers.
+    fn paint_signal_bars(
+        &self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        quality: Option<crate::telemetry::ConnQuality>,
+    ) {
+        let bars = quality.and_then(|q| q.bars());
+        // Colour by score: 3–4 healthy, 2 marginal, 0–1 poor.
+        let fill = match bars {
+            Some(b) if b >= 3 => T::PRIMARY, // healthy (phosphor green)
+            Some(2) => Color32::from_rgb(0xff, 0xba, 0x4d), // marginal amber
+            Some(_) => T::WARN,              // poor (red)
+            None => T::INK_DIM,
+        };
+        let lit = bars.unwrap_or(0);
+        let n = 4usize;
+        let gap = 2.0;
+        let bar_w = (rect.width() - gap * (n as f32 - 1.0)) / n as f32;
+        // Cap the tallest bar to ~62% of the row height (shorter than the
+        // neighbouring icon buttons) and center the cluster vertically so
+        // it reads as a compact signal glyph rather than a full-height bar.
+        let max_h = (rect.height() * 0.62).round();
+        let baseline = rect.center().y + max_h / 2.0;
+        for i in 0..n {
+            // Ascending heights: shortest bar ~40% up to the capped height.
+            let frac = 0.4 + 0.6 * (i as f32 / (n as f32 - 1.0));
+            let h = max_h * frac;
+            let bx = rect.left() + i as f32 * (bar_w + gap);
+            let br =
+                Rect::from_min_max(Pos2::new(bx, baseline - h), Pos2::new(bx + bar_w, baseline));
+            if (i as u8) < lit {
+                painter.rect_filled(br, CornerRadius::same(1), fill);
+            } else {
+                painter.rect_stroke(
+                    br,
+                    CornerRadius::same(1),
+                    Stroke::new(1.0, T::DIVIDER),
+                    StrokeKind::Inside,
+                );
+            }
+        }
+
+        // Hover tooltip with the raw metrics.
+        let resp = ui.allocate_rect(rect, Sense::hover());
+        if resp.hovered() {
+            let text = match quality {
+                Some(q) if q.fresh => format!(
+                    "RTT {} ms · jitter {} ms · loss {:.2}%",
+                    q.rtt_ms,
+                    q.jitter_ms,
+                    q.loss_pct_centi as f32 / 100.0,
+                ),
+                _ => "measuring link…".to_string(),
+            };
+            resp.on_hover_text(text);
+        }
     }
 
     /// Generic topbar icon button: 28×28 with a faint border. Returns
@@ -1789,7 +2156,7 @@ impl TokiApp {
             Pos2::new(left_rect.right() + T::GAP_ROW, rect.top()),
             rect.max,
         );
-        self.paint_oled_left(ui, painter, left_rect, st);
+        self.paint_oled_left(ui, painter, left_rect, st, snap.broadcast_active);
         self.paint_oled_center(painter, center_rect, snap, st);
     }
 
@@ -1799,6 +2166,7 @@ impl TokiApp {
         painter: &egui::Painter,
         rect: Rect,
         st: RadioState,
+        broadcasting: bool,
     ) {
         paint_panel(painter, rect, T::OLED, T::OLED_RIM, T::RADIUS_OLED, None);
         paint_scanlines(painter, rect, T::RADIUS_OLED);
@@ -1892,10 +2260,18 @@ impl TokiApp {
         } else {
             T::frequency_label(freq)
         };
+        // When *we* are the global broadcaster the frequency readout goes
+        // light blue (matching the rest of the broadcast cue) instead of
+        // the amber transmit colour.
+        let (tx_color, tx_glow) = if broadcasting {
+            (T::BROADCAST, T::BROADCAST_GLOW)
+        } else {
+            (T::TX, T::TX_GLOW)
+        };
         let active_color = if offline_view {
             T::INK_MUTE
         } else if matches!(st, RadioState::Tx) {
-            T::TX
+            tx_color
         } else {
             T::PRIMARY
         };
@@ -1905,7 +2281,7 @@ impl TokiApp {
             // skips them.
             Color32::TRANSPARENT
         } else if matches!(st, RadioState::Tx) {
-            T::TX_GLOW
+            tx_glow
         } else {
             T::PRIMARY_GLOW
         };
@@ -2124,12 +2500,13 @@ impl TokiApp {
     ///
     /// Gestures (all latched in `self.mem_press[i]` so an egui hit-test
     /// flicker mid-hold doesn't reset them):
-    ///   * **Left click** — empty slot saves the current frequency;
+    ///   * **Left click** — an empty slot saves the current frequency;
     ///     a filled slot recalls it (switches the tuner). Recall is
     ///     gated on `can_switch`, exactly like the chevrons.
-    ///   * **Left hold** (≥ `MEM_HOLD`) — overwrite the slot with the
+    ///   * **Left hold** (≥ `MEM_HOLD`) — (re)assign the slot to the
     ///     current frequency, even if it was already set.
-    ///   * **Right hold** (≥ `MEM_HOLD`) — free the slot.
+    ///   * **Right click** — clear a saved slot; releasing off the slot
+    ///     aborts. A right-click on an empty slot does nothing.
     ///
     /// A filled slot pulses in the amber memory color so it's instantly
     /// distinguishable from an empty (dim, static) one.
@@ -2184,27 +2561,31 @@ impl TokiApp {
                     mp.primary_since = None;
                     mp.primary_fired = false;
                 }
-            } else if started_here && primary_down && !secondary_down {
+            } else if started_here && primary_down && !mp.secondary_latched {
                 mp.primary_since = Some(now);
                 mp.primary_fired = false;
             }
 
-            // ── Right (secondary): hold = free. Plain right-click does
-            // nothing (freeing is destructive, so we require the hold).
-            if mp.secondary_since.is_some() {
-                if secondary_down {
-                    let held = now.duration_since(mp.secondary_since.unwrap());
-                    if !mp.secondary_fired && held >= MEM_HOLD {
-                        mp.secondary_fired = true;
+            // ── Right (secondary): a click clears a saved slot. We fire
+            // on release (not press) so the held-down frames can paint
+            // the "about to erase" preview, and a right-click on an empty
+            // slot resolves to nothing. The clear only lands if the
+            // pointer is still over the slot at release, so dragging off
+            // aborts — and a latch left stale by a focus/visibility loss
+            // mid-gesture can't fire a phantom clear on resume.
+            if mp.secondary_latched {
+                if !secondary_down {
+                    // Don't let a destructive clear clobber a save/recall
+                    // the left block already resolved this frame (a chord
+                    // where both buttons release together): the left
+                    // gesture wins, the stray right release is dropped.
+                    if matches!(act, Act::None) && saved.is_some() && resp.hovered() {
                         act = Act::Free;
                     }
-                } else {
-                    mp.secondary_since = None;
-                    mp.secondary_fired = false;
+                    mp.secondary_latched = false;
                 }
-            } else if started_here && secondary_down && !primary_down {
-                mp.secondary_since = Some(now);
-                mp.secondary_fired = false;
+            } else if started_here && secondary_down && mp.primary_since.is_none() {
+                mp.secondary_latched = true;
             }
         }
 
@@ -2234,17 +2615,22 @@ impl TokiApp {
         //   * empty       → dim, static
         let filled = saved.is_some();
         let on_this = filled && saved.as_deref() == Some(current_label.as_str());
-        let (primary_holding, secondary_holding) = {
-            let mp = &self.mem_press[i];
-            (mp.primary_since.is_some(), mp.secondary_since.is_some())
-        };
+        let primary_holding = self.mem_press[i].primary_since.is_some();
+        // `will_free` is the single source of truth shared with the
+        // resolve block above: a right-press latched over a saved slot
+        // with the pointer still on it would clear it on release. Driving
+        // the erase preview off the same predicate keeps the "about to
+        // erase" paint from ever disagreeing with what release does.
+        let will_free = self.mem_press[i].secondary_latched && filled && resp.hovered();
 
         let t = ui.input(|inp| inp.time) as f32;
         let pulse = 0.5 + 0.5 * (t * 3.6).sin();
         let radius = CornerRadius::same(T::RADIUS_CHEVRON as u8);
 
-        let (border, text_col) = if secondary_holding {
-            // Erasing: shift dark + grey while the right button is held.
+        let (border, text_col) = if will_free {
+            // Erasing: shift dark + grey while the right button is held
+            // over a saved slot (releasing clears it). An empty slot has
+            // nothing to erase, so it ignores the right press.
             painter.rect_filled(
                 rect,
                 radius,
@@ -2370,7 +2756,7 @@ impl TokiApp {
             Pos2::new(rect.left() + pad_x, rect.top() + pad_y),
             Pos2::new(rect.right() - pad_x, rect.bottom() - status_h - pad_y),
         );
-        self.paint_waveform(painter, wave_rect, st);
+        self.paint_waveform(painter, wave_rect, st, snap.broadcast_active);
 
         // 1 px primary_ink divider between waveform and status row.
         let divider_y = rect.bottom() - status_h - 2.0;
@@ -2426,28 +2812,51 @@ impl TokiApp {
                 );
             }
             RadioState::Tx => {
-                glow_text(
-                    painter,
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "● TRANSMITTING",
-                    font_mono(10.0),
-                    T::TX,
-                    T::TX_GLOW,
-                    0.6,
-                );
-                let remaining = self
-                    .tx_start
-                    .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
-                    .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
-                    .max(0.0);
-                painter.text(
-                    Pos2::new(right_x, status_y),
-                    Align2::RIGHT_CENTER,
-                    format!("{:.1}s LEFT", remaining),
-                    font_mono(10.0),
-                    T::TX,
-                );
+                // When *we* are the global broadcaster, show the broadcast
+                // identity (light blue "BROADCASTING TO ALL") instead of the
+                // normal amber transmit label, matching what listeners see.
+                if snap.broadcast_active {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 BROADCASTING",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        0.6,
+                    );
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        "ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    glow_text(
+                        painter,
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "● TRANSMITTING",
+                        font_mono(10.0),
+                        T::TX,
+                        T::TX_GLOW,
+                        0.6,
+                    );
+                    let remaining = self
+                        .tx_start
+                        .map(|s| T::TX_LIMIT_MS as f32 / 1000.0 - s.elapsed().as_secs_f32())
+                        .unwrap_or(T::TX_LIMIT_MS as f32 / 1000.0)
+                        .max(0.0);
+                    painter.text(
+                        Pos2::new(right_x, status_y),
+                        Align2::RIGHT_CENTER,
+                        format!("{:.1}s LEFT", remaining),
+                        font_mono(10.0),
+                        T::TX,
+                    );
+                }
             }
             RadioState::Rx => {
                 let peer_label = if snap.holder_name.is_empty() {
@@ -2455,36 +2864,67 @@ impl TokiApp {
                 } else {
                     snap.holder_name.to_uppercase()
                 };
+                // A global broadcast tints the talking indicator light
+                // blue (with the broadcast glow) and labels it BROADCAST,
+                // so a fleet-wide announcement is unmistakable at a glance.
+                let (label, fill, glow, right) = if snap.broadcast_active {
+                    (
+                        format!("📡 {peer_label}"),
+                        T::BROADCAST,
+                        T::BROADCAST_GLOW,
+                        "BROADCAST",
+                    )
+                } else {
+                    (
+                        format!("◐ {peer_label}"),
+                        T::PRIMARY,
+                        T::PRIMARY_GLOW,
+                        "RECEIVING",
+                    )
+                };
                 glow_text(
                     painter,
                     Pos2::new(left_x, status_y),
                     Align2::LEFT_CENTER,
-                    &format!("◐ {peer_label}"),
+                    &label,
                     font_mono(10.0),
-                    T::PRIMARY,
-                    T::PRIMARY_GLOW,
+                    fill,
+                    glow,
                     0.6,
                 );
                 painter.text(
                     Pos2::new(right_x, status_y),
                     Align2::RIGHT_CENTER,
-                    if snap.duplex_full {
-                        "FDX · RX"
-                    } else {
-                        "RECEIVING"
-                    },
+                    if snap.duplex_full { "FDX · RX" } else { right },
                     font_mono(10.0),
-                    T::INK_DIM,
+                    if snap.broadcast_active {
+                        T::BROADCAST
+                    } else {
+                        T::INK_DIM
+                    },
                 );
             }
             RadioState::Busy => {
-                painter.text(
-                    Pos2::new(left_x, status_y),
-                    Align2::LEFT_CENTER,
-                    "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
-                    font_mono(10.0),
-                    T::WARN,
-                );
+                // While a broadcast is live, "busy" is informational, not a
+                // collision — show it as a broadcast (light blue), not the
+                // alarming red used for a normal floor clash.
+                if snap.broadcast_active {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "📡 GLOBAL BROADCAST · ALL CHANNELS",
+                        font_mono(10.0),
+                        T::BROADCAST,
+                    );
+                } else {
+                    painter.text(
+                        Pos2::new(left_x, status_y),
+                        Align2::LEFT_CENTER,
+                        "⊘ CHANNEL BUSY · WAIT FOR CLEAR",
+                        font_mono(10.0),
+                        T::WARN,
+                    );
+                }
             }
         }
     }
@@ -2644,9 +3084,18 @@ impl TokiApp {
     /// We mirror the bars top + bottom so the panel reads like an
     /// audio analyzer rather than a one-sided meter — keeps visual
     /// weight in the center the same as the old waveform.
-    fn paint_waveform(&self, painter: &egui::Painter, rect: Rect, st: RadioState) {
+    fn paint_waveform(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        st: RadioState,
+        broadcasting: bool,
+    ) {
         let active = matches!(st, RadioState::Tx | RadioState::Rx);
         let color = match st {
+            // Our own broadcast transmit tints the analyzer light blue
+            // (matches the rest of the broadcast cue) instead of amber.
+            RadioState::Tx if broadcasting => T::BROADCAST,
             RadioState::Tx => T::TX,
             _ if active => T::PRIMARY,
             _ => T::PRIMARY_INK,
@@ -2706,7 +3155,7 @@ impl TokiApp {
         }
     }
 
-    // ── Bottom row: knob + PTT ─────────────────────────────────────
+    // ── Bottom row: full-width PTT ─────────────────────────────────
     fn paint_bottom(
         &mut self,
         ui: &mut egui::Ui,
@@ -2714,51 +3163,14 @@ impl TokiApp {
         rect: Rect,
         st: RadioState,
     ) {
-        // Two knobs on the left, vertically centred and laid out side
-        // by side: mic gain (capture) first, then speaker gain
-        // (playback). The output mute toggle still lives in the top
-        // bar — the SPK knob just sets the *level* that's restored on
-        // unmute (and applied immediately while unmuted).
-        let knob_y = rect.center().y - 4.0;
-        let knob_gap = T::GAP_BOTTOM;
-        let mic_rect = Rect::from_center_size(
-            Pos2::new(rect.left() + T::KNOB_D / 2.0 + 4.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        let spk_rect = Rect::from_center_size(
-            Pos2::new(mic_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        // Third knob: stereo balance (L↔R) for the mono-earpiece effect.
-        let bal_rect = Rect::from_center_size(
-            Pos2::new(spk_rect.right() + knob_gap + T::KNOB_D / 2.0, knob_y),
-            Vec2::splat(T::KNOB_D),
-        );
-        self.paint_knob(ui, painter, mic_rect, KnobKind::Mic);
-        self.paint_knob(ui, painter, spk_rect, KnobKind::Speaker);
-        self.paint_knob(ui, painter, bal_rect, KnobKind::Balance);
-        // Captions — short labels so they fit cleanly under the
-        // 42 px knobs at 8 px mono.
-        for (r, label) in [
-            (mic_rect, "MIC VOL"),
-            (spk_rect, "SPK VOL"),
-            (bal_rect, "BALANCE"),
-        ] {
-            painter.text(
-                Pos2::new(r.center().x, r.bottom() + 8.0),
-                Align2::CENTER_CENTER,
-                label,
-                font_mono(8.0),
-                T::INK_MUTE,
-            );
-        }
-
-        // PTT button (or Reconnect button when transport is down) —
-        // fills the rest of the row.
-        let ptt_x = bal_rect.right() + T::GAP_BOTTOM;
+        // The mic / speaker / balance rotary knobs that used to sit on
+        // the left of this row moved into the foldable sound drawer below
+        // the body (as VOL / BAL / MIC faders). The PTT button (or the
+        // Reconnect / offline button when the transport is down) now spans
+        // the full row width.
         let ptt_rect = Rect::from_min_size(
-            Pos2::new(ptt_x, rect.center().y - T::PTT_H / 2.0),
-            Vec2::new(rect.right() - ptt_x, T::PTT_H),
+            Pos2::new(rect.left(), rect.center().y - T::PTT_H / 2.0),
+            Vec2::new(rect.width(), T::PTT_H),
         );
         if st.is_transport_down() {
             // Reconnecting keeps the single sweep button — a connect
@@ -2771,6 +3183,344 @@ impl TokiApp {
             }
         } else {
             self.paint_ptt(ui, painter, ptt_rect, st);
+        }
+    }
+
+    // ── Sound drawer ───────────────────────────────────────────────
+    /// The foldable sound panel below the radio body: an always-visible
+    /// handle (click to fold/unfold) over a collapsible body of three
+    /// faders — VOL, BAL, MIC. Replaces the old rotary knobs. `rect` is
+    /// the area below the body gap; its height already matches the fold
+    /// state (the window was resized in `update`).
+    fn paint_drawer(&mut self, ui: &mut egui::Ui, rect: Rect) {
+        let painter = ui.painter().clone();
+        let open = self.show_drawer;
+        let corners = CornerRadius::same(T::DRAWER_RADIUS as u8);
+
+        // Container: dark vertical-gradient panel with an inset rim and a
+        // 1 px top highlight (same hardware vocabulary as the chassis).
+        paint_vertical_gradient(
+            &painter,
+            rect,
+            corners,
+            &[(0.0, T::DRAWER_TOP), (1.0, T::DRAWER_BOTTOM)],
+        );
+        painter.rect_stroke(
+            rect,
+            corners,
+            Stroke::new(1.0, T::SHELL_EDGE),
+            StrokeKind::Inside,
+        );
+
+        // ── Handle (always visible) ────────────────────────────────
+        let handle_rect =
+            Rect::from_min_size(rect.min, Vec2::new(rect.width(), T::DRAWER_HANDLE_H));
+        let handle_resp = ui.interact(handle_rect, ui.id().with("drawer-handle"), Sense::click());
+        if handle_resp.clicked() {
+            self.show_drawer = !self.show_drawer;
+        }
+        if handle_resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+
+        let pad = T::DRAWER_PAD_X;
+        let mid_y = handle_rect.center().y;
+        // Left cluster: sliders glyph + "SOUND" label. Accent when open,
+        // dim when folded.
+        let label_color = if open { T::PRIMARY } else { T::INK_DIM };
+        let icon_x = handle_rect.left() + pad;
+        paint_sliders_icon(
+            &painter,
+            Rect::from_center_size(Pos2::new(icon_x + 6.0, mid_y), Vec2::splat(12.0)),
+            label_color,
+        );
+        painter.text(
+            Pos2::new(icon_x + 18.0, mid_y),
+            Align2::LEFT_CENTER,
+            "SOUND",
+            font_mono(9.0),
+            label_color,
+        );
+
+        // Right cluster: chevron (always), and — only when folded — a
+        // live summary so the values read at a glance without opening.
+        let chev_cx = handle_rect.right() - pad - 5.0;
+        paint_chevron(&painter, Pos2::new(chev_cx, mid_y), T::INK_DIM, open);
+        if !open {
+            let summary = format!(
+                "VOL {} · {} · MIC {}",
+                gain_pct(if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                }),
+                balance_label(self.config.audio.balance),
+                gain_pct(self.config.audio.input_gain),
+            );
+            painter.text(
+                Pos2::new(chev_cx - 14.0, mid_y),
+                Align2::RIGHT_CENTER,
+                summary,
+                font_mono(9.0),
+                T::INK_MUTE,
+            );
+        }
+
+        // ── Collapsible body (faders) ──────────────────────────────
+        if open {
+            // Top border separating handle from body.
+            let by = handle_rect.bottom();
+            painter.line_segment(
+                [
+                    Pos2::new(rect.left() + 1.0, by),
+                    Pos2::new(rect.right() - 1.0, by),
+                ],
+                Stroke::new(1.0, T::HIGHLIGHT),
+            );
+
+            // Three rows laid out top-to-bottom inside the body padding.
+            let body_top = by + 8.0;
+            let row_gap = 12.0;
+            let rows: [(&str, FaderKind); 3] = [
+                ("VOL", FaderKind::Volume),
+                ("BAL", FaderKind::Balance),
+                ("MIC", FaderKind::Mic),
+            ];
+            for (i, (label, kind)) in rows.into_iter().enumerate() {
+                let row_y = body_top + i as f32 * (T::DRAWER_ROW_H + row_gap);
+                let row_rect = Rect::from_min_size(
+                    Pos2::new(rect.left() + pad, row_y),
+                    Vec2::new(rect.width() - 2.0 * pad, T::DRAWER_ROW_H),
+                );
+                self.paint_fader_row(ui, &painter, row_rect, label, kind);
+            }
+        }
+    }
+
+    /// One drawer row: fixed-width label, the fader (flex), and a
+    /// right-aligned value readout. `kind` selects the bound state, range,
+    /// colour, and readout format.
+    fn paint_fader_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        label: &str,
+        kind: FaderKind,
+    ) {
+        // Fader accent: VOL/BAL use the phosphor primary, MIC the warm TX
+        // amber; VOL dims to "muted" ink while output is muted.
+        let center_origin = matches!(kind, FaderKind::Balance);
+
+        // Fader cell first — it processes this frame's click/drag and
+        // paints the track/fill/thumb. Doing input before the label +
+        // readout below means those read the just-updated value (no
+        // one-frame lag on the percentage / pan text). The colour is
+        // resolved *after*, since a VOL drag can un-mute and change it.
+        let fader_rect = Rect::from_min_max(
+            Pos2::new(rect.left() + T::DRAWER_LABEL_W + 12.0, rect.top()),
+            Pos2::new(rect.right() - T::DRAWER_VALUE_W - 12.0, rect.bottom()),
+        );
+        // The fader paints itself (track/fill/thumb) and returns its
+        // resolved accent so the value readout matches.
+        let color = self.paint_fader(ui, painter, fader_rect, kind, center_origin);
+
+        // Label cell.
+        let mid_y = rect.center().y;
+        painter.text(
+            Pos2::new(rect.left(), mid_y),
+            Align2::LEFT_CENTER,
+            label,
+            font_mono(9.0),
+            T::INK_DIM,
+        );
+
+        // Value readout cell (right-aligned, fixed width), coloured to
+        // match the fader.
+        let value_text = match kind {
+            FaderKind::Balance => balance_label(self.config.audio.balance),
+            FaderKind::Volume => format!(
+                "{}%",
+                gain_pct(if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                })
+            ),
+            FaderKind::Mic => format!("{}%", gain_pct(self.config.audio.input_gain)),
+        };
+        painter.text(
+            Pos2::new(rect.right(), mid_y),
+            Align2::RIGHT_CENTER,
+            value_text,
+            font_mono(11.0),
+            color,
+        );
+    }
+
+    /// A custom horizontal fader (the design's `HSlider`): track, 11 tick
+    /// marks, a fill (left-origin, or centre-origin for balance), and a
+    /// knurled thumb. Click or drag anywhere on the row sets the value
+    /// from the pointer X — no step quantization. Returns the resolved
+    /// accent colour (which a VOL drag may have changed by un-muting) so
+    /// the caller can colour the matching value readout.
+    fn paint_fader(
+        &mut self,
+        ui: &mut egui::Ui,
+        painter: &egui::Painter,
+        rect: Rect,
+        kind: FaderKind,
+        center_origin: bool,
+    ) -> Color32 {
+        let resp = ui.interact(
+            rect,
+            ui.id().with(("fader", kind as u8)),
+            Sense::click_and_drag(),
+        );
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // Click or drag → value from pointer X over the track width.
+        if resp.dragged() || resp.clicked() {
+            if let Some(p) = resp.interact_pointer_pos() {
+                let new_unit = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                self.apply_fader(kind, new_unit);
+            }
+        }
+        if resp.drag_stopped() || resp.clicked() {
+            self.config.save();
+        }
+
+        // Read the (possibly just-updated) value as a [0,1] unit. Gains
+        // span 0..2 → /2; balance -1..1 → centre 0.5.
+        let unit = match kind {
+            FaderKind::Volume => {
+                (if self.muted {
+                    0.0
+                } else {
+                    self.config.audio.output_gain
+                }) / 2.0
+            }
+            FaderKind::Mic => self.config.audio.input_gain / 2.0,
+            FaderKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
+        }
+        .clamp(0.0, 1.0);
+
+        // Accent: VOL/BAL phosphor primary, MIC warm amber; VOL dims to
+        // muted ink while output is muted (resolved post-input).
+        let (color, glow) = match kind {
+            FaderKind::Mic => (T::TX, T::TX_GLOW),
+            FaderKind::Volume if self.muted => (T::INK_MUTE, T::PRIMARY_GLOW),
+            _ => (T::PRIMARY, T::PRIMARY_GLOW),
+        };
+
+        let track_y = rect.center().y;
+        let track = Rect::from_center_size(
+            Pos2::new(rect.center().x, track_y),
+            Vec2::new(rect.width(), T::FADER_TRACK_H),
+        );
+        painter.rect_filled(track, CornerRadius::same(2), T::FADER_TRACK);
+
+        // 11 tick marks at every 10%. Taller at 0/50/100; the centre tick
+        // is brighter on a centre-origin (balance) fader.
+        for i in 0..11 {
+            let tx = rect.left() + (i as f32 / 10.0) * rect.width();
+            let tall = i % 5 == 0 || (center_origin && i == 5);
+            let h = if tall { 9.0 } else { 5.0 };
+            let tcol = if center_origin && i == 5 {
+                T::FADER_TICK_CENTER
+            } else {
+                T::FADER_TICK
+            };
+            painter.line_segment(
+                [
+                    Pos2::new(tx, track_y - h / 2.0),
+                    Pos2::new(tx, track_y + h / 2.0),
+                ],
+                Stroke::new(1.0, tcol),
+            );
+        }
+
+        // Fill: left→value normally, or centre→value for balance.
+        let x_at = |u: f32| rect.left() + u * rect.width();
+        let (fill_l, fill_r) = if center_origin {
+            let c = x_at(0.5);
+            let v = x_at(unit);
+            (c.min(v), c.max(v))
+        } else {
+            (rect.left(), x_at(unit))
+        };
+        if (fill_r - fill_l).abs() > 0.5 {
+            let fill = Rect::from_min_max(
+                Pos2::new(fill_l, track_y - T::FADER_TRACK_H / 2.0),
+                Pos2::new(fill_r, track_y + T::FADER_TRACK_H / 2.0),
+            );
+            // Soft glow under the fill, then the solid fill on top.
+            painter.rect_filled(fill.expand(1.5), CornerRadius::same(2), glow);
+            painter.rect_filled(fill, CornerRadius::same(2), color);
+        }
+
+        // Thumb: rounded slug with a coloured rim and two knurl lines.
+        let thumb_cx = x_at(unit);
+        let thumb = Rect::from_center_size(
+            Pos2::new(thumb_cx, track_y),
+            Vec2::new(T::FADER_THUMB_W, T::FADER_THUMB_H),
+        );
+        paint_vertical_gradient(
+            painter,
+            thumb,
+            CornerRadius::same(3),
+            &[(0.0, T::FADER_THUMB_TOP), (1.0, T::FADER_THUMB_BOTTOM)],
+        );
+        painter.rect_stroke(
+            thumb,
+            CornerRadius::same(3),
+            Stroke::new(1.0, color),
+            StrokeKind::Inside,
+        );
+        for dx in [-1.5_f32, 1.5] {
+            painter.line_segment(
+                [
+                    Pos2::new(thumb_cx + dx, track_y - 4.0),
+                    Pos2::new(thumb_cx + dx, track_y + 4.0),
+                ],
+                Stroke::new(1.0, T::FADER_KNURL),
+            );
+        }
+
+        color
+    }
+
+    /// Apply a fader's new `[0,1]` unit to the bound audio state + the
+    /// live gain atomics. Mirrors the old knob wiring: gains map unit→
+    /// `[0,2]`; balance maps unit→`[-1,1]` with a centre snap; the VOL
+    /// fader un-mutes on first move (per the design's mute coupling).
+    fn apply_fader(&mut self, kind: FaderKind, unit: f32) {
+        match kind {
+            FaderKind::Volume => {
+                // First drag while muted un-mutes, then applies the value
+                // (toggle_mute restores gain_before_mute, which we then
+                // overwrite via set_output below).
+                if self.muted {
+                    self.toggle_mute();
+                }
+                let gain = unit * 2.0;
+                self.config.audio.output_gain = gain;
+                self.audio_gains.set_output(gain);
+            }
+            FaderKind::Mic => {
+                let gain = unit * 2.0;
+                self.config.audio.input_gain = gain;
+                self.audio_gains.set_input(gain);
+            }
+            FaderKind::Balance => {
+                let mut balance = unit * 2.0 - 1.0;
+                if balance.abs() < 0.03 {
+                    balance = 0.0;
+                }
+                self.config.audio.balance = balance;
+                self.audio_gains.set_balance(balance);
+            }
         }
     }
 
@@ -3063,130 +3813,6 @@ impl TokiApp {
         );
     }
 
-    fn paint_knob(
-        &mut self,
-        ui: &mut egui::Ui,
-        painter: &egui::Painter,
-        rect: Rect,
-        kind: KnobKind,
-    ) {
-        let resp = ui.allocate_rect(rect, Sense::click_and_drag());
-
-        // Click-drag adjusts the bound gain by the *horizontal* pixel
-        // delta of the pointer. Right increases, left decreases —
-        // matches the universal "slider" mental model and avoids the
-        // "which way around the knob am I rotating?" ambiguity of
-        // angle-based interaction. We previously rotated around the
-        // knob center; users found that twitchy near the rim and
-        // unintuitive near the dead-center.
-        //
-        // Sensitivity history (per-frame divisor in pixels):
-        //   8 px/unit  ≈ snappy software slider
-        //   250 px/unit ≈ current — a full 0→2.0 sweep takes ~500 px
-        //   of horizontal drag (about half a monitor-width), which feels
-        //   like a real, heavily-detented hardware pot: large gestures
-        //   for coarse moves, deliberate small motions for the 1–2%
-        //   nudges users actually want.
-        if resp.dragged() {
-            let dx = ui.input(|i| i.pointer.delta().x);
-            if dx != 0.0 {
-                let increment = dx / 250.0;
-                // All three knobs operate on a normalized [0..1] unit.
-                // Gains map unit→[0,2]; balance maps unit→[-1,1] so its
-                // detent is the 12 o'clock centre.
-                let current_unit = match kind {
-                    KnobKind::Mic => self.config.audio.input_gain / 2.0,
-                    KnobKind::Speaker => self.config.audio.output_gain / 2.0,
-                    KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
-                };
-                let new_unit = (current_unit + increment).clamp(0.0, 1.0);
-                match kind {
-                    KnobKind::Mic => {
-                        let gain = new_unit * 2.0;
-                        self.config.audio.input_gain = gain;
-                        // Mic gain is independent of mute (which
-                        // gates the *output* side) — apply
-                        // unconditionally.
-                        self.audio_gains.set_input(gain);
-                    }
-                    KnobKind::Speaker => {
-                        let gain = new_unit * 2.0;
-                        self.config.audio.output_gain = gain;
-                        if self.muted {
-                            // Stage the post-mute target — applying
-                            // now would punch through the mute.
-                            self.gain_before_mute = gain;
-                        } else {
-                            self.audio_gains.set_output(gain);
-                        }
-                    }
-                    KnobKind::Balance => {
-                        // Snap to dead-centre when within ~3% so the
-                        // user can reliably re-centre by dragging back.
-                        let mut balance = new_unit * 2.0 - 1.0;
-                        if balance.abs() < 0.03 {
-                            balance = 0.0;
-                        }
-                        self.config.audio.balance = balance;
-                        self.audio_gains.set_balance(balance);
-                    }
-                }
-            }
-        }
-        if resp.drag_stopped() {
-            self.config.save();
-        }
-
-        // Map the bound value → display unit [0..1]. Gains are [0,2];
-        // balance is [-1,1] (centre 0 → unit 0.5, so the indicator
-        // points straight up at dead-centre).
-        let v = match kind {
-            KnobKind::Mic => self.config.audio.input_gain / 2.0,
-            KnobKind::Speaker => self.config.audio.output_gain / 2.0,
-            KnobKind::Balance => (self.config.audio.balance + 1.0) / 2.0,
-        }
-        .clamp(0.0, 1.0);
-        let angle_deg = -135.0 + v * 270.0;
-        let angle = angle_deg.to_radians();
-
-        // Outer disc.
-        painter.circle_filled(rect.center(), T::KNOB_D / 2.0, T::SHELL_EDGE);
-        painter.circle_stroke(
-            rect.center(),
-            T::KNOB_D / 2.0,
-            Stroke::new(1.0, T::SHELL_BOTTOM),
-        );
-        // Inner disc.
-        painter.circle_filled(rect.center(), T::KNOB_D / 2.0 - 4.0, T::SHELL_TOP);
-
-        // Indicator line at top of inner disc, rotated to angle. The
-        // Speaker knob dims its indicator while muted — visual cue
-        // that the knob's value is staged but not currently audible.
-        let r_outer = T::KNOB_D / 2.0 - 6.0;
-        let r_inner = T::KNOB_D / 2.0 - 13.0;
-        let ind_color = match kind {
-            KnobKind::Speaker if self.muted => T::INK_MUTE,
-            _ => T::PRIMARY,
-        };
-        let cx = rect.center().x;
-        let cy = rect.center().y;
-        // The "top" before rotation is -π/2; angle is rotation from that.
-        let theta = angle - std::f32::consts::FRAC_PI_2;
-        let p_out = Pos2::new(cx + theta.cos() * r_outer, cy + theta.sin() * r_outer);
-        let p_in = Pos2::new(cx + theta.cos() * r_inner, cy + theta.sin() * r_inner);
-        // Soft halo behind the indicator + the indicator itself.
-        painter.line_segment(
-            [p_out, p_in],
-            Stroke::new(
-                3.5,
-                Color32::from_rgba_unmultiplied(ind_color.r(), ind_color.g(), ind_color.b(), 70),
-            ),
-        );
-        painter.line_segment([p_out, p_in], Stroke::new(2.0, ind_color));
-        // No tick marks around the rim — the indicator alone reads
-        // cleanly and avoids the "what do these dots mean?" question.
-    }
-
     fn paint_ptt(
         &mut self,
         ui: &mut egui::Ui,
@@ -3194,8 +3820,15 @@ impl TokiApp {
         rect: Rect,
         st: RadioState,
     ) {
-        let connected = matches!(self.snapshot().connection, ConnState::Connected);
-        let sense = if connected {
+        let snap = self.snapshot();
+        let connected = matches!(snap.connection, ConnState::Connected);
+        // Server-side mute (our own member-mute, or the channel we're on
+        // being muted) makes the button inert: no press is sent and the
+        // visuals go disabled. The server would refuse the press anyway —
+        // this just makes the "you can't talk right now" obvious instead
+        // of a button that looks live but silently does nothing.
+        let muted = connected && snap.muted;
+        let sense = if connected && !muted {
             Sense::click_and_drag()
         } else {
             Sense::hover()
@@ -3217,7 +3850,7 @@ impl TokiApp {
         // hit the runtime's 250 ms cooldown and produced a visible
         // "constantly spammed" pulse pattern. Holding latches `ptt_held`
         // and we only let go when no pointer button is down anywhere.
-        if connected {
+        if connected && !muted {
             let any_down = ui.input(|i| i.pointer.any_down());
             let pressed_on_button = resp.is_pointer_button_down_on();
             if self.ptt_held {
@@ -3229,37 +3862,80 @@ impl TokiApp {
                 self.ptt_held = true;
                 let _ = self.cmd_tx.send(Cmd::PttDown);
             }
+        } else if muted && self.ptt_held {
+            // If a mute lands mid-hold, release locally so we don't sit
+            // latched in `ptt_held` (the runtime already gates the mic).
+            self.ptt_held = false;
+            let _ = self.cmd_tx.send(Cmd::PttUp);
         }
 
-        // Visuals per state.
-        let (top, bottom, label, label_color, dot_color, border, glow_intensity) = match st {
-            RadioState::Tx => (
-                T::PTT_TX_TOP,
-                T::PTT_TX_BOTTOM,
-                "TRANSMITTING",
-                T::TX,
-                T::TX,
-                T::TX,
-                1.4,
-            ),
-            RadioState::Busy => (
-                T::PTT_BUSY_TOP,
-                T::PTT_BUSY_BOTTOM,
-                "CHANNEL BUSY",
-                T::WARN,
+        // Visuals per state. A mute overrides whatever the radio state
+        // would otherwise show: inert dark button, red dot, and an
+        // explicit "UNABLE TO TALK" so the cause is unmistakable.
+        let (top, bottom, label, label_color, dot_color, border, glow_intensity) = if muted {
+            (
+                T::PTT_MUTED_TOP,
+                T::PTT_MUTED_BOTTOM,
+                "UNABLE TO TALK",
+                T::INK_MUTE,
                 T::WARN,
                 T::SHELL_EDGE,
                 0.0,
-            ),
-            _ => (
-                T::PTT_IDLE_TOP,
-                T::PTT_IDLE_BOTTOM,
-                "HOLD TO TALK",
-                T::INK,
-                T::PRIMARY,
-                T::SHELL_EDGE,
-                0.5,
-            ),
+            )
+        } else {
+            match st {
+                // We are the global broadcaster: light-blue "BROADCASTING"
+                // with the broadcast gradient + glow, so our own button
+                // matches the fleet-wide cue listeners see — no amber leak.
+                RadioState::Tx if snap.broadcast_active => (
+                    T::PTT_BCAST_TOP,
+                    T::PTT_BCAST_BOTTOM,
+                    "BROADCASTING",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    1.4,
+                ),
+                RadioState::Tx => (
+                    T::PTT_TX_TOP,
+                    T::PTT_TX_BOTTOM,
+                    "TRANSMITTING",
+                    T::TX,
+                    T::TX,
+                    T::TX,
+                    1.4,
+                ),
+                // A live global broadcast holds every floor — show it as a
+                // broadcast (calm light-blue label/dot over the idle shell)
+                // rather than the alarming red of a normal floor collision.
+                RadioState::Busy if snap.broadcast_active => (
+                    T::PTT_IDLE_TOP,
+                    T::PTT_IDLE_BOTTOM,
+                    "GLOBAL BROADCAST",
+                    T::BROADCAST,
+                    T::BROADCAST,
+                    T::SHELL_EDGE,
+                    0.0,
+                ),
+                RadioState::Busy => (
+                    T::PTT_BUSY_TOP,
+                    T::PTT_BUSY_BOTTOM,
+                    "CHANNEL BUSY",
+                    T::WARN,
+                    T::WARN,
+                    T::SHELL_EDGE,
+                    0.0,
+                ),
+                _ => (
+                    T::PTT_IDLE_TOP,
+                    T::PTT_IDLE_BOTTOM,
+                    "HOLD TO TALK",
+                    T::INK,
+                    T::PRIMARY,
+                    T::SHELL_EDGE,
+                    0.5,
+                ),
+            }
         };
 
         // Two-stop vertical gradient via the colorgradient helper —
@@ -3278,8 +3954,11 @@ impl TokiApp {
             StrokeKind::Inside,
         );
 
-        // TX progress underline.
-        if matches!(st, RadioState::Tx) {
+        // TX progress underline. Not drawn while broadcasting — a
+        // broadcast has no per-transmission time cap, so there's no
+        // progress to show (and it would be an amber bar under a blue
+        // button).
+        if matches!(st, RadioState::Tx) && !snap.broadcast_active {
             let progress = self
                 .tx_start
                 .map(|s| s.elapsed().as_millis() as f32 / T::TX_LIMIT_MS as f32)
@@ -3311,7 +3990,11 @@ impl TokiApp {
                 label,
                 font_ui(12.0, true),
                 label_color,
-                T::TX_GLOW,
+                if snap.broadcast_active {
+                    T::BROADCAST_GLOW
+                } else {
+                    T::TX_GLOW
+                },
                 0.6,
             );
         } else {
@@ -3481,6 +4164,8 @@ impl TokiApp {
     fn bind_row(&mut self, ui: &mut egui::Ui, label: &str, target: RecordTarget) {
         let current = match target {
             RecordTarget::Ptt => self.config.hotkey.to_input(),
+            RecordTarget::PttSecondary => self.config.hotkey.to_input_secondary(),
+            RecordTarget::BroadcastPtt => self.config.hotkey.broadcast_ptt_input(),
             RecordTarget::Memory(i) => self.config.hotkey.memory(i).to_input(),
             RecordTarget::FreqUp => self.config.hotkey.freq_up.to_input(),
             RecordTarget::FreqDown => self.config.hotkey.freq_down.to_input(),
@@ -3490,7 +4175,7 @@ impl TokiApp {
         settings_row(ui, label, |ui| {
             if self.recording && self.recording_target == target {
                 let progress = self.hotkey.hold_progress();
-                ui.colored_label(T::TX, "hold a key for 1s…");
+                ui.colored_label(T::TX, "hold any button for 1s…");
                 ui.add(
                     egui::ProgressBar::new(progress)
                         .desired_width(80.0)
@@ -3514,14 +4199,22 @@ impl TokiApp {
                         self.recording_target = target;
                     }
                 }
-                // The action hotkeys are optional, so offer an explicit
-                // unbind. (PTT has no CLEAR — there's always meant to be
-                // a transmit trigger.)
+                // The action hotkeys and the secondary PTT are optional,
+                // so offer an explicit unbind. (The PRIMARY PTT has no
+                // CLEAR — there's always meant to be a transmit trigger.)
                 if !matches!(target, RecordTarget::Ptt)
                     && current.is_some()
                     && ui.button("CLEAR").clicked()
                 {
                     match target {
+                        RecordTarget::PttSecondary => {
+                            let _ = self.hotkey.rebind_secondary(None);
+                            self.config.hotkey.set_ptt_secondary(None);
+                        }
+                        RecordTarget::BroadcastPtt => {
+                            let _ = self.hotkey.rebind_broadcast_ptt(None);
+                            self.config.hotkey.set_broadcast_ptt(None);
+                        }
                         RecordTarget::Memory(i) => {
                             self.hotkey.rebind_memory(i, None);
                             self.config.hotkey.set_memory(i, HotkeyBinding::default());
@@ -3542,12 +4235,70 @@ impl TokiApp {
         });
     }
 
+    /// Settings window: a left sidebar of tabs and the selected tab's
+    /// full page on the right. Splitting the old single scroll into pages
+    /// keeps each one short; the per-tab bodies live in
+    /// `paint_settings_{controls,audio,voice,updates}`.
     fn paint_settings_window(&mut self, ui: &mut egui::Ui) {
         ui.style_mut().visuals.override_text_color = Some(T::INK);
 
+        ui.horizontal_top(|ui| {
+            // ── Sidebar ───────────────────────────────────────────────
+            // Fixed-width column of tab buttons down the left edge.
+            ui.allocate_ui_with_layout(
+                Vec2::new(SETTINGS_SIDEBAR_W, ui.available_height()),
+                egui::Layout::top_down_justified(egui::Align::LEFT),
+                |ui| {
+                    for &(tab, label) in SettingsTab::ALL {
+                        let selected = self.settings_tab == tab;
+                        if settings_tab_button(ui, label, selected) {
+                            self.settings_tab = tab;
+                        }
+                        ui.add_space(4.0);
+                    }
+                },
+            );
+
+            ui.add_space(10.0);
+            // Hairline divider between sidebar and page.
+            let x = ui.cursor().left();
+            ui.painter().line_segment(
+                [
+                    Pos2::new(x, ui.min_rect().top()),
+                    Pos2::new(x, ui.min_rect().bottom()),
+                ],
+                Stroke::new(1.0, T::PRIMARY_INK),
+            );
+            ui.add_space(10.0);
+
+            // ── Page ──────────────────────────────────────────────────
+            // The selected tab fills the rest of the width, scrolling if
+            // its content is taller than the window.
+            ui.vertical(|ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| match self.settings_tab {
+                        SettingsTab::Controls => self.paint_settings_controls(ui),
+                        SettingsTab::Audio => self.paint_settings_audio(ui),
+                        SettingsTab::Updates => self.paint_settings_updates(ui),
+                    });
+            });
+        });
+    }
+
+    /// CONTROLS tab — PTT, memory-recall, and tuning key bindings.
+    fn paint_settings_controls(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "CUSTOMIZATION");
 
         self.bind_row(ui, "PTT", RecordTarget::Ptt);
+        // Optional fallback trigger — bind a second device (e.g. a
+        // keyboard key backing up a gamepad button). PTT fires while
+        // either is held.
+        self.bind_row(ui, "PTT (2ND)", RecordTarget::PttSecondary);
+        // Dedicated global-broadcast trigger. Inert until an admin grants
+        // the capability; when held it transmits to every frequency at
+        // once (separate from the normal PTT above).
+        self.bind_row(ui, "BROADCAST PTT", RecordTarget::BroadcastPtt);
 
         ui.add_space(14.0);
         section_header(ui, "MEMORY HOTKEYS");
@@ -3565,8 +4316,13 @@ impl TokiApp {
         section_header(ui, "TUNING HOTKEYS");
         self.bind_row(ui, "FREQ UP", RecordTarget::FreqUp);
         self.bind_row(ui, "FREQ DOWN", RecordTarget::FreqDown);
+    }
 
-        ui.add_space(14.0);
+    /// AUDIO tab — everything sound-related. The top of the page is the
+    /// device/level/test/self-monitor block here; it then calls
+    /// [`Self::paint_settings_voice`] for the capture DSP, Radio FX, and
+    /// roger-beep sections that share the page.
+    fn paint_settings_audio(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "AUDIO");
 
         settings_row(ui, "INPUT", |ui| {
@@ -3600,6 +4356,14 @@ impl TokiApp {
                 self.config.save();
             }
         });
+        // Live mic VU bar. The capture stream runs continuously
+        // (independent of PTT), so this moves whenever the user talks —
+        // even offline, even with PTT not held. Makes "is my mic working
+        // / which of these devices is the right one" obvious without
+        // having to key up and ask someone.
+        settings_row(ui, "INPUT LEVEL", |ui| {
+            paint_level_meter(ui, self.audio_levels.input());
+        });
         settings_row(ui, "OUTPUT", |ui| {
             let prev = self.config.audio.output_device.clone();
             let selected = self
@@ -3631,11 +4395,151 @@ impl TokiApp {
                 self.config.save();
             }
         });
+        // Output VU bar + a test-tone button. The meter confirms audio
+        // is actually reaching the selected device (it moves while the
+        // test tone, a roger beep, or incoming voice plays); the chime
+        // is self-generated so it needs no session — press it offline to
+        // check the speaker/earpiece and balance before connecting.
+        settings_row(ui, "OUTPUT LEVEL", |ui| {
+            paint_level_meter(ui, self.audio_levels.output());
+        });
+        settings_row(ui, "OUTPUT TEST", |ui| {
+            if ui.button("TEST TONE").clicked() {
+                let _ = self.cmd_tx.send(Cmd::TestTone);
+            }
+        });
+
+        // Self-monitor (sidetone): loop the mic back to the speakers so
+        // the operator can hear themselves — a mic/device check, and an
+        // audition of the outgoing chain. The SOURCE toggle A/Bs the
+        // capture DSP (RAW = bare mic, PROCESSED = + noise suppression +
+        // AGC); whichever is picked, Radio FX folds in too when it's
+        // enabled, so this previews the full chain a peer hears.
+        // Needs no session; writes straight into the shared `MonitorParams`,
+        // so it engages on the next mic frame. Not persisted — always
+        // starts off — because a mic→speaker loop over speakers howls; the
+        // caption nudges toward headphones.
+        settings_row(ui, "SELF MONITOR", |ui| {
+            let mut v = self.monitor_params.enabled();
+            if ui.checkbox(&mut v, "").changed() {
+                self.monitor_params.set_enabled(v);
+            }
+            ui.label(
+                egui::RichText::new("hear your own mic — use headphones (speakers feed back)")
+                    .color(T::WARN)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "SOURCE", |ui| {
+            // RAW vs PROCESSED A/B. Disabled until the monitor is on so
+            // it's clear the choice only matters while monitoring.
+            let on = self.monitor_params.enabled();
+            let mut processed = self.monitor_params.processed();
+            ui.add_enabled_ui(on, |ui| {
+                if ui.selectable_label(!processed, "RAW").clicked() {
+                    processed = false;
+                    self.monitor_params.set_processed(false);
+                }
+                if ui.selectable_label(processed, "PROCESSED").clicked() {
+                    processed = true;
+                    self.monitor_params.set_processed(true);
+                }
+            });
+            ui.label(
+                egui::RichText::new("PROCESSED adds NS + AGC; Radio FX folds in if on")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+
         // Mic / Speaker gain sliders used to live here. They moved to
         // the bottom-row knobs (MIC VOL / SPK VOL) on the strip, which
         // adjust the same `config.audio.{input,output}_gain` fields —
         // duplicating them in Settings just left two ways to change
         // the same value out of sync.
+
+        // The voice-processing sections (capture DSP, Radio FX, roger
+        // beeps) continue the same page below the device/level controls.
+        ui.add_space(14.0);
+        self.paint_settings_voice(ui);
+    }
+
+    /// The voice-processing portion of the AUDIO tab: capture DSP (noise
+    /// suppression + AGC), the playback Radio FX dirtier, and the
+    /// roger-beep presets. Kept as its own method (called at the foot of
+    /// [`Self::paint_settings_audio`]) so the page reads in clear blocks.
+    fn paint_settings_voice(&mut self, ui: &mut egui::Ui) {
+        section_header(ui, "VOICE DSP");
+
+        // Capture-side processing toggles. Both write straight into
+        // the shared `DspParams` atomics, so the change lands on the
+        // very next 10 ms mic frame — no reconnect, no stream restart.
+        // Off = bit-exact raw mic, for operators who want the
+        // unprocessed CB character.
+        settings_row(ui, "NOISE FILTER", |ui| {
+            let mut v = self.config.audio.noise_suppression;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.noise_suppression = v;
+                self.dsp_params.set_noise_suppression(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("RNNoise — strips steady background noise")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "AUTO GAIN", |ui| {
+            let mut v = self.config.audio.agc;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.agc = v;
+                self.dsp_params.set_agc(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("levels quiet & hot mics toward a fixed target")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+
+        // "Radio FX" — a transmit-side dirtier, like the two stages above:
+        // it bakes a cheap-handheld colour into your *outgoing* voice so
+        // every peer hears you that way. Writes straight into the shared
+        // `OutputDspParams`, so the change lands on the next transmitted
+        // frame — no reconnect. Off by default; the intensity slider is
+        // disabled until it's switched on.
+        settings_row(ui, "RADIO FX", |ui| {
+            let mut v = self.config.audio.output_dirty;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.output_dirty = v;
+                self.output_dsp_params.set_enabled(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("how you sound to others: bandpass + drive + static")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "FX AMOUNT", |ui| {
+            let on = self.config.audio.output_dirty;
+            let mut v = self.config.audio.output_dirty_amount;
+            let resp = ui.add_enabled(on, egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+            ui.monospace(format!("{:>3.0}%", v * 100.0));
+            if resp.changed() {
+                self.config.audio.output_dirty_amount = v;
+                self.output_dsp_params.set_amount(v);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                self.config.save();
+            }
+        });
 
         ui.add_space(14.0);
         section_header(ui, "ROGER BEEPS");
@@ -3709,8 +4613,10 @@ impl TokiApp {
                 let _ = self.cmd_tx.send(Cmd::TestBeep(runtime::BeepKind::Release));
             }
         });
+    }
 
-        ui.add_space(14.0);
+    /// UPDATES tab — current version and the notify-only update checker.
+    fn paint_settings_updates(&mut self, ui: &mut egui::Ui) {
         section_header(ui, "UPDATES");
 
         settings_row(ui, "VERSION", |ui| {
@@ -3771,5 +4677,34 @@ impl TokiApp {
             self.muted = true;
             self.audio_gains.set_output(0.0);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{balance_label, gain_pct};
+
+    #[test]
+    fn gain_pct_maps_unity_to_100() {
+        assert_eq!(gain_pct(0.0), 0);
+        assert_eq!(gain_pct(1.0), 100); // unity / passthrough
+        assert_eq!(gain_pct(2.0), 200); // max boost
+        assert_eq!(gain_pct(0.655), 66); // rounds
+                                         // Clamped to the 0..2 gain band.
+        assert_eq!(gain_pct(-0.5), 0);
+        assert_eq!(gain_pct(3.0), 200);
+    }
+
+    #[test]
+    fn balance_label_reads_centre_and_sides() {
+        assert_eq!(balance_label(0.0), "C");
+        // Within ~1% of centre still reads centred (the snap zone).
+        assert_eq!(balance_label(0.005), "C");
+        assert_eq!(balance_label(-0.005), "C");
+        // Off-centre → L/R + percent of full deflection.
+        assert_eq!(balance_label(-0.40), "L40");
+        assert_eq!(balance_label(0.30), "R30");
+        assert_eq!(balance_label(-1.0), "L100");
+        assert_eq!(balance_label(1.0), "R100");
     }
 }

@@ -27,8 +27,9 @@ use crate::state::DuplexMode;
 use toki_proto::admin::v1 as pb;
 use toki_proto::admin::v1::admin_server::Admin;
 use toki_proto::v1::{
-    event, ChannelModeChanged, ChannelNameChanged, DisplayNameChanged, Event, FrequencyChanged,
-    MemberJoined, MemberLeft, PttEvent,
+    event, BroadcastCapabilityChanged, ChannelModeChanged, ChannelMuteChanged, ChannelNameChanged,
+    DisplayNameChanged, Event, FrequencyChanged, MemberJoined, MemberLeft, MuteChanged,
+    PriorityChanged, PttEvent,
 };
 
 use super::auth::{self, AdminUser};
@@ -109,6 +110,7 @@ impl AdminApi {
             &self.state.registry,
             &self.state.channel_names,
             &self.state.duplex_modes,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -173,6 +175,112 @@ impl AdminApi {
         self.push_snapshot().await;
     }
 
+    /// Remove a live session from the registry and notify its room —
+    /// the shared core of `kick_client` and `ban_client`. Returns the
+    /// removed session's display name + frequency; `NOT_FOUND` when the
+    /// id isn't connected. The caller does its own audit + snapshot.
+    async fn remove_session(&self, id: &str) -> Result<(String, Option<String>), Status> {
+        // Snapshot the work under the lock; broadcast after releasing it.
+        let (display_name, frequency, recipients, was_holder, bcast_teardown_txs) = {
+            let mut registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.remove(id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            registry.tokens.remove(&client.audio_token_hash);
+
+            // FIX 1: if the removed client was the active broadcaster, clear the
+            // lock and collect all remaining clients' event senders so we can
+            // send them a broadcast-release notification after the lock drops.
+            // No .await under this lock — collect only, send after.
+            let bcast_teardown_txs: Vec<mpsc::Sender<Event>> =
+                if registry.broadcast_active.as_deref() == Some(id) {
+                    registry.broadcast_active = None;
+                    registry
+                        .clients
+                        .iter()
+                        .filter_map(|(_, c)| c.events_tx.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
+            let mut was_holder = false;
+            let frequency = client.current_frequency.clone();
+            if let Some(freq) = &frequency {
+                if let Some(room) = registry.rooms.get_mut(freq) {
+                    room.members.retain(|m| m != id);
+                    if room.holder.as_deref() == Some(id) {
+                        room.holder = None;
+                        was_holder = true;
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    if room.members.is_empty() && room.holder.is_none() {
+                        registry.rooms.remove(freq);
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    for mid in &room.members {
+                        if let Some(c) = registry.clients.get(mid) {
+                            if let Some(tx) = &c.events_tx {
+                                recipients.push(tx.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            (
+                client.display_name.clone(),
+                frequency,
+                recipients,
+                was_holder,
+                bcast_teardown_txs,
+            )
+        }; // registry lock released here
+
+        // If the removed client was broadcasting, notify all remaining clients
+        // so their UIs clear the broadcast indicator (lock already dropped).
+        if !bcast_teardown_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: id.to_string(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                    display_name: String::new(),
+                })),
+            };
+            for tx in &bcast_teardown_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
+
+        let left = Event {
+            event: Some(event::Event::Left(MemberLeft {
+                client_id: id.to_string(),
+            })),
+        };
+        let release = was_holder.then(|| Event {
+            event: Some(event::Event::Ptt(PttEvent {
+                client_id: id.to_string(),
+                pressed: false,
+                sequence: 0,
+                priority: false,
+                broadcast: false,
+                display_name: String::new(),
+            })),
+        });
+        for tx in recipients {
+            let _ = tx.send(left.clone()).await;
+            if let Some(ev) = &release {
+                let _ = tx.send(ev.clone()).await;
+            }
+        }
+        Ok((display_name, frequency))
+    }
+
     /// Event senders for every client currently in `frequency`'s room.
     /// Empty when the room doesn't exist (no one tuned there) — used by
     /// the channel-name RPCs to push a `ChannelNameChanged` to occupants.
@@ -202,6 +310,10 @@ fn config_to_wire(cfg: &ServerConfig) -> pb::ServerConfig {
         grpc_password_set: !cfg.grpc_password.is_empty(),
         named_channels_enabled: cfg.named_channels_enabled,
         audio_quality: cfg.audio_quality,
+        require_identity: cfg.require_identity,
+        unique_callsigns: cfg.unique_callsigns,
+        opus_dtx: cfg.opus_dtx,
+        opus_frame_ms: cfg.opus_frame_ms,
         full_duplex_enabled: cfg.full_duplex_enabled,
     }
 }
@@ -224,6 +336,7 @@ impl Admin for AdminApi {
             &self.state.registry,
             &self.state.channel_names,
             &self.state.duplex_modes,
+            &self.state.channel_mutes,
             &self.state.live_rate,
             watch::next_generation(),
             self.state.started_at,
@@ -274,6 +387,11 @@ impl Admin for AdminApi {
                 "audio_quality must be 0 (raw), 1 (low), 2 (standard) or 3 (high)",
             ));
         }
+        if !matches!(body.opus_frame_ms, 10 | 20 | 40) {
+            return Err(Status::invalid_argument(
+                "opus_frame_ms must be 10, 20, or 40",
+            ));
+        }
 
         // Merge with the live config so we don't clobber grpc_password.
         let current = self.state.server_config.read().await.clone();
@@ -285,6 +403,10 @@ impl Admin for AdminApi {
             grpc_password: current.grpc_password,
             named_channels_enabled: body.named_channels_enabled,
             audio_quality: body.audio_quality,
+            require_identity: body.require_identity,
+            unique_callsigns: body.unique_callsigns,
+            opus_dtx: body.opus_dtx,
+            opus_frame_ms: body.opus_frame_ms,
             full_duplex_enabled: body.full_duplex_enabled,
         };
         self.state
@@ -315,12 +437,13 @@ impl Admin for AdminApi {
             &admin.0,
             "",
             &format!(
-                "name='{}' max_peers={} idle_kick={}s named_channels={} audio_quality={}",
+                "name='{}' max_peers={} idle_kick={}s named_channels={} audio_quality={} opus_frame_ms={}",
                 merged.server_name,
                 merged.max_peers,
                 merged.idle_kick_secs,
                 merged.named_channels_enabled,
-                merged.audio_quality
+                merged.audio_quality,
+                merged.opus_frame_ms
             ),
         );
         Ok(Response::new(config_to_wire(&merged)))
@@ -454,47 +577,7 @@ impl Admin for AdminApi {
         let admin = self.authenticated(&req).await?;
         let id = req.get_ref().id.clone();
 
-        // Snapshot the work under the lock; broadcast after releasing it.
-        let (display_name, frequency, recipients, was_holder) = {
-            let mut registry = self.state.registry.lock().await;
-            let Some(client) = registry.clients.remove(&id) else {
-                return Err(Status::not_found("client not found"));
-            };
-            registry.tokens.remove(&client.audio_token_hash);
-
-            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
-            let mut was_holder = false;
-            let frequency = client.current_frequency.clone();
-            if let Some(freq) = &frequency {
-                if let Some(room) = registry.rooms.get_mut(freq) {
-                    room.members.retain(|m| m != &id);
-                    if room.holder.as_deref() == Some(id.as_str()) {
-                        room.holder = None;
-                        was_holder = true;
-                    }
-                }
-                if let Some(room) = registry.rooms.get(freq) {
-                    if room.members.is_empty() && room.holder.is_none() {
-                        registry.rooms.remove(freq);
-                    }
-                }
-                if let Some(room) = registry.rooms.get(freq) {
-                    for mid in &room.members {
-                        if let Some(c) = registry.clients.get(mid) {
-                            if let Some(tx) = &c.events_tx {
-                                recipients.push(tx.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            (
-                client.display_name.clone(),
-                frequency,
-                recipients,
-                was_holder,
-            )
-        };
+        let (display_name, frequency) = self.remove_session(&id).await?;
 
         tracing::info!(
             admin_user = %admin.0,
@@ -510,28 +593,167 @@ impl Admin for AdminApi {
             frequency.as_deref().unwrap_or(""),
             &format!("kicked {display_name}"),
         );
-
-        let left = Event {
-            event: Some(event::Event::Left(MemberLeft {
-                client_id: id.clone(),
-            })),
-        };
-        let release = was_holder.then(|| Event {
-            event: Some(event::Event::Ptt(PttEvent {
-                client_id: id.clone(),
-                pressed: false,
-                sequence: 0,
-                priority: false,
-            })),
-        });
-        for tx in recipients {
-            let _ = tx.send(left.clone()).await;
-            if let Some(ev) = &release {
-                let _ = tx.send(ev.clone()).await;
-            }
-        }
         self.push_snapshot().await;
         Ok(Response::new(pb::KickClientResponse {}))
+    }
+
+    async fn ban_client(
+        &self,
+        req: Request<pb::BanClientRequest>,
+    ) -> Result<Response<pb::BanClientResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let body = req.get_ref();
+        let id = body.id.clone();
+        let reason = body.reason.trim().to_string();
+        if reason.len() > 256 || reason.chars().any(char::is_control) {
+            return Err(Status::invalid_argument(
+                "reason must be ≤256 characters with no control characters",
+            ));
+        }
+
+        // Resolve the target's identity before touching anything — a
+        // ban needs something durable to key on. Identity-less members
+        // can only be kicked.
+        let (identity, display_name) = {
+            let registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.get(&id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            (client.identity.clone(), client.display_name.clone())
+        };
+        let Some(identity) = identity else {
+            return Err(Status::failed_precondition(
+                "member has no verified identity to ban — kick is the only available action",
+            ));
+        };
+        if body.ban_machine && identity.machine_hash.is_empty() {
+            return Err(Status::failed_precondition(
+                "member reported no machine hash — ban the identity alone",
+            ));
+        }
+
+        let record = crate::state::BanRecord {
+            display_id: identity.display_id.clone(),
+            last_callsign: display_name.clone(),
+            machine_hash: if body.ban_machine {
+                identity.machine_hash.clone()
+            } else {
+                String::new()
+            },
+            reason,
+            banned_by: admin.0.clone(),
+            banned_at: crate::admin::db::now_unix(),
+        };
+
+        // Durable first, then the live map — the ban must land even if
+        // the session vanishes mid-call or the kick below races a
+        // disconnect.
+        self.state
+            .db
+            .insert_ban(&identity.pubkey_hex, &record)
+            .await
+            .map_err(internal)?;
+        self.state
+            .bans
+            .write()
+            .await
+            .insert(identity.pubkey_hex.clone(), record.clone());
+
+        tracing::info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            target_name = %display_name,
+            identity = %identity.display_id,
+            ban_machine = body.ban_machine,
+            "admin banned client",
+        );
+        audit::record(
+            &self.state.audit,
+            "ban",
+            &admin.0,
+            "",
+            &format!(
+                "banned {display_name} ({}){}{}",
+                identity.display_id,
+                if body.ban_machine { " + machine" } else { "" },
+                if record.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", record.reason)
+                },
+            ),
+        );
+
+        // Kick the live session. It may legitimately be gone already
+        // (disconnected between the lookup above and now) — the ban
+        // stands either way.
+        match self.remove_session(&id).await {
+            Ok(_) => {}
+            Err(s) if s.code() == tonic::Code::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::BanClientResponse {}))
+    }
+
+    async fn list_bans(
+        &self,
+        req: Request<pb::ListBansRequest>,
+    ) -> Result<Response<pb::ListBansResponse>, Status> {
+        self.authenticated(&req).await?;
+        let bans = self.state.bans.read().await;
+        let mut out: Vec<pb::BanRecord> = bans
+            .iter()
+            .map(|(pubkey, b)| pb::BanRecord {
+                pubkey: pubkey.clone(),
+                display_id: b.display_id.clone(),
+                last_callsign: b.last_callsign.clone(),
+                machine_hash: b.machine_hash.clone(),
+                reason: b.reason.clone(),
+                banned_by: b.banned_by.clone(),
+                banned_at_unix: b.banned_at.max(0) as u64,
+            })
+            .collect();
+        drop(bans);
+        // Newest-first, with the pubkey as a stable tiebreak so the UI
+        // doesn't reshuffle rows banned in the same second.
+        out.sort_by(|a, b| {
+            b.banned_at_unix
+                .cmp(&a.banned_at_unix)
+                .then_with(|| a.pubkey.cmp(&b.pubkey))
+        });
+        Ok(Response::new(pb::ListBansResponse { bans: out }))
+    }
+
+    async fn lift_ban(
+        &self,
+        req: Request<pb::LiftBanRequest>,
+    ) -> Result<Response<pb::LiftBanResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pubkey = req.get_ref().pubkey.trim().to_ascii_lowercase();
+        if pubkey.is_empty() {
+            return Err(Status::invalid_argument("missing pubkey"));
+        }
+
+        self.state.db.delete_ban(&pubkey).await.map_err(internal)?;
+        let removed = self.state.bans.write().await.remove(&pubkey);
+        // Lifting an unknown ban is an idempotent no-op (a double-click
+        // never errors); only a real lift is worth an audit line.
+        if let Some(ban) = removed {
+            tracing::info!(
+                admin_user = %admin.0,
+                identity = %ban.display_id,
+                "admin lifted ban",
+            );
+            audit::record(
+                &self.state.audit,
+                "unban",
+                &admin.0,
+                "",
+                &format!("lifted ban on {} ({})", ban.last_callsign, ban.display_id),
+            );
+        }
+        Ok(Response::new(pb::LiftBanResponse {}))
     }
 
     async fn move_client(
@@ -660,6 +882,8 @@ impl Admin for AdminApi {
                                 pressed: true,
                                 sequence: 0,
                                 priority: false,
+                                broadcast: false,
+                                display_name: String::new(),
                             })),
                         })
                         .await;
@@ -688,11 +912,30 @@ impl Admin for AdminApi {
         let new_name = validation::display_name(&req.get_ref().display_name)
             .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
 
+        // Refuse a rename onto a callsign another live session already
+        // holds, when the server enforces unique callsigns. `except` is
+        // the subject itself, so renaming to one's own current name (or a
+        // case variant of it) is always allowed. Checked inside the same
+        // lock as the swap so it's atomic against concurrent renames.
+        let unique_callsigns = self.state.server_config.read().await.unique_callsigns;
+
         let (old_name, self_tx, peer_recipients) = {
             let mut registry = self.state.registry.lock().await;
-            let Some(client) = registry.clients.get_mut(&id) else {
+            if !registry.clients.contains_key(&id) {
                 return Err(Status::not_found("client not found"));
-            };
+            }
+            // No identity exemption on admin rename: renaming a member
+            // onto a name another live session holds is always a real
+            // collision (there's no "reconnect" notion here).
+            if unique_callsigns && registry.callsign_taken(&new_name, Some(&id), None) {
+                return Err(Status::already_exists(format!(
+                    "callsign \"{new_name}\" is already in use on this server"
+                )));
+            }
+            let client = registry
+                .clients
+                .get_mut(&id)
+                .expect("client present (checked above)");
             let old_name = std::mem::replace(&mut client.display_name, new_name.clone());
             let frequency = client.current_frequency.clone();
             let self_tx = client.events_tx.clone();
@@ -750,11 +993,18 @@ impl Admin for AdminApi {
         let admin = self.authenticated(&req).await?;
         let pb::SetPriorityRequest { id, grant } = req.into_inner();
 
-        let bound_freq = {
+        // `bound_freq` is the channel priority is now bound to (Some on
+        // grant, None on revoke). `notify_freq` is the channel to stamp
+        // into the PriorityChanged we send the subject — the new freq on
+        // grant, or the one we just cleared on revoke (so the client
+        // knows which channel's PTT cue to refresh). `subject_tx` is the
+        // subject's own event stream, if connected.
+        let (bound_freq, notify_freq, subject_tx) = {
             let mut registry = self.state.registry.lock().await;
             let Some(client) = registry.clients.get_mut(&id) else {
                 return Err(Status::not_found("client not found"));
             };
+            let tx = client.events_tx.clone();
             if grant {
                 let Some(freq) = client.current_frequency.clone() else {
                     return Err(Status::failed_precondition(
@@ -762,10 +1012,12 @@ impl Admin for AdminApi {
                     ));
                 };
                 client.priority_freq = Some(freq.clone());
-                Some(freq)
+                (Some(freq.clone()), freq, tx)
             } else {
-                client.priority_freq = None;
-                None
+                // Remember the channel the grant was bound to so the
+                // revoke notification carries it.
+                let prev = client.priority_freq.take().unwrap_or_default();
+                (None, prev, tx)
             }
         };
 
@@ -789,8 +1041,336 @@ impl Admin for AdminApi {
                 "revoked priority"
             },
         );
+
+        // Tell the subject so its PTT button reflects the new standing —
+        // a priority speaker on a muted (No-Talk) channel keeps a live
+        // button instead of the "unable to talk" cue.
+        if let Some(tx) = subject_tx {
+            let ev = Event {
+                event: Some(event::Event::PriorityChanged(PriorityChanged {
+                    client_id: id.clone(),
+                    frequency: notify_freq,
+                    granted: bound_freq.is_some(),
+                })),
+            };
+            let _ = tx.send(ev).await;
+        }
+
         self.push_snapshot().await;
         Ok(Response::new(pb::SetPriorityResponse {}))
+    }
+
+    async fn set_global_broadcast(
+        &self,
+        req: Request<pb::SetGlobalBroadcastRequest>,
+    ) -> Result<Response<pb::SetGlobalBroadcastResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetGlobalBroadcastRequest { id, grant } = req.into_inner();
+
+        // Collect the work under the registry lock; send events after.
+        let (subject_tx, bcast_teardown_txs) = {
+            let mut registry = self.state.registry.lock().await;
+            // Existence check first.
+            if !registry.clients.contains_key(&id) {
+                return Err(Status::not_found("client not found"));
+            }
+            if grant {
+                // Enforce the one-at-a-time invariant: if another client
+                // already holds the capability, reject. Check before mutating.
+                let conflict = registry
+                    .clients
+                    .iter()
+                    .any(|(cid, c)| cid != &id && c.can_global_broadcast);
+                if conflict {
+                    return Err(Status::failed_precondition(
+                        "another client already holds the global-broadcast capability",
+                    ));
+                }
+                let tx = registry.clients.get_mut(&id).and_then(|c| {
+                    c.can_global_broadcast = true;
+                    c.events_tx.clone()
+                });
+                (tx, Vec::new())
+            } else {
+                // On revoke: if this client is mid-broadcast, tear it down first.
+                // FIX 4: include the subject in the teardown-notify Vec so the
+                // broadcaster's own UI clears the broadcast indicator too.
+                let teardown_txs: Vec<mpsc::Sender<Event>> =
+                    if registry.broadcast_active.as_deref() == Some(id.as_str()) {
+                        registry.broadcast_active = None;
+                        registry
+                            .clients
+                            .iter()
+                            .filter_map(|(_, c)| c.events_tx.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                let tx = registry.clients.get_mut(&id).and_then(|c| {
+                    c.can_global_broadcast = false;
+                    c.events_tx.clone()
+                });
+                (tx, teardown_txs)
+            }
+        };
+
+        // If we tore down an active broadcast, notify all other clients.
+        if !bcast_teardown_txs.is_empty() {
+            let bcast_end = Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: true,
+                    display_name: String::new(),
+                })),
+            };
+            for tx in &bcast_teardown_txs {
+                let _ = tx.send(bcast_end.clone()).await;
+            }
+        }
+
+        // Notify the subject of their new capability standing.
+        if let Some(tx) = subject_tx {
+            let ev = Event {
+                event: Some(event::Event::BroadcastCapabilityChanged(
+                    BroadcastCapabilityChanged {
+                        client_id: id.clone(),
+                        granted: grant,
+                    },
+                )),
+            };
+            let _ = tx.send(ev).await;
+        }
+
+        match grant {
+            true => tracing::info!(
+                admin_user = %admin.0, target_id = %id,
+                "admin granted global-broadcast capability",
+            ),
+            false => tracing::info!(
+                admin_user = %admin.0, target_id = %id,
+                "admin revoked global-broadcast capability",
+            ),
+        }
+        audit::record(
+            &self.state.audit,
+            "global_broadcast",
+            &admin.0,
+            "",
+            if grant { "granted" } else { "revoked" },
+        );
+
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetGlobalBroadcastResponse {}))
+    }
+
+    async fn set_mute(
+        &self,
+        req: Request<pb::SetMuteRequest>,
+    ) -> Result<Response<pb::SetMuteResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetMuteRequest { id, muted } = req.into_inner();
+
+        // Apply the flag and, if we're muting the current floor-holder,
+        // drop the floor right here so the channel isn't left stuck on a
+        // now-silenced talker. Collect the room recipients under the lock
+        // for the post-release broadcast. `display_name` + `frequency`
+        // feed the audit line; `was_holder` decides the PttUp broadcast.
+        let (display_name, frequency, recipients, was_holder, changed) = {
+            let mut registry = self.state.registry.lock().await;
+            let Some(client) = registry.clients.get_mut(&id) else {
+                return Err(Status::not_found("client not found"));
+            };
+            let changed = client.muted != muted;
+            client.muted = muted;
+            let display_name = client.display_name.clone();
+            let frequency = client.current_frequency.clone();
+
+            let mut was_holder = false;
+            let mut recipients: Vec<mpsc::Sender<Event>> = Vec::new();
+            if let Some(freq) = &frequency {
+                if muted {
+                    if let Some(room) = registry.rooms.get_mut(freq) {
+                        if room.holder.as_deref() == Some(id.as_str()) {
+                            // Floor held by the now-muted member: release
+                            // it and stamp the grace window so their final
+                            // in-flight UDP frames still flush cleanly
+                            // (mirrors a normal PttUp).
+                            room.holder = None;
+                            room.last_released = Some((id.clone(), std::time::Instant::now()));
+                            was_holder = true;
+                        }
+                    }
+                }
+                if let Some(room) = registry.rooms.get(freq) {
+                    for mid in &room.members {
+                        if let Some(c) = registry.clients.get(mid) {
+                            if let Some(tx) = &c.events_tx {
+                                recipients.push(tx.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            (display_name, frequency, recipients, was_holder, changed)
+        };
+
+        // No-op when the state already matched (idempotent: a
+        // double-click never double-logs or re-broadcasts).
+        if !changed {
+            return Ok(Response::new(pb::SetMuteResponse {}));
+        }
+
+        let mute_evt = Event {
+            event: Some(event::Event::MuteChanged(MuteChanged {
+                client_id: id.clone(),
+                muted,
+            })),
+        };
+        // If muting dropped the floor, tell the room the holder released
+        // so rosters clear the talking indicator immediately.
+        let release = was_holder.then(|| Event {
+            event: Some(event::Event::Ptt(PttEvent {
+                client_id: id.clone(),
+                pressed: false,
+                sequence: 0,
+                priority: false,
+                broadcast: false,
+                display_name: String::new(),
+            })),
+        });
+        for tx in recipients {
+            let _ = tx.send(mute_evt.clone()).await;
+            if let Some(ev) = &release {
+                let _ = tx.send(ev.clone()).await;
+            }
+        }
+
+        tracing::info!(
+            admin_user = %admin.0,
+            target_id = %id,
+            target_name = %display_name,
+            muted,
+            "admin set mute",
+        );
+        audit::record(
+            &self.state.audit,
+            "mute",
+            &admin.0,
+            frequency.as_deref().unwrap_or(""),
+            &format!("{} {display_name}", if muted { "muted" } else { "unmuted" }),
+        );
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetMuteResponse {}))
+    }
+
+    async fn set_channel_mute(
+        &self,
+        req: Request<pb::SetChannelMuteRequest>,
+    ) -> Result<Response<pb::SetChannelMuteResponse>, Status> {
+        let admin = self.authenticated(&req).await?;
+        let pb::SetChannelMuteRequest { frequency, muted } = req.into_inner();
+        let frequency = validation::frequency(&frequency)
+            .map_err(|s| Status::invalid_argument(s.message().to_string()))?;
+
+        // Persist + update the shared set in lockstep, idempotently.
+        // `changed` gates the audit line + broadcast so a re-mute is a
+        // quiet no-op.
+        let changed = if muted {
+            self.state
+                .db
+                .set_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state
+                .channel_mutes
+                .write()
+                .await
+                .insert(frequency.clone())
+        } else {
+            self.state
+                .db
+                .clear_channel_mute(&frequency)
+                .await
+                .map_err(internal)?;
+            self.state.channel_mutes.write().await.remove(&frequency)
+        };
+
+        // When muting, drop the floor if someone holds it on this channel
+        // so the room doesn't stay stuck on a now-silenced talker (with
+        // release-grace so their in-flight tail still flushes). Collect
+        // the room recipients under the lock for the broadcast below.
+        let (recipients, dropped_holder) = {
+            let mut registry = self.state.registry.lock().await;
+            let mut dropped_holder: Option<String> = None;
+            if muted {
+                if let Some(room) = registry.rooms.get_mut(&frequency) {
+                    if let Some(prev) = room.holder.take() {
+                        room.last_released = Some((prev.clone(), std::time::Instant::now()));
+                        dropped_holder = Some(prev);
+                    }
+                }
+            }
+            let recipients: Vec<mpsc::Sender<Event>> = registry
+                .rooms
+                .get(&frequency)
+                .map(|r| r.members.clone())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|id| registry.clients.get(id))
+                .filter_map(|c| c.events_tx.clone())
+                .collect();
+            (recipients, dropped_holder)
+        };
+
+        if changed {
+            tracing::info!(
+                admin_user = %admin.0,
+                frequency = %frequency,
+                muted,
+                "admin set channel mute",
+            );
+            audit::record(
+                &self.state.audit,
+                "channel-mute",
+                &admin.0,
+                &frequency,
+                if muted {
+                    "muted the channel"
+                } else {
+                    "unmuted the channel"
+                },
+            );
+
+            let evt = Event {
+                event: Some(event::Event::ChannelMuteChanged(ChannelMuteChanged {
+                    frequency: frequency.clone(),
+                    muted,
+                })),
+            };
+            // If muting dropped the floor, also tell the room the holder
+            // released so talking indicators clear immediately.
+            let release = dropped_holder.as_ref().map(|holder_id| Event {
+                event: Some(event::Event::Ptt(PttEvent {
+                    client_id: holder_id.clone(),
+                    pressed: false,
+                    sequence: 0,
+                    priority: false,
+                    broadcast: false,
+                    display_name: String::new(),
+                })),
+            });
+            for tx in recipients {
+                let _ = tx.send(evt.clone()).await;
+                if let Some(ev) = &release {
+                    let _ = tx.send(ev.clone()).await;
+                }
+            }
+        }
+        self.push_snapshot().await;
+        Ok(Response::new(pb::SetChannelMuteResponse {}))
     }
 
     async fn set_channel_name(
@@ -1212,6 +1792,8 @@ mod tests {
             server_config: server_config::shared_default(),
             channel_names: crate::state::shared_channel_names(Default::default()),
             duplex_modes: crate::state::shared_duplex_modes(Default::default()),
+            channel_mutes: crate::state::shared_channel_mutes(Default::default()),
+            bans: crate::state::shared_bans(Default::default()),
             health: crate::metrics::shared_health(),
             live_rate: crate::metrics::shared_live_rate(),
             audit: crate::audit::channel().0,
@@ -1241,6 +1823,7 @@ mod tests {
     fn mk_client(id: &str, name: &str, freq: Option<&str>) -> Client {
         Client {
             id: id.to_string(),
+            identity: None,
             display_name: name.to_string(),
             audio_token_hash: [0u8; TOKEN_HASH_LEN],
             audio_mac_key: [0u8; toki_proto::wire::MAC_KEY_LEN],
@@ -1254,6 +1837,9 @@ mod tests {
             connected_at: Instant::now(),
             priority_freq: None,
             expected_ip: None,
+            muted: false,
+            can_global_broadcast: false,
+            quality: None,
         }
     }
 
@@ -1267,6 +1853,65 @@ mod tests {
                 .members
                 .push(id.into());
         }
+    }
+
+    #[tokio::test]
+    async fn rename_rejects_collision_with_another_callsign() {
+        let (api, token) = test_api(false).await; // unique_callsigns on by default
+        seed(&api.state.registry, "alice", Some("447.00")).await;
+        seed(&api.state.registry, "bob", Some("447.00")).await;
+
+        // Renaming bob → alice (case-insensitive) collides with the live
+        // "alice" session.
+        let err = api
+            .rename_client(authed(
+                pb::RenameClientRequest {
+                    id: "bob".into(),
+                    display_name: "ALICE".into(),
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::AlreadyExists);
+        // bob's name is unchanged after the rejected rename.
+        assert_eq!(
+            api.state.registry.lock().await.clients["bob"].display_name,
+            "bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_to_a_free_name_and_to_own_name_succeed() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "alice", Some("447.00")).await;
+
+        // A free name renames fine.
+        api.rename_client(authed(
+            pb::RenameClientRequest {
+                id: "alice".into(),
+                display_name: "ECHO-9".into(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            api.state.registry.lock().await.clients["alice"].display_name,
+            "ECHO-9"
+        );
+
+        // Renaming to one's own current name (the `except` carve-out) is
+        // allowed, not a self-collision.
+        api.rename_client(authed(
+            pb::RenameClientRequest {
+                id: "alice".into(),
+                display_name: "ECHO-9".into(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1290,6 +1935,158 @@ mod tests {
             .into_inner();
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert!(!info.toml_password_override);
+    }
+
+    async fn seed_with_identity(reg: &SharedRegistry, id: &str, machine_hash: &str) {
+        let mut r = reg.lock().await;
+        let mut c = mk_client(id, id, None);
+        c.identity = Some(crate::state::ClientIdentity {
+            display_id: "FLNIHQMB".into(),
+            pubkey_hex: format!("{id:0<64}"),
+            machine_hash: machine_hash.into(),
+            first_seen: 1,
+        });
+        r.clients.insert(id.into(), c);
+    }
+
+    #[tokio::test]
+    async fn ban_unknown_is_not_found() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "ghost".into(),
+                    reason: "x".into(),
+                    ban_machine: false,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn ban_identityless_member_is_failed_precondition() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "anon", None).await; // mk_client → identity: None
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "anon".into(),
+                    reason: String::new(),
+                    ban_machine: false,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn ban_machine_without_machine_hash_is_failed_precondition() {
+        let (api, token) = test_api(false).await;
+        seed_with_identity(&api.state.registry, "alice", "").await;
+        let err = api
+            .ban_client(authed(
+                pb::BanClientRequest {
+                    id: "alice".into(),
+                    reason: String::new(),
+                    ban_machine: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::FailedPrecondition);
+        // The identity ban must not have landed either (all-or-nothing).
+        assert!(api.state.bans.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ban_records_kicks_lists_and_lifts() {
+        let (api, token) = test_api(false).await;
+        let machine = "ab".repeat(32);
+        seed_with_identity(&api.state.registry, "alice", &machine).await;
+        let pubkey = format!("{:0<64}", "alice");
+
+        api.ban_client(authed(
+            pb::BanClientRequest {
+                id: "alice".into(),
+                reason: "spam".into(),
+                ban_machine: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        // Session kicked, ban in the live map AND durable in the db.
+        assert!(!api
+            .state
+            .registry
+            .lock()
+            .await
+            .clients
+            .contains_key("alice"));
+        let live = api.state.bans.read().await.get(&pubkey).cloned().unwrap();
+        assert_eq!(live.reason, "spam");
+        assert_eq!(live.machine_hash, machine);
+        assert_eq!(live.banned_by, "admin");
+        assert!(api
+            .state
+            .db
+            .load_bans()
+            .await
+            .unwrap()
+            .contains_key(&pubkey));
+
+        // Listed, newest-first shape.
+        let bans = api
+            .list_bans(authed(pb::ListBansRequest {}, &token))
+            .await
+            .unwrap()
+            .into_inner()
+            .bans;
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans[0].pubkey, pubkey);
+        assert_eq!(bans[0].last_callsign, "alice");
+
+        // Lift removes from both stores; a second lift is a no-op.
+        api.lift_ban(authed(
+            pb::LiftBanRequest {
+                pubkey: pubkey.clone(),
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.bans.read().await.is_empty());
+        assert!(api.state.db.load_bans().await.unwrap().is_empty());
+        api.lift_ban(authed(pb::LiftBanRequest { pubkey }, &token))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ban_rejects_oversized_or_control_reason() {
+        let (api, token) = test_api(false).await;
+        seed_with_identity(&api.state.registry, "alice", "").await;
+        for bad in ["x".repeat(257), "evil\nreason".to_string()] {
+            let err = api
+                .ban_client(authed(
+                    pb::BanClientRequest {
+                        id: "alice".into(),
+                        reason: bad,
+                        ban_machine: false,
+                    },
+                    &token,
+                ))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code(), Code::InvalidArgument);
+        }
     }
 
     #[tokio::test]
@@ -1339,6 +2136,10 @@ mod tests {
                     idle_kick_secs: 10,
                     named_channels_enabled: false,
                     audio_quality: 2,
+                    require_identity: false,
+                    unique_callsigns: true,
+                    opus_dtx: true,
+                    opus_frame_ms: 10,
                     full_duplex_enabled: false,
                 },
                 &token,
@@ -1422,6 +2223,157 @@ mod tests {
         assert!(api.state.registry.lock().await.clients["cara"]
             .priority_freq
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn mute_unknown_is_not_found() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .set_mute(authed(
+                pb::SetMuteRequest {
+                    id: "ghost".into(),
+                    muted: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn mute_sets_and_clears_flag() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "dora", Some("447.00")).await;
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "dora".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.registry.lock().await.clients["dora"].muted);
+        assert!(!api.state.registry.lock().await.clients["dora"].can_speak());
+
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "dora".into(),
+                muted: false,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.registry.lock().await.clients["dora"].muted);
+        assert!(api.state.registry.lock().await.clients["dora"].can_speak());
+    }
+
+    #[tokio::test]
+    async fn muting_holder_drops_the_floor() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "evan", Some("447.00")).await;
+        // Evan holds the floor.
+        api.state
+            .registry
+            .lock()
+            .await
+            .rooms
+            .get_mut("447.00")
+            .unwrap()
+            .holder = Some("evan".into());
+
+        api.set_mute(authed(
+            pb::SetMuteRequest {
+                id: "evan".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        let reg = api.state.registry.lock().await;
+        let room = &reg.rooms["447.00"];
+        // Floor freed, and the release-grace recorded so Evan's
+        // in-flight tail can still flush.
+        assert!(room.holder.is_none());
+        assert!(matches!(&room.last_released, Some((id, _)) if id == "evan"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_sets_and_clears_in_shared_set() {
+        let (api, token) = test_api(false).await;
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(api.state.channel_mutes.read().await.contains("446.05"));
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "446.05".into(),
+                muted: false,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+        assert!(!api.state.channel_mutes.read().await.contains("446.05"));
+    }
+
+    #[tokio::test]
+    async fn channel_mute_rejects_bad_frequency() {
+        let (api, token) = test_api(false).await;
+        let err = api
+            .set_channel_mute(authed(
+                pb::SetChannelMuteRequest {
+                    frequency: "999.99".into(),
+                    muted: true,
+                },
+                &token,
+            ))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn muting_channel_drops_its_holder() {
+        let (api, token) = test_api(false).await;
+        seed(&api.state.registry, "fred", Some("447.00")).await;
+        api.state
+            .registry
+            .lock()
+            .await
+            .rooms
+            .get_mut("447.00")
+            .unwrap()
+            .holder = Some("fred".into());
+
+        api.set_channel_mute(authed(
+            pb::SetChannelMuteRequest {
+                frequency: "447.00".into(),
+                muted: true,
+            },
+            &token,
+        ))
+        .await
+        .unwrap();
+
+        let reg = api.state.registry.lock().await;
+        let room = &reg.rooms["447.00"];
+        assert!(
+            room.holder.is_none(),
+            "muting the channel must free the floor"
+        );
+        assert!(matches!(&room.last_released, Some((id, _)) if id == "fred"));
     }
 
     #[tokio::test]

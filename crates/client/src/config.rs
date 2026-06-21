@@ -364,6 +364,42 @@ mod tests {
     }
 
     #[test]
+    fn dsp_toggles_default_on_and_round_trip() {
+        // Absent keys (every pre-DSP config) resolve to on — existing
+        // users get the processed-mic experience without editing TOML.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.audio.noise_suppression);
+        assert!(cfg.audio.agc);
+        // An explicit opt-out survives a save/load round trip.
+        let raw = "[audio]\nnoise_suppression = false\nagc = false\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(!cfg.audio.noise_suppression);
+        assert!(!cfg.audio.agc);
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(!back.audio.noise_suppression);
+        assert!(!back.audio.agc);
+    }
+
+    #[test]
+    fn output_dirty_defaults_off_and_round_trips() {
+        // Absent keys (every pre-FX config) resolve to off, with a
+        // moderate amount waiting behind the toggle.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.audio.output_dirty);
+        assert_eq!(cfg.audio.output_dirty_amount, default_dirty_amount());
+        // An explicit on + amount survives a save/load round trip.
+        let raw = "[audio]\noutput_dirty = true\noutput_dirty_amount = 0.85\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.audio.output_dirty);
+        assert_eq!(cfg.audio.output_dirty_amount, 0.85);
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(back.audio.output_dirty);
+        assert_eq!(back.audio.output_dirty_amount, 0.85);
+    }
+
+    #[test]
     fn freq_hotkeys_round_trip() {
         use crate::hotkey::Input;
         let mut hk = HotkeyConfig::default();
@@ -389,8 +425,126 @@ mod tests {
         hk.set_memory(1, HotkeyBinding::from_input(Input::Key(Code::F2)));
         // Rebinding PTT must not clobber the M2 hotkey.
         hk.set_ptt(Input::Key(Code::KeyT));
-        assert_eq!(hk.key.as_deref(), Some("KeyT"));
+        // set_ptt now writes the tagged `binding` form and clears legacy.
+        assert_eq!(hk.binding.as_deref(), Some("key:KeyT"));
+        assert_eq!(hk.key, None);
+        assert_eq!(hk.to_input(), Some(Input::Key(Code::KeyT)));
         assert_eq!(hk.memory_inputs()[1], Some(Input::Key(Code::F2)));
+    }
+
+    #[test]
+    fn tagged_binding_round_trips_for_a_gamepad() {
+        use crate::hotkey::{GamepadButton, GamepadCode, Input};
+        let mut hk = HotkeyConfig::default();
+        let input = Input::Gamepad(GamepadButton {
+            button: GamepadCode::South,
+            index: 0,
+        });
+        hk.set_ptt(input);
+        hk.set_memory(0, HotkeyBinding::from_input(input));
+
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.to_input(), Some(input));
+        assert_eq!(back.memory_inputs()[0], Some(input));
+    }
+
+    #[test]
+    fn legacy_key_only_config_still_parses() {
+        use crate::hotkey::Input;
+        // A config written before any-device binding: only `key`, no
+        // `binding`. PTT must still resolve.
+        let raw = "[hotkey]\nkey = \"F8\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.to_input(), Some(Input::Key(Code::F8)));
+    }
+
+    #[test]
+    fn legacy_mouse_only_config_still_parses() {
+        use crate::hotkey::{Input, MouseButton};
+        let raw = "[hotkey]\nmouse_button = \"Middle\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(
+            cfg.hotkey.to_input(),
+            Some(Input::Mouse(MouseButton::Middle))
+        );
+    }
+
+    #[test]
+    fn tagged_binding_wins_over_legacy_fields() {
+        use crate::hotkey::Input;
+        // When both the new `binding` and a legacy `key` are present,
+        // the tagged form takes precedence.
+        let raw = "[hotkey]\nbinding = \"key:F8\"\nkey = \"Backquote\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.to_input(), Some(Input::Key(Code::F8)));
+    }
+
+    #[test]
+    fn legacy_memory_binding_still_parses() {
+        use crate::hotkey::Input;
+        // A memory slot written in the legacy shape (no `binding`).
+        let raw = "[hotkey.m1]\nkey = \"F1\"\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.hotkey.memory_inputs()[0], Some(Input::Key(Code::F1)));
+    }
+
+    #[test]
+    fn secondary_ptt_round_trips_and_defaults_unbound() {
+        use crate::hotkey::Input;
+        let mut hk = HotkeyConfig::default();
+        // Unbound by default and absent from the serialized form.
+        assert_eq!(hk.to_input_secondary(), None);
+        assert!(!toml::to_string(&hk).unwrap().contains("secondary"));
+
+        hk.set_ptt_secondary(Some(Input::Key(Code::Backquote)));
+        let s = toml::to_string(&hk).unwrap();
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.to_input_secondary(), Some(Input::Key(Code::Backquote)));
+
+        // Clearing removes it again.
+        let mut back = back;
+        back.set_ptt_secondary(None);
+        assert_eq!(back.to_input_secondary(), None);
+    }
+
+    #[test]
+    fn broadcast_ptt_defaults_unbound_and_absent_from_toml() {
+        let hk = HotkeyConfig::default();
+        // Default: unbound.
+        assert_eq!(hk.broadcast_ptt_input(), None);
+        // Not serialized when unset.
+        let s = toml::to_string(&hk).unwrap();
+        assert!(
+            !s.contains("broadcast_ptt"),
+            "absent key must not appear: {s}"
+        );
+
+        // A TOML file without broadcast_ptt still deserializes fine.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.hotkey.broadcast_ptt_input(), None);
+    }
+
+    #[test]
+    fn broadcast_ptt_round_trips() {
+        use crate::hotkey::Input;
+        use global_hotkey::hotkey::Code;
+        let mut hk = HotkeyConfig::default();
+        hk.set_broadcast_ptt(Some(Input::Key(Code::F9)));
+        assert_eq!(hk.broadcast_ptt_input(), Some(Input::Key(Code::F9)));
+
+        let s = toml::to_string(&hk).unwrap();
+        assert!(
+            s.contains("broadcast_ptt"),
+            "bound key must be serialized: {s}"
+        );
+        let back: HotkeyConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.broadcast_ptt_input(), Some(Input::Key(Code::F9)));
+
+        // Clearing removes it again.
+        let mut back = back;
+        back.set_broadcast_ptt(None);
+        assert_eq!(back.broadcast_ptt_input(), None);
     }
 
     #[test]
@@ -477,6 +631,29 @@ pub struct AudioConfig {
     /// earpiece. Default `0.0` (centered). No effect on mono outputs.
     #[serde(default = "default_balance")]
     pub balance: f32,
+    /// Capture-side RNNoise noise suppression (see `crate::dsp`).
+    /// Default on — the "just works in a noisy room" experience;
+    /// toggle off in Settings for the raw, unprocessed mic character.
+    #[serde(default = "default_true")]
+    pub noise_suppression: bool,
+    /// Capture-side automatic gain control. Default on, same
+    /// rationale (and same Settings toggle) as `noise_suppression`.
+    #[serde(default = "default_true")]
+    pub agc: bool,
+    /// Transmit-side "radio FX" dirtying (band-pass + saturation + static)
+    /// baked into the operator's *outgoing* voice so peers hear it — see
+    /// `crate::dsp::OutputDsp`. Default **off**: it's a deliberate flavour
+    /// effect, not something to impose on a fresh install (the bare
+    /// `#[serde(default)]` gives `false`, so every pre-existing config also
+    /// stays clean). The field name is kept for config back-compat.
+    #[serde(default)]
+    pub output_dirty: bool,
+    /// How hard the radio FX dirties, `[0.0, 1.0]`. Only meaningful when
+    /// `output_dirty` is on. Defaults to a moderate setting so flipping
+    /// the toggle with no prior value is audibly "a radio" rather than
+    /// either subtle or extreme.
+    #[serde(default = "default_dirty_amount")]
+    pub output_dirty_amount: f32,
 }
 
 fn default_gain() -> f32 {
@@ -487,6 +664,10 @@ fn default_balance() -> f32 {
     0.0
 }
 
+fn default_dirty_amount() -> f32 {
+    0.6
+}
+
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
@@ -495,6 +676,10 @@ impl Default for AudioConfig {
             input_gain: 1.0,
             output_gain: 1.0,
             balance: 0.0,
+            noise_suppression: true,
+            agc: true,
+            output_dirty: false,
+            output_dirty_amount: default_dirty_amount(),
         }
     }
 }
@@ -510,14 +695,29 @@ impl Default for AudioConfig {
 /// chords. The `key` value is just a physical key code.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HotkeyConfig {
-    /// `keyboard_types::Code` variant name, e.g. `"Backquote"`, `"F8"`.
-    /// `None` when the bound input is a mouse button.
+    /// Tagged PTT binding for any peripheral (e.g. `"key:Backquote"`,
+    /// `"gamepad:0:South"`, `"streamdeck:0x0fd9:0x0080:3"`). Preferred
+    /// over the legacy `key` / `mouse_button` fields; written by all new
+    /// saves. Absent on configs written before any-device binding — the
+    /// resolver then falls back to `key`/`mouse_button` below.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
+    /// Legacy: `keyboard_types::Code` variant name, e.g. `"Backquote"`,
+    /// `"F8"`. Read-only fallback when `binding` is absent. Still
+    /// defaults to `Backquote` so a brand-new config keeps PTT on the
+    /// backquote key.
     #[serde(default = "default_key")]
     pub key: Option<String>,
-    /// Stable mouse button label (`"Left"`, `"Right"`, `"Middle"`,
-    /// `"Mouse4"`, …). `None` when the bound input is a keyboard key.
+    /// Legacy: stable mouse button label (`"Left"`, `"Middle"`,
+    /// `"Mouse4"`, …). Read-only fallback when `binding` is absent.
     #[serde(default)]
     pub mouse_button: Option<String>,
+    /// Optional secondary/fallback PTT binding (tagged form, any
+    /// peripheral). PTT engages while either the primary `binding` or
+    /// this is held — e.g. a keyboard key backing up a gamepad button.
+    /// Unbound (omitted) by default; no legacy equivalent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<String>,
     /// Optional global hotkeys that recall memory presets M1–M4. Each
     /// is an independent [`HotkeyBinding`]; an unbound slot is an empty
     /// (omitted) table. Pressing the bound key/button switches the
@@ -538,13 +738,27 @@ pub struct HotkeyConfig {
     pub freq_up: HotkeyBinding,
     #[serde(default)]
     pub freq_down: HotkeyBinding,
+    /// Optional dedicated global-broadcast PTT binding. When held, sends a
+    /// broadcast PTT (distinct from the normal PTT) that the server fans out
+    /// to every frequency room. Unbound by default; only effective once an
+    /// admin grants global-broadcast capability. Same peripheral support as
+    /// the normal PTT binding. Stored as a tagged token (e.g. `"key:F9"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_ptt: Option<String>,
 }
 
-/// One key/mouse binding, in the same on-disk shape as the PTT binding
-/// (`key` xor `mouse_button`). Used for the four memory-recall hotkeys.
-/// Both fields `None` = unbound.
+/// One binding for any peripheral, used for the four memory-recall and
+/// the freq up/down hotkeys. All fields `None` = unbound.
+///
+/// `binding` is the current tagged form (e.g. `"gamepad:0:South"`,
+/// `"key:F8"`) and is what new saves write. The legacy `key` /
+/// `mouse_button` fields are kept **read-only** for back-compat with
+/// configs written before any-device binding existed: when `binding`
+/// is absent we fall through to them.
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct HotkeyBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -552,29 +766,45 @@ pub struct HotkeyBinding {
 }
 
 impl HotkeyBinding {
-    /// Parse into an [`Input`], mouse-then-key like [`HotkeyConfig`].
+    /// Parse into an [`Input`], preferring the tagged `binding` form and
+    /// falling back to the legacy `mouse_button` then `key` fields.
     /// `None` when unbound or unparseable.
     pub fn to_input(&self) -> Option<crate::hotkey::Input> {
-        if let Some(label) = self.mouse_button.as_deref() {
-            return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
-        }
-        let code = Code::from_str(self.key.as_deref()?).ok()?;
-        Some(crate::hotkey::Input::Key(code))
+        resolve_binding(
+            self.binding.as_deref(),
+            self.mouse_button.as_deref(),
+            self.key.as_deref(),
+        )
     }
 
-    /// Build from a captured [`Input`].
+    /// Build from a captured [`Input`]. Writes the tagged `binding`
+    /// form and leaves the legacy fields empty.
     pub fn from_input(input: crate::hotkey::Input) -> Self {
-        match input {
-            crate::hotkey::Input::Key(code) => Self {
-                key: Some(code.to_string()),
-                mouse_button: None,
-            },
-            crate::hotkey::Input::Mouse(b) => Self {
-                key: None,
-                mouse_button: Some(b.label()),
-            },
+        Self {
+            binding: Some(input.to_token()),
+            key: None,
+            mouse_button: None,
         }
     }
+}
+
+/// Shared resolution used by both [`HotkeyBinding`] and the PTT slot on
+/// [`HotkeyConfig`]: tagged `binding` wins, then legacy `mouse_button`,
+/// then legacy `key`. Centralized so the precedence can't drift between
+/// the two call sites.
+fn resolve_binding(
+    binding: Option<&str>,
+    mouse_button: Option<&str>,
+    key: Option<&str>,
+) -> Option<crate::hotkey::Input> {
+    if let Some(token) = binding {
+        return crate::hotkey::Input::from_token(token);
+    }
+    if let Some(label) = mouse_button {
+        return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
+    }
+    let code = Code::from_str(key?).ok()?;
+    Some(crate::hotkey::Input::Key(code))
 }
 
 fn default_key() -> Option<String> {
@@ -584,44 +814,50 @@ fn default_key() -> Option<String> {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         Self {
+            binding: None,
             key: Some("Backquote".into()),
             mouse_button: None,
+            secondary: None,
             m1: HotkeyBinding::default(),
             m2: HotkeyBinding::default(),
             m3: HotkeyBinding::default(),
             m4: HotkeyBinding::default(),
             freq_up: HotkeyBinding::default(),
             freq_down: HotkeyBinding::default(),
+            broadcast_ptt: None,
         }
     }
 }
 
 impl HotkeyConfig {
-    /// Parsed form suitable for handing to [`crate::hotkey::install`].
-    /// Returns `None` if neither field is set, or the set field is
-    /// unparseable. Mouse takes precedence if both are somehow set.
+    /// Parsed PTT form suitable for handing to [`crate::hotkey::install`].
+    /// Prefers the tagged `binding`, falling back to the legacy
+    /// `mouse_button` then `key`. `None` if nothing parses.
     pub fn to_input(&self) -> Option<crate::hotkey::Input> {
-        if let Some(label) = self.mouse_button.as_deref() {
-            return crate::hotkey::MouseButton::from_label(label).map(crate::hotkey::Input::Mouse);
-        }
-        let key = self.key.as_deref()?;
-        let code = Code::from_str(key).ok()?;
-        Some(crate::hotkey::Input::Key(code))
+        resolve_binding(
+            self.binding.as_deref(),
+            self.mouse_button.as_deref(),
+            self.key.as_deref(),
+        )
     }
 
     /// Update the PTT binding in place, leaving the memory bindings
-    /// untouched.
+    /// untouched. Writes the tagged `binding` form and clears the legacy
+    /// fields so the two can't disagree.
     pub fn set_ptt(&mut self, input: crate::hotkey::Input) {
-        match input {
-            crate::hotkey::Input::Key(code) => {
-                self.key = Some(code.to_string());
-                self.mouse_button = None;
-            }
-            crate::hotkey::Input::Mouse(b) => {
-                self.key = None;
-                self.mouse_button = Some(b.label());
-            }
-        }
+        self.binding = Some(input.to_token());
+        self.key = None;
+        self.mouse_button = None;
+    }
+
+    /// Parsed secondary/fallback PTT binding, or `None` when unbound.
+    pub fn to_input_secondary(&self) -> Option<crate::hotkey::Input> {
+        crate::hotkey::Input::from_token(self.secondary.as_deref()?)
+    }
+
+    /// Set (or clear, with `None`) the secondary/fallback PTT binding.
+    pub fn set_ptt_secondary(&mut self, input: Option<crate::hotkey::Input>) {
+        self.secondary = input.map(|i| i.to_token());
     }
 
     /// Borrow the memory-recall binding for slot `i` (0..4).
@@ -660,6 +896,19 @@ impl HotkeyConfig {
     /// for seeding the poller at startup.
     pub fn freq_inputs(&self) -> [Option<crate::hotkey::Input>; 2] {
         [self.freq_up.to_input(), self.freq_down.to_input()]
+    }
+
+    /// Parsed global-broadcast PTT binding, or `None` when unbound.
+    /// Uses the same tagged-token resolution as the primary PTT binding;
+    /// an unparseable or absent token returns `None`.
+    pub fn broadcast_ptt_input(&self) -> Option<crate::hotkey::Input> {
+        crate::hotkey::Input::from_token(self.broadcast_ptt.as_deref()?)
+    }
+
+    /// Set (or clear, with `None`) the broadcast PTT binding. Called
+    /// from the Settings panel's BROADCAST PTT bind row.
+    pub fn set_broadcast_ptt(&mut self, input: Option<crate::hotkey::Input>) {
+        self.broadcast_ptt = input.map(|i| i.to_token());
     }
 }
 

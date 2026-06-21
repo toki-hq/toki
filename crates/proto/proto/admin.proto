@@ -34,11 +34,50 @@ service Admin {
   rpc MoveClient(MoveClientRequest) returns (MoveClientResponse);
   rpc RenameClient(RenameClientRequest) returns (RenameClientResponse);
   rpc SetPriority(SetPriorityRequest) returns (SetPriorityResponse);
+  // Grant or revoke the *global broadcast* capability on a connected
+  // client. When granted, the client may key a dedicated broadcast PTT
+  // that simultaneously seizes every occupied frequency room, blocks
+  // local talkers, and reaches every listener regardless of mute.
+  // Session-scoped (cleared on disconnect). NOT_FOUND for an unknown id.
+  // FAILED_PRECONDITION if another client already holds the capability
+  // (only one at a time). If the client is mid-broadcast when revoked,
+  // the broadcast is torn down before the response returns.
+  rpc SetGlobalBroadcast(SetGlobalBroadcastRequest) returns (SetGlobalBroadcastResponse);
+  // Server-side mute: revoke (or restore) a member's ability to take
+  // the PTT floor, without disconnecting them. A muted member's press
+  // is refused server-side — they stay connected and keep hearing the
+  // channel; they just can't transmit. The gentle lever between
+  // "nothing" and kick/ban. Session-scoped (clears on disconnect);
+  // NOT_FOUND for an unknown client id. If the member currently holds
+  // the floor, muting drops it immediately so the channel frees up.
+  rpc SetMute(SetMuteRequest) returns (SetMuteResponse);
+
+  // ── Identity bans ───────────────────────────────────────────────
+  // Ban a connected member's *identity* (and optionally its machine
+  // hash) and kick the live session. Future registers presenting the
+  // banned identity — or, for a machine ban, the banned machine hash
+  // under ANY identity — are rejected with PERMISSION_DENIED + the
+  // reason. NOT_FOUND for an unknown client id; FAILED_PRECONDITION
+  // when the member registered without an identity (nothing durable
+  // to ban — kick is the only lever for those).
+  rpc BanClient(BanClientRequest) returns (BanClientResponse);
+  // Every active ban, newest-first.
+  rpc ListBans(ListBansRequest) returns (ListBansResponse);
+  // Lift a ban by banned pubkey. Idempotent (lifting an unknown ban
+  // is a no-op success, so a double-click never errors).
+  rpc LiftBan(LiftBanRequest) returns (LiftBanResponse);
 
   // Named channels. Assign or clear the human-readable name of a
   // frequency (empty `name` clears it). FAILED_PRECONDITION when the
   // feature is disabled; INVALID_ARGUMENT for a bad frequency or a name
   // longer than 16 chars. Names persist independently of room occupancy.
+  // Channel-wide mute: silence transmission on a whole frequency. While
+  // a channel is muted, no member tuned to it may take the PTT floor;
+  // moving to another (unmuted) channel restores the ability to talk.
+  // Enforced by the same relay speak-gate as member mute. Persists
+  // independently of occupancy (like channel names). INVALID_ARGUMENT
+  // for a bad frequency.
+  rpc SetChannelMute(SetChannelMuteRequest) returns (SetChannelMuteResponse);
   rpc SetChannelName(SetChannelNameRequest) returns (SetChannelNameResponse);
   // Clear every channel name in one shot.
   rpc ClearAllChannelNames(ClearAllChannelNamesRequest) returns (ClearAllChannelNamesResponse);
@@ -79,16 +118,26 @@ message Snapshot {
   // (the persisted GetMetrics series is 1-minute granularity).
   uint64 rx_bytes_per_sec = 6;
   uint64 tx_bytes_per_sec = 7;
+  // Canonical frequencies currently muted channel-wide (no one may
+  // transmit). Carries ALL muted channels regardless of occupancy, so
+  // the panel can flag an empty-but-muted frequency. Independent of the
+  // named-channels feature — channel mute is always available.
+  repeated string muted_channels = 8;
   // Per-frequency duplex mode (0 = half, 1 = full), keyed by canonical
   // frequency. Only non-default (full) channels appear; an absent key
-  // means half-duplex. Persists independently of room occupancy.
-  map<string, uint32> channel_modes = 8;
+  // means half-duplex. Persists independently of room occupancy. (Field
+  // 9: appended after muted_channels, which took 8 on main.)
+  map<string, uint32> channel_modes = 9;
 }
 
 message Room {
   string frequency = 1;             // canonical "446.05"
   optional string holder = 2;       // client_id of the current PTT holder
   repeated Member members = 3;
+  // True when this whole channel is muted (see Admin.SetChannelMute) —
+  // no member tuned here can transmit. Convenience mirror of the
+  // Snapshot.muted_channels entry for this frequency.
+  bool muted = 4;
 }
 
 message Member {
@@ -96,6 +145,50 @@ message Member {
   string display_name = 2;
   uint64 connected_secs = 3;        // since Register
   bool priority = 4;                // priority speaker on this room's frequency
+
+  // ── Client identity (optional) ──────────────────────────────────
+  // Present only when the member registered with a verified keypair
+  // identity; all four fields are empty/zero for identity-less
+  // sessions (pre-identity clients, or identity disabled client-side).
+
+  // Human-readable identity string, e.g. "7Q4XF9KB" (8-char base32
+  // fingerprint of the public key). Stable across sessions and
+  // display-name changes — the durable "who".
+  string identity = 5;
+  // Full 32-byte ed25519 public key as lowercase hex — the canonical
+  // identity key, shown in the panel's hover detail and used to
+  // correlate with the identities table / audit log.
+  string identity_pubkey = 6;
+  // Salted machine-fingerprint hash (lowercase hex) the client
+  // presented at register. Lets an operator spot "fresh identity,
+  // previously-seen machine" after a config wipe. Claimed, not provable.
+  string identity_machine_hash = 7;
+  // Unix time this identity was first seen by THIS server (from the
+  // identities table). 0 when absent.
+  uint64 identity_first_seen_unix = 8;
+
+  // Server-side mute (see Admin.SetMute). When true, the server
+  // refuses this session's PTT presses — it stays connected and
+  // hears the channel but cannot transmit. Session-scoped.
+  bool muted = 9;
+
+  // ── Connection quality (client-reported) ────────────────────────
+  // Most-recent metrics the client reported via
+  // Signaling.ReportConnectionQuality. All zero until the first report
+  // lands (a just-connected member, or a pre-0.5.0 client that never
+  // reports). `quality_fresh` distinguishes "0 ms, freshly reported"
+  // from "never reported": false ⇒ show a dash, not green bars.
+  uint32 rtt_ms = 10;
+  uint32 jitter_ms = 11;
+  // Loss percentage ×100 (250 = 2.50%); see ConnectionQualityReport.
+  uint32 loss_pct_centi = 12;
+  // True once at least one quality report has been received for this
+  // session. Gates the panel between "—" and an actual reading.
+  bool quality_fresh = 13;
+  // True when an admin has granted this session the global-broadcast
+  // capability. Session-scoped (cleared on disconnect). The admin panel
+  // shows a "BCAST" badge and a grant/revoke toggle.
+  bool can_global_broadcast = 14;
 }
 
 // ── Server metadata + config ──────────────────────────────────────
@@ -120,10 +213,29 @@ message ServerConfig {
   // Voice codec/quality clients are asked to use: 0=Raw PCM (no
   // compression), 1=Low (~16k), 2=Standard (~24k), 3=High (~32k Opus).
   uint32 audio_quality = 7;
+  // When on, identity-less registers are rejected — every member must
+  // present a verified keypair identity, which makes identity bans
+  // airtight (an evader can no longer connect anonymously). Off by
+  // default so open/legacy deployments keep working unchanged.
+  bool require_identity = 8;
+  // When on (the default), callsigns must be unique across connected
+  // members: a register or rename onto a name already in use is
+  // refused. Case-insensitive. Off restores the legacy behaviour where
+  // duplicate callsigns are allowed.
+  bool unique_callsigns = 9;
+  // When on (the default), clients using Opus enable DTX (discontinuous
+  // transmission): silence is sent as tiny comfort-noise frames, cutting
+  // the talker's outbound and the whole fan-out during gaps. No effect on
+  // the raw-PCM path. Off only for debugging — DTX has no audible cost.
+  bool opus_dtx = 10;
+  // Opus frame duration the server advertises to clients: 10, 20, or 40 ms.
+  // Default 10 ms (absent = legacy). See RegisterResponse.opus_frame_ms.
+  uint32 opus_frame_ms = 11;
   // Gate the per-channel full-duplex feature. When off, every channel is
   // half-duplex and SetChannelMode is rejected; the UI hides duplex
-  // controls + indicators.
-  bool full_duplex_enabled = 8;
+  // controls + indicators. (Field 12: appended after the identity/
+  // callsign/DTX/frame-size settings that landed on main.)
+  bool full_duplex_enabled = 12;
 }
 
 // ── Requests / responses ──────────────────────────────────────────
@@ -138,7 +250,17 @@ message UpdateServerConfigRequest {
   uint32 idle_kick_secs = 3;
   bool named_channels_enabled = 4;
   uint32 audio_quality = 5;         // 0=Raw, 1=Low, 2=Standard, 3=High
-  bool full_duplex_enabled = 6;
+  // Reject identity-less registers (see ServerConfig.require_identity).
+  bool require_identity = 6;
+  // Enforce unique callsigns (see ServerConfig.unique_callsigns).
+  bool unique_callsigns = 7;
+  // Enable Opus DTX (see ServerConfig.opus_dtx).
+  bool opus_dtx = 8;
+  // Opus frame size (see ServerConfig.opus_frame_ms).
+  uint32 opus_frame_ms = 9;
+  // Gate the full-duplex feature (see ServerConfig.full_duplex_enabled).
+  // Field 10: appended after the settings that landed on main.
+  bool full_duplex_enabled = 10;
 }
 
 message SetServerPasswordRequest {
@@ -172,6 +294,51 @@ message SetPriorityRequest {
   bool grant = 2;
 }
 message SetPriorityResponse {}
+
+message SetGlobalBroadcastRequest {
+  string id = 1;
+  bool grant = 2;
+}
+message SetGlobalBroadcastResponse {}
+
+message SetMuteRequest {
+  string id = 1;
+  bool muted = 2;                   // true = mute (silence), false = unmute
+}
+message SetMuteResponse {}
+
+message BanClientRequest {
+  string id = 1;                    // live session client_id to ban + kick
+  string reason = 2;                // shown to the banned client on rejected registers
+  // Also ban the machine hash the session presented (when it presented
+  // one): a config wipe then mints a fresh identity but stays banned.
+  bool ban_machine = 3;
+}
+message BanClientResponse {}
+
+message ListBansRequest {}
+message ListBansResponse {
+  repeated BanRecord bans = 1;      // newest-first
+}
+
+message BanRecord {
+  string pubkey = 1;                // banned identity key, lowercase hex (the ban key)
+  string display_id = 2;            // its 8-char fingerprint, for display
+  string last_callsign = 3;         // display name at ban time (display aid)
+  string machine_hash = 4;          // non-empty → the machine tier is banned too
+  string reason = 5;
+  string banned_by = 6;             // admin username
+  uint64 banned_at_unix = 7;
+}
+
+message LiftBanRequest { string pubkey = 1; }
+message LiftBanResponse {}
+
+message SetChannelMuteRequest {
+  string frequency = 1;             // canonical "446.05"
+  bool muted = 2;                   // true = mute the channel, false = unmute
+}
+message SetChannelMuteResponse {}
 
 message SetChannelNameRequest {
   string frequency = 1;             // canonical "446.05"

@@ -39,6 +39,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{MySqlPool, PgPool, Row, SqlitePool};
 
 use crate::server_config::ServerConfig;
+use crate::state::{BanRecord, IdentityRecord};
 
 /// Which SQL dialect the open connection speaks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -177,6 +178,7 @@ impl AdminDb {
     /// therefore runs an additive `ALTER TABLE ADD COLUMN` upgrade pass
     /// for the columns that postdate the original `server_config` shape
     /// (`grpc_password`, `named_channels_enabled`, `audio_quality`,
+    /// `require_identity`, `unique_callsigns`, `opus_dtx`, `opus_frame_ms`,
     /// `full_duplex_enabled`). Each add is guarded so it's a no-op when the
     /// column is already present — making the whole `migrate()` idempotent
     /// across fresh installs *and* in-place upgrades on all three backends.
@@ -206,11 +208,52 @@ impl AdminDb {
                 "BIGINT NOT NULL DEFAULT 2",
             ),
             (
+                "require_identity",
+                "INTEGER NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+                "BIGINT NOT NULL DEFAULT 0",
+            ),
+            // DEFAULT 1: unique callsigns are on by default, so an
+            // in-place upgrade starts enforcing them (matches a fresh
+            // install's `ServerConfig::default`).
+            (
+                "unique_callsigns",
+                "INTEGER NOT NULL DEFAULT 1",
+                "BIGINT NOT NULL DEFAULT 1",
+                "BIGINT NOT NULL DEFAULT 1",
+            ),
+            // DEFAULT 1: DTX is on by default (a free bandwidth win on a
+            // PTT channel), so an in-place upgrade gets it too — matches
+            // `ServerConfig::default`.
+            (
+                "opus_dtx",
+                "INTEGER NOT NULL DEFAULT 1",
+                "BIGINT NOT NULL DEFAULT 1",
+                "BIGINT NOT NULL DEFAULT 1",
+            ),
+            // DEFAULT 10: 10 ms preserves the existing low-latency posture
+            // on an in-place upgrade, matching `ServerConfig::default`.
+            (
+                "opus_frame_ms",
+                "INTEGER NOT NULL DEFAULT 10",
+                "BIGINT NOT NULL DEFAULT 10",
+                "BIGINT NOT NULL DEFAULT 10",
+            ),
+            (
                 "full_duplex_enabled",
                 "INTEGER NOT NULL DEFAULT 0",
                 "BIGINT NOT NULL DEFAULT 0",
                 "BIGINT NOT NULL DEFAULT 0",
             ),
+        ];
+        // Columns that existed in pre-release dev builds and were later
+        // removed from the schema. A `NOT NULL` stray blocks inserts
+        // that no longer supply it, so migrate() drops them when found.
+        // No-op on any database that never had them. `(table, column)`.
+        const DROPPED_COLUMNS: &[(&str, &str)] = &[
+            // Identity display ids were briefly callsign-prefixed; the
+            // prefix column was removed before the 0.5.0 release.
+            ("identities", "first_callsign"),
         ];
         match &self.pool {
             Pool::Sqlite(p) => {
@@ -225,6 +268,9 @@ impl AdminDb {
                 for (column, spec, _, _) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_sqlite(p, "server_config", column, spec).await?;
                 }
+                for (table, column) in DROPPED_COLUMNS {
+                    drop_column_sqlite(p, table, column).await?;
+                }
             }
             Pool::MySql(p) => {
                 for stmt in split_ddl(MYSQL_DDL) {
@@ -236,6 +282,9 @@ impl AdminDb {
                 // Upgrade pre-existing schemas that predate later columns.
                 for (column, _, _, spec) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_mysql(p, "server_config", column, spec).await?;
+                }
+                for (table, column) in DROPPED_COLUMNS {
+                    drop_column_mysql(p, table, column).await?;
                 }
             }
             Pool::Postgres(p) => {
@@ -249,6 +298,14 @@ impl AdminDb {
                 for (column, _, spec, _) in SERVER_CONFIG_ADDED_COLUMNS {
                     ensure_column_pg(p, "server_config", column, spec).await?;
                 }
+                for (table, column) in DROPPED_COLUMNS {
+                    sqlx::query(&format!(
+                        "ALTER TABLE {table} DROP COLUMN IF EXISTS {column}"
+                    ))
+                    .execute(p)
+                    .await
+                    .with_context(|| format!("drop {table}.{column} (pg)"))?;
+                }
             }
         }
         Ok(())
@@ -259,7 +316,8 @@ impl AdminDb {
     /// Read the singleton `server_config` row, or `Default` if absent.
     pub async fn load_server_config(&self) -> Result<ServerConfig> {
         let sql = "SELECT server_name, max_peers, idle_kick_secs, grpc_password, \
-                   named_channels_enabled, audio_quality, full_duplex_enabled \
+                   named_channels_enabled, audio_quality, require_identity, unique_callsigns, \
+                   opus_dtx, opus_frame_ms, full_duplex_enabled \
                    FROM server_config WHERE id = 1";
         on_pool!(self, p, {
             let row = sqlx::query(sql).fetch_optional(p).await?;
@@ -271,7 +329,11 @@ impl AdminDb {
                     grpc_password: r.try_get::<String, _>(3)?,
                     named_channels_enabled: r.try_get::<i64, _>(4)? != 0,
                     audio_quality: r.try_get::<i64, _>(5)? as u32,
-                    full_duplex_enabled: r.try_get::<i64, _>(6)? != 0,
+                    require_identity: r.try_get::<i64, _>(6)? != 0,
+                    unique_callsigns: r.try_get::<i64, _>(7)? != 0,
+                    opus_dtx: r.try_get::<i64, _>(8)? != 0,
+                    opus_frame_ms: r.try_get::<i64, _>(9)? as u32,
+                    full_duplex_enabled: r.try_get::<i64, _>(10)? != 0,
                 },
                 None => ServerConfig::default(),
             })
@@ -283,7 +345,8 @@ impl AdminDb {
         let now = now_unix();
         let sql = self.q("UPDATE server_config \
              SET server_name = ?, max_peers = ?, idle_kick_secs = ?, grpc_password = ?, \
-                 named_channels_enabled = ?, audio_quality = ?, full_duplex_enabled = ?, \
+                 named_channels_enabled = ?, audio_quality = ?, require_identity = ?, \
+                 unique_callsigns = ?, opus_dtx = ?, opus_frame_ms = ?, full_duplex_enabled = ?, \
                  updated_at = ? \
              WHERE id = 1");
         on_pool!(self, p, {
@@ -294,6 +357,10 @@ impl AdminDb {
                 .bind(cfg.grpc_password.as_str())
                 .bind(cfg.named_channels_enabled as i64)
                 .bind(cfg.audio_quality as i64)
+                .bind(cfg.require_identity as i64)
+                .bind(cfg.unique_callsigns as i64)
+                .bind(cfg.opus_dtx as i64)
+                .bind(cfg.opus_frame_ms as i64)
                 .bind(cfg.full_duplex_enabled as i64)
                 .bind(now)
                 .execute(p)
@@ -388,6 +455,158 @@ impl AdminDb {
         let sql = self.q("DELETE FROM channel_modes WHERE frequency = ?");
         on_pool!(self, p, {
             sqlx::query(&sql).bind(frequency).execute(p).await?;
+            Ok(())
+        })
+    }
+
+    // ── Channel mutes ─────────────────────────────────────────────────
+    // Presence of a row = the channel is muted. Unlike channel names
+    // there's no value column, so mute/unmute is a plain insert/delete.
+
+    /// Load every muted channel frequency — boot-time hydration of
+    /// `SharedChannelMutes`.
+    pub async fn load_channel_mutes(&self) -> Result<std::collections::HashSet<String>> {
+        on_pool!(self, p, {
+            let rows = sqlx::query("SELECT frequency FROM channel_mutes")
+                .fetch_all(p)
+                .await?;
+            let mut set = std::collections::HashSet::with_capacity(rows.len());
+            for r in &rows {
+                set.insert(r.try_get::<String, _>(0)?);
+            }
+            Ok(set)
+        })
+    }
+
+    /// Mute a channel (idempotent — re-muting an already-muted channel
+    /// is a no-op). Caller validated the frequency.
+    pub async fn set_channel_mute(&self, frequency: &str) -> Result<()> {
+        let now = now_unix();
+        let sql = self.channel_mute_insert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(frequency)
+                .bind(now)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Unmute a channel (no-op if it wasn't muted).
+    pub async fn clear_channel_mute(&self, frequency: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM channel_mutes WHERE frequency = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(frequency).execute(p).await?;
+            Ok(())
+        })
+    }
+
+    // ── Client identities ─────────────────────────────────────────────
+
+    /// Load every known identity into a `pubkey-hex → record` map —
+    /// the boot-time hydration of `SharedIdentities`.
+    pub async fn load_identities(&self) -> Result<HashMap<String, IdentityRecord>> {
+        let sql = "SELECT pubkey, display_id, last_callsign, machine_hash, \
+                   origin_client_id, first_seen, last_seen, last_ip FROM identities";
+        on_pool!(self, p, {
+            let rows = sqlx::query(sql).fetch_all(p).await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(
+                    r.try_get::<String, _>(0)?,
+                    IdentityRecord {
+                        display_id: r.try_get::<String, _>(1)?,
+                        last_callsign: r.try_get::<String, _>(2)?,
+                        machine_hash: r.try_get::<String, _>(3)?,
+                        origin_client_id: r.try_get::<String, _>(4)?,
+                        first_seen: r.try_get::<i64, _>(5)?,
+                        last_seen: r.try_get::<i64, _>(6)?,
+                        last_ip: r.try_get::<String, _>(7)?,
+                    },
+                );
+            }
+            Ok(map)
+        })
+    }
+
+    /// Upsert one identity record. On conflict the *immutable* facts
+    /// keep their stored values — `display_id` and `first_seen` never
+    /// change once written, and `origin_client_id` is
+    /// first-non-empty-wins — so a record fed through a boot race
+    /// (register before the hydration finished) can't rewrite an
+    /// identity's history. The mutable last-* columns track the most
+    /// recent register.
+    pub async fn upsert_identity(&self, pubkey: &str, rec: &IdentityRecord) -> Result<()> {
+        let sql = self.identity_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(pubkey)
+                .bind(rec.display_id.as_str())
+                .bind(rec.last_callsign.as_str())
+                .bind(rec.machine_hash.as_str())
+                .bind(rec.origin_client_id.as_str())
+                .bind(rec.first_seen)
+                .bind(rec.last_seen)
+                .bind(rec.last_ip.as_str())
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    // ── Identity bans ─────────────────────────────────────────────────
+
+    /// Load every active ban into a `banned-pubkey-hex → record` map —
+    /// the boot-time hydration of `SharedBans`.
+    pub async fn load_bans(&self) -> Result<HashMap<String, BanRecord>> {
+        let sql = "SELECT pubkey, display_id, last_callsign, machine_hash, reason, \
+                   banned_by, banned_at FROM bans";
+        on_pool!(self, p, {
+            let rows = sqlx::query(sql).fetch_all(p).await?;
+            let mut map = HashMap::with_capacity(rows.len());
+            for r in &rows {
+                map.insert(
+                    r.try_get::<String, _>(0)?,
+                    BanRecord {
+                        display_id: r.try_get::<String, _>(1)?,
+                        last_callsign: r.try_get::<String, _>(2)?,
+                        machine_hash: r.try_get::<String, _>(3)?,
+                        reason: r.try_get::<String, _>(4)?,
+                        banned_by: r.try_get::<String, _>(5)?,
+                        banned_at: r.try_get::<i64, _>(6)?,
+                    },
+                );
+            }
+            Ok(map)
+        })
+    }
+
+    /// Insert (or refresh) a ban. Upsert on the pubkey PK so re-banning
+    /// an already-banned identity just updates the reason/machine tier
+    /// instead of erroring.
+    pub async fn insert_ban(&self, pubkey: &str, rec: &BanRecord) -> Result<()> {
+        let sql = self.ban_upsert_sql();
+        on_pool!(self, p, {
+            sqlx::query(sql)
+                .bind(pubkey)
+                .bind(rec.display_id.as_str())
+                .bind(rec.last_callsign.as_str())
+                .bind(rec.machine_hash.as_str())
+                .bind(rec.reason.as_str())
+                .bind(rec.banned_by.as_str())
+                .bind(rec.banned_at)
+                .execute(p)
+                .await?;
+            Ok(())
+        })
+    }
+
+    /// Lift a ban (idempotent — deleting an unknown pubkey is a no-op).
+    pub async fn delete_ban(&self, pubkey: &str) -> Result<()> {
+        let sql = self.q("DELETE FROM bans WHERE pubkey = ?");
+        on_pool!(self, p, {
+            sqlx::query(&sql).bind(pubkey).execute(p).await?;
             Ok(())
         })
     }
@@ -671,6 +890,24 @@ impl AdminDb {
 
     // ── Per-dialect upsert SQL (the statements that genuinely differ) ──
 
+    /// Mute insert SQL — tolerant of an existing row (idempotent mute).
+    fn channel_mute_insert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES (?, ?) \
+                 ON CONFLICT(frequency) DO NOTHING"
+            }
+            Backend::MySql => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES (?, ?) \
+                 ON DUPLICATE KEY UPDATE muted_at = muted_at"
+            }
+            Backend::Postgres => {
+                "INSERT INTO channel_mutes (frequency, muted_at) VALUES ($1, $2) \
+                 ON CONFLICT(frequency) DO NOTHING"
+            }
+        }
+    }
+
     fn channel_upsert_sql(&self) -> &'static str {
         match self.backend {
             Backend::Sqlite => {
@@ -705,6 +942,92 @@ impl AdminDb {
                 "INSERT INTO channel_modes (frequency, mode, updated_at) VALUES ($1, $2, $3) \
                  ON CONFLICT(frequency) DO UPDATE SET mode = excluded.mode, \
                  updated_at = excluded.updated_at"
+            }
+        }
+    }
+
+    /// Identity upsert. The non-updated columns on conflict are the
+    /// deliberate immutability story — see [`AdminDb::upsert_identity`].
+    fn identity_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 origin_client_id = CASE WHEN identities.origin_client_id = '' \
+                   THEN excluded.origin_client_id ELSE identities.origin_client_id END, \
+                 last_seen = excluded.last_seen, \
+                 last_ip = excluded.last_ip"
+            }
+            Backend::MySql => {
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE \
+                 last_callsign = VALUES(last_callsign), \
+                 machine_hash = VALUES(machine_hash), \
+                 origin_client_id = IF(origin_client_id = '', VALUES(origin_client_id), origin_client_id), \
+                 last_seen = VALUES(last_seen), \
+                 last_ip = VALUES(last_ip)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO identities (pubkey, display_id, last_callsign, \
+                 machine_hash, origin_client_id, first_seen, last_seen, last_ip) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 origin_client_id = CASE WHEN identities.origin_client_id = '' \
+                   THEN excluded.origin_client_id ELSE identities.origin_client_id END, \
+                 last_seen = excluded.last_seen, \
+                 last_ip = excluded.last_ip"
+            }
+        }
+    }
+
+    /// Ban upsert — re-banning refreshes every field (a deliberate ban
+    /// action always reflects the operator's latest intent, unlike the
+    /// identity upsert's history-pinning).
+    fn ban_upsert_sql(&self) -> &'static str {
+        match self.backend {
+            Backend::Sqlite => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 display_id = excluded.display_id, \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 reason = excluded.reason, \
+                 banned_by = excluded.banned_by, \
+                 banned_at = excluded.banned_at"
+            }
+            Backend::MySql => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON DUPLICATE KEY UPDATE \
+                 display_id = VALUES(display_id), \
+                 last_callsign = VALUES(last_callsign), \
+                 machine_hash = VALUES(machine_hash), \
+                 reason = VALUES(reason), \
+                 banned_by = VALUES(banned_by), \
+                 banned_at = VALUES(banned_at)"
+            }
+            Backend::Postgres => {
+                "INSERT INTO bans (pubkey, display_id, last_callsign, machine_hash, \
+                 reason, banned_by, banned_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                 ON CONFLICT(pubkey) DO UPDATE SET \
+                 display_id = excluded.display_id, \
+                 last_callsign = excluded.last_callsign, \
+                 machine_hash = excluded.machine_hash, \
+                 reason = excluded.reason, \
+                 banned_by = excluded.banned_by, \
+                 banned_at = excluded.banned_at"
             }
         }
     }
@@ -959,6 +1282,52 @@ async fn ensure_column_mysql(
     Ok(())
 }
 
+/// Idempotently drop a column from a SQLite table (SQLite has no
+/// `DROP COLUMN IF EXISTS`): `PRAGMA table_info` check, then `ALTER`.
+/// Heals databases created by builds whose schema briefly carried the
+/// column. `table`/`column` are hardcoded.
+async fn drop_column_sqlite(pool: &SqlitePool, table: &str, column: &str) -> Result<()> {
+    let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+        .fetch_all(pool)
+        .await
+        .with_context(|| format!("pragma table_info({table})"))?;
+    let exists = rows.iter().any(|r| {
+        r.try_get::<String, _>("name")
+            .map(|n| n == column)
+            .unwrap_or(false)
+    });
+    if exists {
+        sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} drop {column}"))?;
+    }
+    Ok(())
+}
+
+/// Idempotently drop a column from a MySQL/MariaDB table — same
+/// `information_schema` guard as [`ensure_column_mysql`] (MySQL has no
+/// portable `DROP COLUMN IF EXISTS`).
+async fn drop_column_mysql(pool: &MySqlPool, table: &str, column: &str) -> Result<()> {
+    let exists: i64 = sqlx::query(
+        "SELECT COUNT(*) FROM information_schema.columns \
+         WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .with_context(|| format!("information_schema check {table}.{column}"))?
+    .try_get::<i64, _>(0)?;
+    if exists > 0 {
+        sqlx::query(&format!("ALTER TABLE {table} DROP COLUMN {column}"))
+            .execute(pool)
+            .await
+            .with_context(|| format!("alter {table} drop {column} (mysql)"))?;
+    }
+    Ok(())
+}
+
 /// `chmod 0600` the admin db file (file-backed SQLite only). Best-effort.
 #[cfg(unix)]
 fn tighten_db_perms(path: &Path) {
@@ -1008,6 +1377,10 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled INTEGER NOT NULL DEFAULT 0,
     audio_quality   INTEGER NOT NULL DEFAULT 2,
+    require_identity INTEGER NOT NULL DEFAULT 0,
+    unique_callsigns INTEGER NOT NULL DEFAULT 1,
+    opus_dtx        INTEGER NOT NULL DEFAULT 1,
+    opus_frame_ms   INTEGER NOT NULL DEFAULT 10,
     full_duplex_enabled INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL DEFAULT 0
 );
@@ -1021,6 +1394,29 @@ CREATE TABLE IF NOT EXISTS channel_modes (
     frequency  TEXT PRIMARY KEY NOT NULL,
     mode       INTEGER NOT NULL DEFAULT 0,
     updated_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency TEXT PRIMARY KEY NOT NULL,
+    muted_at  INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           TEXT PRIMARY KEY NOT NULL,
+    display_id       TEXT NOT NULL,
+    last_callsign    TEXT NOT NULL DEFAULT '',
+    machine_hash     TEXT NOT NULL DEFAULT '',
+    origin_client_id TEXT NOT NULL DEFAULT '',
+    first_seen       INTEGER NOT NULL,
+    last_seen        INTEGER NOT NULL,
+    last_ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        TEXT PRIMARY KEY NOT NULL,
+    display_id    TEXT NOT NULL,
+    last_callsign TEXT NOT NULL DEFAULT '',
+    machine_hash  TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    banned_by     TEXT NOT NULL DEFAULT '',
+    banned_at     INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           INTEGER PRIMARY KEY NOT NULL,
@@ -1061,6 +1457,10 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   VARCHAR(255) NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
+    unique_callsigns BIGINT NOT NULL DEFAULT 1,
+    opus_dtx        BIGINT NOT NULL DEFAULT 1,
+    opus_frame_ms   BIGINT NOT NULL DEFAULT 10,
     full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT NOT NULL DEFAULT 0
 );
@@ -1074,6 +1474,29 @@ CREATE TABLE IF NOT EXISTS channel_modes (
     frequency  VARCHAR(32) PRIMARY KEY NOT NULL,
     mode       BIGINT NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency VARCHAR(32) PRIMARY KEY NOT NULL,
+    muted_at  BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           VARCHAR(64) PRIMARY KEY NOT NULL,
+    display_id       VARCHAR(32) NOT NULL,
+    last_callsign    VARCHAR(16) NOT NULL DEFAULT '',
+    machine_hash     VARCHAR(64) NOT NULL DEFAULT '',
+    origin_client_id VARCHAR(64) NOT NULL DEFAULT '',
+    first_seen       BIGINT NOT NULL,
+    last_seen        BIGINT NOT NULL,
+    last_ip          VARCHAR(64) NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        VARCHAR(64) PRIMARY KEY NOT NULL,
+    display_id    VARCHAR(32) NOT NULL,
+    last_callsign VARCHAR(16) NOT NULL DEFAULT '',
+    machine_hash  VARCHAR(64) NOT NULL DEFAULT '',
+    reason        VARCHAR(512) NOT NULL DEFAULT '',
+    banned_by     VARCHAR(255) NOT NULL DEFAULT '',
+    banned_at     BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
@@ -1112,6 +1535,10 @@ CREATE TABLE IF NOT EXISTS server_config (
     grpc_password   TEXT    NOT NULL DEFAULT '',
     named_channels_enabled BIGINT NOT NULL DEFAULT 0,
     audio_quality   BIGINT  NOT NULL DEFAULT 2,
+    require_identity BIGINT NOT NULL DEFAULT 0,
+    unique_callsigns BIGINT NOT NULL DEFAULT 1,
+    opus_dtx        BIGINT NOT NULL DEFAULT 1,
+    opus_frame_ms   BIGINT NOT NULL DEFAULT 10,
     full_duplex_enabled BIGINT NOT NULL DEFAULT 0,
     updated_at      BIGINT  NOT NULL DEFAULT 0
 );
@@ -1125,6 +1552,29 @@ CREATE TABLE IF NOT EXISTS channel_modes (
     frequency  TEXT PRIMARY KEY NOT NULL,
     mode       BIGINT NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS channel_mutes (
+    frequency TEXT PRIMARY KEY NOT NULL,
+    muted_at  BIGINT NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS identities (
+    pubkey           TEXT PRIMARY KEY NOT NULL,
+    display_id       TEXT NOT NULL,
+    last_callsign    TEXT NOT NULL DEFAULT '',
+    machine_hash     TEXT NOT NULL DEFAULT '',
+    origin_client_id TEXT NOT NULL DEFAULT '',
+    first_seen       BIGINT NOT NULL,
+    last_seen        BIGINT NOT NULL,
+    last_ip          TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS bans (
+    pubkey        TEXT PRIMARY KEY NOT NULL,
+    display_id    TEXT NOT NULL,
+    last_callsign TEXT NOT NULL DEFAULT '',
+    machine_hash  TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL DEFAULT '',
+    banned_by     TEXT NOT NULL DEFAULT '',
+    banned_at     BIGINT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS metrics_samples (
     ts           BIGINT PRIMARY KEY NOT NULL,
@@ -1284,7 +1734,11 @@ mod tests {
             idle_kick_secs: 30,
             grpc_password: "hunter2".into(),
             named_channels_enabled: true,
+            require_identity: true,
+            unique_callsigns: false,
             audio_quality: 1,
+            opus_dtx: false,
+            opus_frame_ms: 40,
             full_duplex_enabled: true,
         };
         db.save_server_config(&new).await.unwrap();
@@ -1295,7 +1749,14 @@ mod tests {
         assert_eq!(loaded.grpc_password, "hunter2");
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
-        assert!(loaded.full_duplex_enabled);
+        assert_eq!(
+            loaded.opus_frame_ms, 40,
+            "opus_frame_ms round-trips through DB"
+        );
+        assert!(
+            loaded.full_duplex_enabled,
+            "full_duplex_enabled round-trips through DB"
+        );
     }
 
     #[tokio::test]
@@ -1324,6 +1785,11 @@ mod tests {
             grpc_password: "secret".into(),
             named_channels_enabled: true,
             audio_quality: 1,
+            require_identity: true,
+            unique_callsigns: false,
+            // Non-default so the save/load of the new columns is exercised.
+            opus_dtx: false,
+            opus_frame_ms: 20,
             full_duplex_enabled: true,
         })
         .await
@@ -1332,6 +1798,11 @@ mod tests {
         assert_eq!(loaded.grpc_password, "secret");
         assert!(loaded.named_channels_enabled);
         assert_eq!(loaded.audio_quality, 1);
+        assert!(!loaded.opus_dtx, "opus_dtx must round-trip through the DB");
+        assert_eq!(
+            loaded.opus_frame_ms, 20,
+            "opus_frame_ms must round-trip through the DB"
+        );
         db.migrate().await.unwrap(); // still idempotent
     }
 
@@ -1386,6 +1857,158 @@ mod tests {
         let modes = db.load_channel_modes().await.unwrap();
         assert_eq!(modes.len(), 1);
         assert!(!modes.contains_key("446.05"));
+    }
+
+    #[tokio::test]
+    async fn channel_mutes_crud_roundtrips() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_channel_mutes().await.unwrap().is_empty());
+
+        db.set_channel_mute("446.05").await.unwrap();
+        db.set_channel_mute("447.00").await.unwrap();
+        db.set_channel_mute("446.05").await.unwrap(); // idempotent re-mute
+        let muted = db.load_channel_mutes().await.unwrap();
+        assert_eq!(muted.len(), 2);
+        assert!(muted.contains("446.05"));
+        assert!(muted.contains("447.00"));
+
+        db.clear_channel_mute("446.05").await.unwrap();
+        let muted = db.load_channel_mutes().await.unwrap();
+        assert_eq!(muted.len(), 1);
+        assert!(!muted.contains("446.05"));
+        // Clearing an unmuted channel is a harmless no-op.
+        db.clear_channel_mute("440.00").await.unwrap();
+        assert_eq!(db.load_channel_mutes().await.unwrap().len(), 1);
+    }
+
+    fn identity_record(first_seen: i64) -> IdentityRecord {
+        IdentityRecord {
+            display_id: "FLNIHQMB".into(),
+            last_callsign: "coton".into(),
+            machine_hash: "ab".repeat(32),
+            origin_client_id: String::new(),
+            first_seen,
+            last_seen: first_seen,
+            last_ip: "10.0.0.1".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn migrate_drops_stale_first_callsign_column() {
+        // A database created by a pre-release dev build has an
+        // `identities` table with a NOT NULL `first_callsign` column
+        // the current schema no longer supplies — inserts would
+        // violate the constraint. migrate() must drop it.
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.exec_raw(
+            "CREATE TABLE identities (
+                pubkey           TEXT PRIMARY KEY NOT NULL,
+                display_id       TEXT NOT NULL,
+                first_callsign   TEXT NOT NULL,
+                last_callsign    TEXT NOT NULL DEFAULT '',
+                machine_hash     TEXT NOT NULL DEFAULT '',
+                origin_client_id TEXT NOT NULL DEFAULT '',
+                first_seen       INTEGER NOT NULL,
+                last_seen        INTEGER NOT NULL,
+                last_ip          TEXT NOT NULL DEFAULT ''
+            )",
+        )
+        .await
+        .unwrap();
+        db.migrate().await.unwrap();
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .expect("upsert must work after the stale column is dropped");
+        db.migrate().await.unwrap(); // still idempotent
+        assert_eq!(db.load_identities().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn identities_upsert_and_load_round_trip() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_identities().await.unwrap().is_empty());
+
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .unwrap();
+        let map = db.load_identities().await.unwrap();
+        assert_eq!(map.len(), 1);
+        let rec = &map["aa11"];
+        assert_eq!(rec.display_id, "FLNIHQMB");
+        assert_eq!(rec.first_seen, 100);
+        assert_eq!(rec.machine_hash, "ab".repeat(32));
+    }
+
+    #[tokio::test]
+    async fn identities_conflict_keeps_immutable_facts() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        db.upsert_identity("aa11", &identity_record(100))
+            .await
+            .unwrap();
+
+        // A later register (even one fed through a boot race claiming a
+        // different history) must not rewrite first_seen, and origin is
+        // first-non-empty-wins.
+        let mut later = identity_record(999); // wrong first_seen on purpose
+        later.last_callsign = "renamed".into();
+        later.last_seen = 200;
+        later.last_ip = "10.0.0.2".into();
+        later.origin_client_id = "origin-1".into();
+        db.upsert_identity("aa11", &later).await.unwrap();
+
+        let rec = &db.load_identities().await.unwrap()["aa11"];
+        assert_eq!(rec.first_seen, 100, "first_seen immutable");
+        assert_eq!(rec.last_callsign, "renamed");
+        assert_eq!(rec.last_seen, 200);
+        assert_eq!(rec.last_ip, "10.0.0.2");
+        assert_eq!(rec.origin_client_id, "origin-1", "filled once");
+
+        // A third upsert with a different origin doesn't overwrite it.
+        let mut third = identity_record(100);
+        third.origin_client_id = "origin-2".into();
+        db.upsert_identity("aa11", &third).await.unwrap();
+        let rec = &db.load_identities().await.unwrap()["aa11"];
+        assert_eq!(rec.origin_client_id, "origin-1", "first non-empty wins");
+    }
+
+    fn ban_record(reason: &str) -> BanRecord {
+        BanRecord {
+            display_id: "FLNIHQMB".into(),
+            last_callsign: "coton".into(),
+            machine_hash: String::new(),
+            reason: reason.into(),
+            banned_by: "admin".into(),
+            banned_at: 100,
+        }
+    }
+
+    #[tokio::test]
+    async fn bans_insert_load_delete_round_trip() {
+        let db = AdminDb::open_in_memory().await.unwrap();
+        db.migrate().await.unwrap();
+        assert!(db.load_bans().await.unwrap().is_empty());
+
+        db.insert_ban("aa11", &ban_record("spam")).await.unwrap();
+        let bans = db.load_bans().await.unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans["aa11"].reason, "spam");
+        assert_eq!(bans["aa11"].banned_by, "admin");
+
+        // Re-banning refreshes the record (latest intent wins).
+        let mut again = ban_record("spam and abuse");
+        again.machine_hash = "cd".repeat(32);
+        db.insert_ban("aa11", &again).await.unwrap();
+        let bans = db.load_bans().await.unwrap();
+        assert_eq!(bans.len(), 1);
+        assert_eq!(bans["aa11"].reason, "spam and abuse");
+        assert_eq!(bans["aa11"].machine_hash, "cd".repeat(32));
+
+        db.delete_ban("aa11").await.unwrap();
+        db.delete_ban("aa11").await.unwrap(); // idempotent
+        assert!(db.load_bans().await.unwrap().is_empty());
     }
 
     #[tokio::test]

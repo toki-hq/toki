@@ -129,6 +129,17 @@ pub struct AppState {
     /// `Room.duplex` in lockstep; the broadcaster folds it into each
     /// `Snapshot`.
     pub duplex_modes: SharedDuplexModes,
+    /// Channel-wide mutes (frequency set), shared with the signaling
+    /// speak-gate. The `SetChannelMute` RPC writes the db and this set
+    /// in lockstep so a channel mute takes effect on the next PTT press;
+    /// the broadcaster folds it into each `Snapshot` so the panel can
+    /// flag muted channels (occupied or not).
+    pub channel_mutes: crate::state::SharedChannelMutes,
+    /// Active identity bans (banned pubkey → record), shared with the
+    /// signaling register gate. The ban / lift RPCs write the db and
+    /// this map in lockstep so a ban takes effect on the very next
+    /// register attempt.
+    pub bans: crate::state::SharedBans,
     /// Latest host-health snapshot (CPU / memory / disk), refreshed by
     /// the metrics sampler. `GetServerHealth` clones it out.
     pub health: SharedHealth,
@@ -169,6 +180,10 @@ pub async fn run(
     server_config: SharedServerConfig,
     channel_names: SharedChannelNames,
     duplex_modes: SharedDuplexModes,
+    channel_mutes: crate::state::SharedChannelMutes,
+    identities: crate::state::SharedIdentities,
+    mut identity_rx: tokio::sync::mpsc::UnboundedReceiver<(String, crate::state::IdentityRecord)>,
+    bans: crate::state::SharedBans,
     byte_counters: SharedByteCounters,
     audit: AuditSink,
     audit_rx: tokio::sync::mpsc::UnboundedReceiver<crate::audit::AuditEvent>,
@@ -233,6 +248,36 @@ pub async fn run(
             .collect();
     }
 
+    // Same for channel mutes — the signaling speak-gate reads this set
+    // on every PTT press, so it must hold the persisted muted channels
+    // before the first press lands.
+    {
+        let loaded = db
+            .load_channel_mutes()
+            .await
+            .context("load channel_mutes from admin db")?;
+        *channel_mutes.write().await = loaded;
+    }
+
+    // Hydrate the shared identity map. Same dance again: signaling
+    // merges every identity-ful register against this map (first_seen
+    // and a recorded origin survive restarts), so it must hold the
+    // persisted records before the first register lands.
+    {
+        let loaded = db
+            .load_identities()
+            .await
+            .context("load identities from admin db")?;
+        *identities.write().await = loaded;
+    }
+
+    // Hydrate the shared ban map — the register gate consults it, so
+    // persisted bans must be enforceable from the first register.
+    {
+        let loaded = db.load_bans().await.context("load bans from admin db")?;
+        *bans.write().await = loaded;
+    }
+
     // Seed `admin` user if the store is empty. We log the generated
     // password once at WARN level — this is the operator's only
     // chance to capture it.
@@ -263,6 +308,8 @@ pub async fn run(
         server_config,
         channel_names: channel_names.clone(),
         duplex_modes: duplex_modes.clone(),
+        channel_mutes: channel_mutes.clone(),
+        bans,
         health: health.clone(),
         live_rate: live_rate.clone(),
         audit,
@@ -272,6 +319,22 @@ pub async fn run(
     // Audit writer: drains the audit channel into sqlite for the life of
     // the process (the only task that writes the audit_log table).
     tokio::spawn(crate::audit::run_writer(audit_rx, db.clone()));
+
+    // Identity writer: drains the identity channel into the identities
+    // table — same split as audit (signaling produces, the db owner
+    // persists). A failed upsert logs and moves on: the in-memory map
+    // still has the record, so only durability across a restart is at
+    // stake, never the live session.
+    {
+        let db = db.clone();
+        tokio::spawn(async move {
+            while let Some((pubkey, record)) = identity_rx.recv().await {
+                if let Err(e) = db.upsert_identity(&pubkey, &record).await {
+                    tracing::warn!(error = %e, identity = %record.display_id, "could not persist identity");
+                }
+            }
+        });
+    }
 
     // Metrics sampler: refreshes host health + persists the 1-minute
     // bandwidth/users time-series, pruning past the retention window.
@@ -290,6 +353,7 @@ pub async fn run(
         registry,
         channel_names,
         duplex_modes,
+        channel_mutes,
         byte_counters,
         live_rate,
         tx,

@@ -100,12 +100,37 @@ pub mod wire {
     #[deprecated(note = "use HEADER_LEN_C2S or HEADER_LEN_S2C explicitly")]
     pub const HEADER_LEN: usize = HEADER_LEN_C2S;
 
-    /// Empty payload packet used to register the client's UDP source
-    /// address with the server (and keep NAT mappings alive). Not
-    /// forwarded to peers. Still carries a sequence + tag so an off-
-    /// path attacker can't replay one to keep a session alive on the
-    /// legitimate client's behalf.
+    /// Keepalive packet: registers the client's UDP source address with
+    /// the server and keeps NAT mappings alive. Not forwarded to peers.
+    /// Still carries a sequence + tag so an off-path attacker can't
+    /// replay one to keep a session alive on the legitimate client's
+    /// behalf.
+    ///
+    /// Since 0.5.0 the keepalive *payload* carries a [`PING_LEN`]-byte
+    /// RTT probe (`ping_id` ‖ `send_unix_micros`, both le u64); the
+    /// server bounces it straight back in a [`VERSION_PONG`] packet so
+    /// the client can measure round-trip time. Older keepalives had an
+    /// empty payload — the server tolerates either (an empty or short
+    /// keepalive simply gets no pong), but the version gate already
+    /// rejects pre-0.5.0 clients, so in practice the probe is always
+    /// present.
     pub const VERSION_KEEPALIVE: u8 = 0;
+
+    /// Server→client RTT echo. Sent only in response to a keepalive that
+    /// carried a [`PING_LEN`]-byte probe: the server copies the probe
+    /// verbatim into the pong payload and the client diffs the embedded
+    /// timestamp against the arrival time. Carries no audio and is never
+    /// part of the peer fan-out. A distinct kind (not an audio version)
+    /// so the client's audio decode path skips it and old clients —
+    /// which never see one, being gated out — would simply drop an
+    /// unknown version.
+    pub const VERSION_PONG: u8 = 3;
+
+    /// Length of the RTT probe carried in a keepalive payload and echoed
+    /// in a pong: `ping_id` (le u64) ‖ `send_unix_micros` (le u64). The
+    /// `ping_id` lets the client ignore a stale pong if it ever laps its
+    /// probe counter; the timestamp is what RTT is computed from.
+    pub const PING_LEN: usize = 16;
 
     /// Raw PCM audio frame, little-endian i16, mono, 48 kHz.
     pub const VERSION_AUDIO_PCM: u8 = 1;
@@ -152,6 +177,58 @@ pub mod wire {
         nonce[4..].copy_from_slice(&seq.to_le_bytes());
         nonce
     }
+
+    /// Encode an RTT probe — `ping_id` ‖ `send_unix_micros`, both
+    /// little-endian u64 — for the keepalive payload. The server echoes
+    /// these [`PING_LEN`] bytes verbatim in a [`VERSION_PONG`] packet.
+    pub fn encode_ping(ping_id: u64, send_unix_micros: u64) -> [u8; PING_LEN] {
+        let mut out = [0u8; PING_LEN];
+        out[..8].copy_from_slice(&ping_id.to_le_bytes());
+        out[8..].copy_from_slice(&send_unix_micros.to_le_bytes());
+        out
+    }
+
+    /// Decode an RTT probe produced by [`encode_ping`]. Returns
+    /// `(ping_id, send_unix_micros)`, or `None` if the slice isn't
+    /// exactly [`PING_LEN`] bytes (a malformed / empty keepalive — the
+    /// server then just doesn't pong).
+    pub fn decode_ping(payload: &[u8]) -> Option<(u64, u64)> {
+        if payload.len() != PING_LEN {
+            return None;
+        }
+        let ping_id = u64::from_le_bytes(payload[..8].try_into().ok()?);
+        let send = u64::from_le_bytes(payload[8..].try_into().ok()?);
+        Some((ping_id, send))
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::wire::*;
+
+    #[test]
+    fn ping_round_trips() {
+        let bytes = encode_ping(42, 1_700_000_000_000_000);
+        assert_eq!(bytes.len(), PING_LEN);
+        assert_eq!(decode_ping(&bytes), Some((42, 1_700_000_000_000_000)));
+    }
+
+    #[test]
+    fn decode_ping_rejects_wrong_length() {
+        assert_eq!(decode_ping(&[]), None);
+        assert_eq!(decode_ping(&[0u8; PING_LEN - 1]), None);
+        assert_eq!(decode_ping(&[0u8; PING_LEN + 1]), None);
+    }
+
+    #[test]
+    fn pong_is_not_audio() {
+        // The pong kind must never be mistaken for a forwardable codec,
+        // or the relay/decoder paths would try to handle it.
+        assert!(!is_audio(VERSION_PONG));
+        assert!(!is_audio(VERSION_KEEPALIVE));
+        assert!(is_audio(VERSION_AUDIO_PCM));
+        assert!(is_audio(VERSION_AUDIO_OPUS));
+    }
 }
 
 /// Protocol-version compatibility between a Toki client and server.
@@ -188,6 +265,136 @@ pub mod version {
             _ => false,
         }
     }
+}
+
+/// Client-identity contract shared by the client (generates + signs) and
+/// the server (verifies + displays).
+///
+/// An identity is a client-generated **ed25519 keypair**; the public key
+/// *is* the identity. At register the client proves possession of the
+/// private key by signing a server-issued challenge nonce (see
+/// `Signaling.IdentityChallenge` + the `RegisterRequest` identity
+/// fields), so an identity string seen in the admin panel or audit log
+/// cannot be replayed by an observer.
+///
+/// The derivations below are a **cross-version contract**: the
+/// fingerprint and machine hash must compute identically on every client
+/// and server build, forever — changing them silently renames every
+/// user. Hence the pinned golden vectors in the tests.
+pub mod identity {
+    /// ed25519 public-key length, bytes.
+    pub const PUBKEY_LEN: usize = 32;
+    /// ed25519 signature length, bytes.
+    pub const SIGNATURE_LEN: usize = 64;
+
+    /// Domain-separation prefix for register-challenge signatures. The
+    /// client signs `SIGN_DOMAIN || nonce`, never the bare nonce, so a
+    /// register signature can't double as authorization in any other
+    /// (future) signing context.
+    pub const SIGN_DOMAIN: &[u8] = b"toki-register-v1";
+
+    /// Domain prefix mixed into the machine-fingerprint hash so it can't
+    /// collide with any other BLAKE3 use of the same machine id.
+    pub const MACHINE_FP_DOMAIN: &[u8] = b"toki-machine-fp-v1";
+
+    /// The exact byte string an identity signs to answer a register
+    /// challenge: `SIGN_DOMAIN || nonce`. Built here (and only here) so
+    /// the client's signer and the server's verifier can never drift.
+    pub fn signing_payload(nonce: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(SIGN_DOMAIN.len() + nonce.len());
+        out.extend_from_slice(SIGN_DOMAIN);
+        out.extend_from_slice(nonce);
+        out
+    }
+
+    /// 8-character base32 fingerprint of a public key — the identity's
+    /// human-readable display string (e.g. `7Q4XF9KB`): the first 5
+    /// bytes (40 bits) of `BLAKE3(pubkey)`, RFC 4648 alphabet, no
+    /// padding. Collision-safe for *display* (the canonical key
+    /// server-side is always the full pubkey), wide enough that two
+    /// members matching by accident is a non-event.
+    pub fn fingerprint(pubkey: &[u8]) -> String {
+        let hash = blake3::hash(pubkey);
+        base32_40bits(&hash.as_bytes()[..5])
+    }
+
+    /// Salted machine-fingerprint hash, lowercase hex:
+    /// `BLAKE3(MACHINE_FP_DOMAIN || machine_id)` where `machine_id` is
+    /// the OS machine identifier (falling back to a primary MAC). The
+    /// raw id is trimmed + ASCII-lowercased first so platform formatting
+    /// quirks (trailing newline in `/etc/machine-id`, uppercase Windows
+    /// GUIDs) don't fork the hash. Sent alongside the identity — never
+    /// inside its derivation — purely as a wipe-resistant correlation
+    /// attribute; the raw machine id never leaves the machine.
+    pub fn machine_hash(machine_id: &str) -> String {
+        let canonical = machine_id.trim().to_ascii_lowercase();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MACHINE_FP_DOMAIN);
+        hasher.update(canonical.as_bytes());
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// RFC 4648 base32 (uppercase, unpadded) of exactly 5 bytes → 8
+    /// chars. Hand-rolled because this is the only base32 in the tree —
+    /// a dependency for 8 characters isn't worth it.
+    fn base32_40bits(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+        debug_assert_eq!(bytes.len(), 5);
+        let v = bytes.iter().fold(0u64, |acc, &b| (acc << 8) | u64::from(b));
+        (0..8)
+            .rev()
+            .map(|i| ALPHABET[((v >> (i * 5)) & 0x1f) as usize] as char)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::identity::*;
+
+    #[test]
+    fn signing_payload_is_domain_separated() {
+        let payload = signing_payload(b"nonce-bytes");
+        assert!(payload.starts_with(SIGN_DOMAIN));
+        assert!(payload.ends_with(b"nonce-bytes"));
+        assert_eq!(payload.len(), SIGN_DOMAIN.len() + 11);
+    }
+
+    #[test]
+    fn fingerprint_is_8_base32_chars_and_key_specific() {
+        let fp_a = fingerprint(&[0xAA; 32]);
+        let fp_b = fingerprint(&[0xBB; 32]);
+        assert_eq!(fp_a.len(), 8);
+        assert!(fp_a
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)));
+        assert_ne!(fp_a, fp_b);
+        assert_eq!(fp_a, fingerprint(&[0xAA; 32]), "deterministic");
+    }
+
+    #[test]
+    fn machine_hash_is_canonicalized_hex() {
+        let h = machine_hash("ABC-123");
+        assert_eq!(h.len(), 64, "full blake3 hex");
+        assert_eq!(h, machine_hash("  abc-123\n"), "trim + case insensitive");
+        assert_ne!(h, machine_hash("abc-124"));
+        // Domain separation: the hash is NOT a bare blake3 of the id.
+        assert_ne!(h, blake3::hash(b"abc-123").to_hex().to_string());
+    }
+
+    /// Golden vectors — these derivations are a cross-version contract
+    /// (every client + server must agree forever, or users get silently
+    /// renamed). If this test fails you have CHANGED THE CONTRACT, not
+    /// found a bug: do not update the expected values without a
+    /// deliberate, versioned migration plan.
+    #[test]
+    fn derivations_match_pinned_golden_vectors() {
+        assert_eq!(fingerprint(&[0u8; 32]), GOLDEN_FP_ZERO_KEY);
+        assert_eq!(machine_hash("machine-id"), GOLDEN_MH_MACHINE_ID);
+    }
+    const GOLDEN_FP_ZERO_KEY: &str = "FLNIHQMB";
+    const GOLDEN_MH_MACHINE_ID: &str =
+        "2e58173453ce7646e8fa5691e192c918b94cc12f3377a21aa0cb420be896bcf3";
 }
 
 #[cfg(test)]

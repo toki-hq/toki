@@ -4363,6 +4363,45 @@ impl TokiApp {
         // having to key up and ask someone.
         settings_row(ui, "INPUT LEVEL", |ui| {
             paint_level_meter(ui, self.audio_levels.input());
+            // Live VAD dot: lights when voice-activity would open VOX.
+            // Only shown while VOX is enabled so the indicator is
+            // contextually relevant; omitted otherwise.
+            if self.config.audio.vox_enabled {
+                let sensitivity = self.config.audio.vox_sensitivity;
+                let threshold = (1.0 - sensitivity).clamp(0.15, 0.90);
+                let vad = self.dsp_params.vad();
+                let active = vad >= threshold;
+                let dot_color = if active { T::PRIMARY } else { T::PRIMARY_INK };
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(10.0, 10.0), egui::Sense::hover());
+                ui.painter().circle_filled(rect.center(), 4.0, dot_color);
+            }
+        });
+        settings_row(ui, "VOICE ACTIV.", |ui| {
+            let mut v = self.config.audio.vox_enabled;
+            if ui.checkbox(&mut v, "").changed() {
+                self.config.audio.vox_enabled = v;
+                self.dsp_params.set_vox_enabled(v);
+                self.config.save();
+            }
+            ui.label(
+                egui::RichText::new("auto-transmit on speech (full-duplex only)")
+                    .color(T::INK_DIM)
+                    .monospace()
+                    .size(9.0),
+            );
+        });
+        settings_row(ui, "VOX SENSITIVITY", |ui| {
+            let on = self.config.audio.vox_enabled;
+            let mut v = self.config.audio.vox_sensitivity;
+            let resp = ui.add_enabled(on, egui::Slider::new(&mut v, 0.0..=1.0).show_value(false));
+            ui.monospace(format!("{:>3.0}%", v * 100.0));
+            if resp.changed() {
+                self.config.audio.vox_sensitivity = v;
+                self.dsp_params.set_vox_sensitivity(v);
+            }
+            if resp.drag_stopped() || resp.lost_focus() {
+                self.config.save();
+            }
         });
         settings_row(ui, "OUTPUT", |ui| {
             let prev = self.config.audio.output_device.clone();

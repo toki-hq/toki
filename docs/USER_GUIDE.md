@@ -272,13 +272,16 @@ action with a `granted` or `revoked` detail.
 
 When the broadcaster keys their broadcast PTT:
 
-- The PTT floor is seized on every occupied frequency simultaneously.
+- The PTT floor is seized on every occupied frequency simultaneously —
+  including full-duplex channels.
 - Any member currently transmitting on their channel is cut off.
 - Local talkers on every frequency are blocked from keying up for the duration
-  of the broadcast.
+  of the broadcast. On full-duplex channels this includes both PTT and VOX
+  (VOX is suppressed for the broadcast's duration).
 - Listeners hear only the broadcaster's voice — no other audio passes through.
 
-On release, all floors free again and normal half-duplex rules resume.
+On release, all floors free again and normal half-duplex or full-duplex rules
+resume.
 
 Broadcast **pierces all mutes**: it reaches every listener regardless of
 channel-mute or member-mute status. It is an all-hands announcement and is
@@ -326,6 +329,8 @@ Schema:
 | `[audio]` `balance` | f32 | `0.0` | Stereo pan for received audio + beeps (−1.0 left … +1.0 right). |
 | `[audio]` `noise_suppression` | bool | `true` | Capture-side RNNoise noise filter (strips steady background noise before encoding). Toggleable live in Settings → Voice DSP. |
 | `[audio]` `agc` | bool | `true` | Capture-side automatic gain control (eases speech toward a fixed level: −18 dBFS target, up to +18 dB boost / −6 dB cut, speech-gated so pauses don't pump the noise floor). Toggleable live in Settings → Voice DSP. |
+| `[audio]` `vox_enabled` | bool | `false` | Voice-activated transmit. When on and tuned to a full-duplex channel, the mic opens automatically on detected speech instead of requiring a held PTT key. Ignored on half-duplex channels. Toggleable live in Settings → Audio → VOICE ACTIV. |
+| `[audio]` `vox_sensitivity` | f32 | `0.5` | VOX gate sensitivity, `[0.0, 1.0]`. Higher = more sensitive (opens on quieter speech). Mapped internally to a VAD threshold as `1.0 - sensitivity`, clamped to `[0.15, 0.90]`. Adjustable live in Settings → Audio → VOX SENSITIVITY. |
 | `[hotkey]` `binding` | string? | unset | Primary PTT binding, tagged form for any peripheral (e.g. `key:F8`, `mouse:Middle`, `gamepad:0:South`, `streamdeck:0x0fd9:0x0080:3`, `hid:0x046d:0xc52b:2:4`). Preferred over the legacy `key`/`mouse_button` below; written by all new saves. |
 | `[hotkey]` `secondary` | string? | unset | Optional fallback PTT binding (same tagged form). PTT fires while *either* the primary or this is held — e.g. a keyboard key backing up a gamepad button. |
 | `[hotkey]` `broadcast_ptt` | string? | unset | Optional global-broadcast PTT binding (same tagged form, e.g. `"key:F9"`). Bindable from **Settings → Controls → BROADCAST PTT** as well as here. When held, sends a broadcast PTT the server fans out to every occupied frequency simultaneously. Omitted (unbound) by default. **Inert until an admin grants the global-broadcast capability to this session.** Separate from and additive to the normal PTT — the normal PTT continues to work on the broadcaster's own channel regardless. |
@@ -500,6 +505,59 @@ change-frequency and on live changes.
   **mixes** the concurrent streams. Priority speakers don't apply here.
 - The 30-second TX cap applies in both modes; the server enforces the same
   invariants regardless of client behavior.
+
+**Roger beeps on full-duplex.** The normal take-floor and clear-floor beeps,
+and the priority roger, are suppressed on full-duplex channels — they assume a
+single speaker owns the channel, which doesn't hold when everyone can talk at
+once. Two cues still play regardless of duplex mode: the broadcast roger
+(three-step falling tone at the start of a global broadcast) and the preempted
+bump (you were cut off by a broadcast). See the Global Broadcast section for
+broadcast behaviour on full-duplex channels.
+
+### Voice activation (VOX)
+
+VOX lets the mic open automatically when you speak, without holding PTT. It is
+available on **full-duplex channels only** — on a half-duplex channel the
+setting is ignored and PTT works normally.
+
+**Enabling VOX**
+
+In **Settings → Audio**, toggle **VOICE ACTIV.** on. The toggle is off by
+default. When on and you are on a full-duplex channel, the mic gate opens
+whenever your voice crosses the sensitivity threshold and closes a short time
+after you stop speaking.
+
+**Sensitivity and the live indicator**
+
+The **VOX SENSITIVITY** slider (0–100%) sets how eager the gate is: higher =
+opens on quieter or softer speech. Internally it maps to a VAD probability
+threshold (`1.0 − sensitivity`, clamped between 0.15 and 0.90). While VOX is
+enabled, a small dot appears beside the input level meter in Settings and lights
+up whenever your voice crosses the current threshold — use it to tune the slider
+before you transmit live.
+
+The VAD is the same voice-activity estimate that drives noise suppression, so
+steady background noise (fans, HVAC) is filtered out before the gate sees the
+signal.
+
+**Hangover**
+
+A ~300 ms hangover (30 × 10 ms frames) prevents the gate from cutting out
+between words: the mic stays open until the VAD has been below the threshold
+for that many consecutive frames. Brief pauses mid-sentence don't interrupt
+your transmission.
+
+**PTT override**
+
+Holding the physical PTT key (or any configured PTT binding) while VOX is on
+takes precedence: the key keeps the mic open regardless of the VOX gate state,
+and VOX won't close the mic while a PTT key is held.
+
+**Broadcast interaction**
+
+An incoming global broadcast suppresses VOX for its duration — the gate is
+forced closed so you cannot accidentally transmit over a fleet-wide
+announcement. VOX resumes automatically when the broadcast ends.
 
 ### The admin panel
 
@@ -789,6 +847,24 @@ this is by design.
 Another connected client already holds the global-broadcast capability. Only one
 client may hold it at a time. Revoke it from the current holder first (member
 context menu → **Revoke broadcast**), then grant it to the new client.
+
+### VOX doesn't open my mic
+
+Check each of these in order:
+
+1. **Full-duplex channel required.** VOX is ignored on half-duplex channels. Confirm the channel badge shows **FULL** (the admin must have enabled full-duplex in the Channels view, and the server's full-duplex toggle must be on in Server Config).
+2. **VOICE ACTIV. must be on.** Open Settings → Audio and confirm the toggle is enabled.
+3. **Sensitivity may be too low.** The live dot beside the input level meter in Settings lights when your voice would cross the current threshold. If it doesn't light when you speak, raise the VOX SENSITIVITY slider.
+4. **A broadcast is in flight.** VOX is suppressed for the duration of a global broadcast; it resumes automatically when the broadcast ends.
+
+### I hear no beeps when someone keys up on this channel
+
+On a full-duplex channel the normal take-floor, clear-floor, and priority roger
+beeps are suppressed — they assume a single floor owner, which doesn't apply when
+multiple members can transmit simultaneously. Two cues still play on full-duplex:
+the broadcast roger (three-step falling tone) and the preempted bump (you were
+cut off by a broadcast). If you're on a half-duplex channel and still hear no
+beeps, check Settings → Audio → BEEP VOLUME.
 
 ### `cargo build` fails with "could not find `protoc`"
 

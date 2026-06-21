@@ -1587,8 +1587,8 @@ mod beep_tests {
         // Fill near the cap with a marker value, then push fresh audio
         // that tips it over. The retained window must be the *newest*
         // audio (the catch-up discards the stale front).
-        push_voice(&buf, 1, &vec![1i16; VOICE_MAX_SAMPLES - 10]);
-        push_voice(&buf, 1, &vec![2i16; 100]);
+        push_voice(&buf, 1, &[1i16; VOICE_MAX_SAMPLES - 10]);
+        push_voice(&buf, 1, &[2i16; 100]);
         let guard = buf.lock().unwrap();
         let sb = guard.sender_buf(1).unwrap();
         assert_eq!(sb.len(), VOICE_TARGET_SAMPLES);

@@ -400,6 +400,31 @@ mod tests {
     }
 
     #[test]
+    fn vox_defaults_off_and_round_trips() {
+        // Absent keys (every pre-VOX config) must default to off with the
+        // mid-range sensitivity, so upgrading from an older config silently
+        // opts out of VOX.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.audio.vox_enabled, "VOX must default off");
+        assert_eq!(
+            cfg.audio.vox_sensitivity,
+            default_vox_sensitivity(),
+            "VOX sensitivity must default to 0.5"
+        );
+
+        // An explicit enabled + custom sensitivity round-trips through TOML.
+        let raw = "[audio]\nvox_enabled = true\nvox_sensitivity = 0.75\n";
+        let cfg: Config = toml::from_str(raw).unwrap();
+        assert!(cfg.audio.vox_enabled);
+        assert!((cfg.audio.vox_sensitivity - 0.75).abs() < 1e-6);
+
+        let s = toml::to_string(&cfg).unwrap();
+        let back: Config = toml::from_str(&s).unwrap();
+        assert!(back.audio.vox_enabled);
+        assert!((back.audio.vox_sensitivity - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
     fn freq_hotkeys_round_trip() {
         use crate::hotkey::Input;
         let mut hk = HotkeyConfig::default();
@@ -654,6 +679,19 @@ pub struct AudioConfig {
     /// either subtle or extreme.
     #[serde(default = "default_dirty_amount")]
     pub output_dirty_amount: f32,
+    /// Voice-activated transmit (VOX). When `true` and the channel is
+    /// full-duplex, the mic opens automatically when speech is detected
+    /// (via the DSP's VAD estimate) instead of requiring a held PTT key.
+    /// On half-duplex channels this flag is ignored entirely. Default
+    /// `false` — opt-in only.
+    #[serde(default)]
+    pub vox_enabled: bool,
+    /// VOX sensitivity, `[0.0, 1.0]`. Higher value = more sensitive (opens
+    /// on quieter/softer speech). Mapped to a VAD threshold in the mic loop
+    /// as `threshold = (1.0 - sensitivity).clamp(0.15, 0.90)`. Default `0.5`
+    /// (threshold 0.5 — mid-range, requires clearly audible speech).
+    #[serde(default = "default_vox_sensitivity")]
+    pub vox_sensitivity: f32,
 }
 
 fn default_gain() -> f32 {
@@ -668,6 +706,10 @@ fn default_dirty_amount() -> f32 {
     0.6
 }
 
+fn default_vox_sensitivity() -> f32 {
+    0.5
+}
+
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
@@ -680,6 +722,8 @@ impl Default for AudioConfig {
             agc: true,
             output_dirty: false,
             output_dirty_amount: default_dirty_amount(),
+            vox_enabled: false,
+            vox_sensitivity: default_vox_sensitivity(),
         }
     }
 }

@@ -843,6 +843,7 @@ impl Signaling for SignalingSvc {
                         // speaker.
                         priority: false,
                         broadcast: false,
+                        display_name: String::new(),
                     })),
                 };
                 let _ = tx.send(backfill).await;
@@ -885,6 +886,7 @@ impl Signaling for SignalingSvc {
                         sequence: 0,
                         priority: false,
                         broadcast: true,
+                        display_name: String::new(),
                     })),
                 })
                 .await;
@@ -945,6 +947,7 @@ impl Signaling for SignalingSvc {
                                 sequence: 0,
                                 priority: false,
                                 broadcast: true,
+                                display_name: String::new(),
                             })),
                         };
                         for tx in bcast_txs {
@@ -1005,6 +1008,7 @@ impl Signaling for SignalingSvc {
                     sequence: 0,
                     priority: false,
                     broadcast: true,
+                    display_name: String::new(),
                 })),
             };
             for tx in &broadcast_teardown_txs {
@@ -1202,6 +1206,7 @@ impl Signaling for SignalingSvc {
                                 // State-sync backfill — not a live grant.
                                 priority: false,
                                 broadcast: false,
+                                display_name: String::new(),
                             })),
                         })
                         .await;
@@ -1228,6 +1233,7 @@ impl Signaling for SignalingSvc {
                                 sequence: 0,
                                 priority: false,
                                 broadcast: true,
+                                display_name: String::new(),
                             })),
                         };
                         let _ = tx.send(bcast_evt).await;
@@ -1292,16 +1298,18 @@ impl Signaling for SignalingSvc {
                 // before any .await on channel sends (the existing discipline
                 // throughout this file).
                 enum BroadcastWork {
-                    // (broadcaster_id, cut_holders: Vec<(holder_id, room_txs)>,
-                    //  all_recipient_txs)
+                    // (broadcaster_id, broadcaster_name, cut_holders:
+                    //  Vec<(holder_id, room_txs)>, all_recipient_txs)
                     Begin {
                         broadcaster_id: String,
+                        broadcaster_name: String,
                         cut_holders: Vec<(String, Vec<mpsc::Sender<Event>>)>,
                         all_txs: Vec<mpsc::Sender<Event>>,
                     },
-                    // (broadcaster_id, all_recipient_txs)
+                    // (broadcaster_id, broadcaster_name, all_recipient_txs)
                     End {
                         broadcaster_id: String,
+                        broadcaster_name: String,
                         all_txs: Vec<mpsc::Sender<Event>>,
                     },
                     Noop,
@@ -1362,8 +1370,15 @@ impl Signaling for SignalingSvc {
                                 .filter_map(|(_, c)| c.events_tx.clone())
                                 .collect();
 
+                            let broadcaster_name = registry
+                                .clients
+                                .get(&evt.client_id)
+                                .map(|c| c.display_name.clone())
+                                .unwrap_or_default();
+
                             BroadcastWork::Begin {
                                 broadcaster_id: evt.client_id.clone(),
+                                broadcaster_name,
                                 cut_holders,
                                 all_txs,
                             }
@@ -1381,8 +1396,14 @@ impl Signaling for SignalingSvc {
                                 .iter()
                                 .filter_map(|(_, c)| c.events_tx.clone())
                                 .collect();
+                            let broadcaster_name = registry
+                                .clients
+                                .get(&evt.client_id)
+                                .map(|c| c.display_name.clone())
+                                .unwrap_or_default();
                             BroadcastWork::End {
                                 broadcaster_id: evt.client_id.clone(),
+                                broadcaster_name,
                                 all_txs,
                             }
                         } else {
@@ -1394,6 +1415,7 @@ impl Signaling for SignalingSvc {
                 match work {
                     BroadcastWork::Begin {
                         broadcaster_id,
+                        broadcaster_name,
                         cut_holders,
                         all_txs,
                     } => {
@@ -1407,14 +1429,17 @@ impl Signaling for SignalingSvc {
                                     sequence: 0,
                                     priority: false,
                                     broadcast: false,
+                                    display_name: String::new(),
                                 })),
                             };
                             for tx in &room_txs {
                                 let _ = tx.send(cut_evt.clone()).await;
                             }
                         }
-                        // Notify all (non-broadcaster) clients that the
-                        // broadcast started.
+                        // Notify all clients that the broadcast started.
+                        // display_name carries the broadcaster's callsign so
+                        // listeners on other frequencies can show it even
+                        // without the broadcaster in their roster.
                         let bcast_start = Event {
                             event: Some(event::Event::Ptt(PttEvent {
                                 client_id: broadcaster_id,
@@ -1422,6 +1447,7 @@ impl Signaling for SignalingSvc {
                                 sequence: evt.sequence,
                                 priority: false,
                                 broadcast: true,
+                                display_name: broadcaster_name,
                             })),
                         };
                         for tx in all_txs {
@@ -1430,9 +1456,12 @@ impl Signaling for SignalingSvc {
                     }
                     BroadcastWork::End {
                         broadcaster_id,
+                        broadcaster_name,
                         all_txs,
                     } => {
                         // Notify all clients the broadcast ended.
+                        // display_name still carries the callsign so clients
+                        // can correlate the end event with the active indicator.
                         let bcast_end = Event {
                             event: Some(event::Event::Ptt(PttEvent {
                                 client_id: broadcaster_id,
@@ -1440,6 +1469,7 @@ impl Signaling for SignalingSvc {
                                 sequence: evt.sequence,
                                 priority: false,
                                 broadcast: true,
+                                display_name: broadcaster_name,
                             })),
                         };
                         for tx in all_txs {
@@ -1592,6 +1622,7 @@ impl Signaling for SignalingSvc {
                     sequence: evt.sequence,
                     priority,
                     broadcast: false,
+                    display_name: String::new(),
                 })),
             };
 
@@ -1630,6 +1661,7 @@ impl Signaling for SignalingSvc {
                             sequence: 0,
                             priority: false,
                             broadcast: true,
+                            display_name: String::new(),
                         })),
                     })
                     .await;
@@ -1806,6 +1838,7 @@ pub(crate) fn remove_from_room(
                 sequence: 0,
                 priority: false,
                 broadcast: false,
+                display_name: String::new(),
             })),
         })
     } else {

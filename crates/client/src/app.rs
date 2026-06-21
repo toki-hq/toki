@@ -470,7 +470,14 @@ impl TokiApp {
         let holder = s.holder.clone();
         let is_transmitting = self_id.is_some() && holder.as_deref() == self_id.as_deref();
         let holder_name = if let Some(h) = &holder {
-            s.members.get(h).cloned().unwrap_or_else(|| h.clone())
+            // For a global broadcast the talker is usually on another
+            // frequency (not in our roster), so prefer the callsign the
+            // server stamped on the event; otherwise resolve from roster.
+            s.broadcast_talker
+                .clone()
+                .filter(|_| s.broadcast_active)
+                .or_else(|| s.members.get(h).cloned())
+                .unwrap_or_else(|| h.clone())
         } else {
             String::new()
         };

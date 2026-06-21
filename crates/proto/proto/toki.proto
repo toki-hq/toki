@@ -324,6 +324,16 @@ message PttEvent {
   // release (pressed = false is still flagged broadcast=true during a
   // broadcast teardown so clients can clear the broadcast indicator).
   bool broadcast = 5;
+  // The talker's callsign (display name) at the time of the event.
+  // Populated by the server primarily for *global broadcast* events
+  // (broadcast = true), where listeners on other frequencies don't have
+  // the broadcaster in their local roster and so can't resolve the name
+  // from client_id alone. Empty when the server didn't supply a name
+  // (e.g. ordinary per-room PTT, where every recipient already has the
+  // talker in roster); clients fall back to their roster lookup, then to
+  // the client_id, when this is empty. Additive/optional — older clients
+  // ignore it.
+  string display_name = 6;
 }
 
 message PttAck {}

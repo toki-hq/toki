@@ -168,6 +168,7 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
                     sequence: 0,
                     priority: false,
                     broadcast: true,
+                    display_name: String::new(),
                 })),
             };
             for tx in &b.broadcast_release_txs {
@@ -192,6 +193,7 @@ async fn reap_once(registry: &SharedRegistry, timeout: Duration, audit: &AuditSi
                 sequence: 0,
                 priority: false,
                 broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in &b.recipients {

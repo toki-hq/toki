@@ -355,6 +355,7 @@ async fn handle_cmd(
                 st.members.clear();
                 st.holder = None;
                 st.broadcast_active = false;
+                st.broadcast_talker = None;
                 st.self_id = None;
                 st.frequency = None;
                 st.channel_name = None;
@@ -900,6 +901,7 @@ impl Session {
                             if st.holder.as_deref() == Some(l.client_id.as_str()) {
                                 st.holder = None;
                                 st.broadcast_active = false;
+                                st.broadcast_talker = None;
                             }
                             st.log(format!("← {name} left"));
                         }
@@ -928,17 +930,34 @@ impl Session {
                                 // the UI can tint it distinctly. Set on a broadcast
                                 // press; always cleared when the floor frees.
                                 st.broadcast_active = new_holder.is_some() && p.broadcast;
+                                // Stash the broadcaster's callsign (server-stamped
+                                // on the event) so the indicator shows the name even
+                                // though they're not in our roster; cleared with the
+                                // floor.
+                                st.broadcast_talker = if st.broadcast_active {
+                                    Some(p.display_name.clone()).filter(|s| !s.is_empty())
+                                } else {
+                                    None
+                                };
                                 let acquired = !was_held && new_holder.is_some();
                                 let released = was_held && new_holder.is_none();
                                 // Takeover: a different member seized a floor
                                 // that was already held (preemption).
                                 let took_over =
                                     was_held && new_holder.is_some() && new_holder != prev_holder;
-                                let name = st
-                                    .members
-                                    .get(&p.client_id)
-                                    .cloned()
-                                    .unwrap_or_else(|| p.client_id.clone());
+                                // Prefer the callsign the server stamped on
+                                // the event (set for global broadcasts, where
+                                // the talker may be on another frequency and
+                                // thus absent from our roster); fall back to the
+                                // roster, then to the raw id.
+                                let name = if !p.display_name.is_empty() {
+                                    p.display_name.clone()
+                                } else {
+                                    st.members
+                                        .get(&p.client_id)
+                                        .cloned()
+                                        .unwrap_or_else(|| p.client_id.clone())
+                                };
                                 (acquired, released, took_over, prev_holder, name)
                             };
 
@@ -1552,6 +1571,9 @@ impl Session {
             // Normal PTT is never a broadcast; the server is the arbiter
             // for the fan-out flag.
             broadcast: false,
+            // Client→server: the server stamps the authoritative callsign
+            // on its fan-out, so we send empty.
+            display_name: String::new(),
         };
         if let Err(e) = self.ptt_tx.send(evt).await {
             warn!(error = %e, "ptt send failed");
@@ -1601,6 +1623,8 @@ impl Session {
             priority: false,
             // This is the broadcast flag the server routes fleet-wide.
             broadcast: true,
+            // Client→server: server stamps the authoritative callsign.
+            display_name: String::new(),
         };
         if let Err(e) = self.ptt_tx.send(evt).await {
             warn!(error = %e, "broadcast ptt send failed");

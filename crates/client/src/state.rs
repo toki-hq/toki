@@ -36,6 +36,12 @@ pub struct ClientState {
     /// instead of the normal busy colour. Tracks `holder`: when `holder`
     /// is `None` this is always `false`.
     pub broadcast_active: bool,
+    /// The broadcaster's callsign while `broadcast_active`, taken from the
+    /// `display_name` the server stamps on the broadcast `PttEvent`. The
+    /// broadcaster reaches every frequency, so they're usually NOT in our
+    /// roster — this carries their name so the indicator shows the callsign
+    /// rather than a raw id. `None` when no broadcast is in flight.
+    pub broadcast_talker: Option<String>,
     /// client_ids an operator has server-side muted, for the roster
     /// badge. Populated from `MuteChanged` events; pruned when a member
     /// leaves. Our own id appears here when *we're* muted (the runtime

@@ -190,6 +190,7 @@ impl AdminApi {
                     sequence: 0,
                     priority: false,
                     broadcast: true,
+                    display_name: String::new(),
                 })),
             };
             for tx in &bcast_teardown_txs {
@@ -209,6 +210,7 @@ impl AdminApi {
                 sequence: 0,
                 priority: false,
                 broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in recipients {
@@ -813,6 +815,7 @@ impl Admin for AdminApi {
                                 sequence: 0,
                                 priority: false,
                                 broadcast: false,
+                                display_name: String::new(),
                             })),
                         })
                         .await;
@@ -1052,6 +1055,7 @@ impl Admin for AdminApi {
                     sequence: 0,
                     priority: false,
                     broadcast: true,
+                    display_name: String::new(),
                 })),
             };
             for tx in &bcast_teardown_txs {
@@ -1166,6 +1170,7 @@ impl Admin for AdminApi {
                 sequence: 0,
                 priority: false,
                 broadcast: false,
+                display_name: String::new(),
             })),
         });
         for tx in recipients {
@@ -1286,6 +1291,7 @@ impl Admin for AdminApi {
                     sequence: 0,
                     priority: false,
                     broadcast: false,
+                    display_name: String::new(),
                 })),
             });
             for tx in recipients {
